@@ -7,23 +7,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-STATIC_DIR = BASE_DIR / "static"
 
 from app.article_grouper import group_articles
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
 from app.models import Article, ArticleGroup, FeedStatus
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+STATIC_DIR = str(BASE_DIR / "static")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -188,7 +189,7 @@ async def manual_refresh():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return JSONResponse({"status": "ok"})
 
 
 # ── Static files ─────────────────────────────────────────────────────────────
@@ -198,4 +199,4 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))

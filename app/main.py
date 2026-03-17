@@ -63,7 +63,7 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    await refresh_news()
+    asyncio.create_task(refresh_news())
     scheduler.add_job(refresh_news, "interval", minutes=10)
     scheduler.start()
     yield

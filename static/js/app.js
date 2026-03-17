@@ -210,6 +210,53 @@ function setupModal() {
     document.addEventListener("keydown", (e) => {
         if (e.key === "Escape") closeModal();
     });
+    setupModalSwipe();
+}
+
+function setupModalSwipe() {
+    const content = $(".modal-content");
+    let startY = 0;
+    let currentY = 0;
+    let isDragging = false;
+
+    const isMobile = () => window.innerWidth <= 480;
+
+    content.addEventListener("touchstart", (e) => {
+        if (!isMobile()) return;
+        if (content.scrollTop > 0) return;
+        const touch = e.touches[0];
+        startY = touch.clientY;
+        isDragging = true;
+        content.style.transition = "none";
+    }, { passive: true });
+
+    content.addEventListener("touchmove", (e) => {
+        if (!isDragging || !isMobile()) return;
+        const touch = e.touches[0];
+        currentY = touch.clientY - startY;
+        if (currentY < 0) { currentY = 0; return; }
+        content.style.transform = `translateY(${currentY}px)`;
+        content.style.opacity = Math.max(0.5, 1 - currentY / 400);
+    }, { passive: true });
+
+    content.addEventListener("touchend", () => {
+        if (!isDragging || !isMobile()) return;
+        isDragging = false;
+        content.style.transition = "transform 0.3s ease, opacity 0.3s ease";
+        if (currentY > 120) {
+            content.style.transform = `translateY(100%)`;
+            content.style.opacity = "0";
+            setTimeout(() => {
+                closeModal();
+                content.style.transform = "";
+                content.style.opacity = "";
+            }, 300);
+        } else {
+            content.style.transform = "";
+            content.style.opacity = "";
+        }
+        currentY = 0;
+    });
 }
 
 async function openComparison(group) {
@@ -347,7 +394,10 @@ async function openComparison(group) {
         <div class="compare-grid">${columnsHtml}</div>
     </div>`;
 
-    body.innerHTML = headerHtml + framingHtml + exclusiveHtml + coverageHtml;
+    const dragHandle = window.innerWidth <= 480
+        ? `<div class="modal-drag-handle"></div>`
+        : "";
+    body.innerHTML = dragHandle + headerHtml + framingHtml + exclusiveHtml + coverageHtml;
 }
 
 function closeModal() {

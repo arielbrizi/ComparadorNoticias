@@ -9,6 +9,10 @@ SOURCES = {
         "logo": "",
         "feeds": {
             "portada": "https://www.infobae.com/arc/outboundfeeds/rss/",
+            "politica": "https://www.infobae.com/arc/outboundfeeds/rss/category/politica/",
+            "economia": "https://www.infobae.com/arc/outboundfeeds/rss/category/economia/",
+            "sociedad": "https://www.infobae.com/arc/outboundfeeds/rss/category/sociedad/",
+            "deportes": "https://www.infobae.com/arc/outboundfeeds/rss/category/deportes/",
         },
     },
     "Clarín": {
@@ -38,14 +42,21 @@ SOURCES = {
         "logo": "",
         "feeds": {
             "portada": "https://www.pagina12.com.ar/rss/portada",
+            "politica": "https://www.pagina12.com.ar/rss/secciones/el-pais/notas",
+            "economia": "https://www.pagina12.com.ar/rss/secciones/economia/notas",
+            "sociedad": "https://www.pagina12.com.ar/rss/secciones/sociedad/notas",
+            "deportes": "https://www.pagina12.com.ar/rss/secciones/deportes/notas",
         },
     },
     "Ámbito Financiero": {
         "color": "#f4a261",
         "logo": "",
         "feeds": {
-            "economia": "https://www.ambito.com/rss/economia.xml",
-            "politica": "https://www.ambito.com/rss/politica.xml",
+            "portada": "https://www.ambito.com/rss/pages/home.xml",
+            "politica": "https://www.ambito.com/rss/pages/politica.xml",
+            "economia": "https://www.ambito.com/rss/pages/economia.xml",
+            "sociedad": "https://www.ambito.com/rss/pages/nacional.xml",
+            "deportes": "https://www.ambito.com/rss/pages/deportes.xml",
         },
     },
     "Perfil": {
@@ -53,6 +64,10 @@ SOURCES = {
         "logo": "",
         "feeds": {
             "portada": "https://www.perfil.com/feed",
+            "politica": "https://www.perfil.com/feed/politica",
+            "economia": "https://www.perfil.com/feed/economia",
+            "sociedad": "https://www.perfil.com/feed/sociedad",
+            "deportes": "https://www.perfil.com/feed/deportes",
         },
     },
     "Buenos Aires Times": {

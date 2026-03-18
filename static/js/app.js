@@ -321,47 +321,7 @@ async function openComparison(group) {
         </div>`;
     }
 
-    // ── Section 3: Exclusive content per source ──
-    let exclusiveHtml = "";
-    const sourcesWithExclusive = sources.filter(s =>
-        s.exclusive_content?.length > 0 || s.exclusive_data?.length > 0
-    );
-
-    if (sourcesWithExclusive.length > 0) {
-        const exclusiveCards = sourcesWithExclusive.map(s => {
-            let contentItems = "";
-            if (s.exclusive_content?.length) {
-                contentItems += s.exclusive_content.map(c =>
-                    `<li class="exclusive-item">${escHtml(c)}</li>`
-                ).join("");
-            }
-            if (s.exclusive_data?.length) {
-                contentItems += s.exclusive_data.map(d =>
-                    `<li class="exclusive-item exclusive-data">${escHtml(d)}</li>`
-                ).join("");
-            }
-            return `
-            <div class="exclusive-card">
-                <div class="exclusive-source">
-                    <span class="compare-source-dot" style="background:${escHtml(s.source_color)}"></span>
-                    ${escHtml(s.source)}
-                </div>
-                <ul class="exclusive-list">${contentItems}</ul>
-            </div>`;
-        }).join("");
-
-        exclusiveHtml = `
-        <div class="compare-section">
-            <h3 class="section-title">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-                Lo que destaca cada medio
-            </h3>
-            <p class="section-desc">Información que solo menciona una fuente y las otras no incluyen.</p>
-            <div class="exclusive-grid">${exclusiveCards}</div>
-        </div>`;
-    }
-
-    // ── Section 4: Full coverage side by side ──
+    // ── Section 3: Full coverage side by side ──
     const columnsHtml = sources.map(s => {
         const pubDate = s.published
             ? new Date(s.published).toLocaleString("es-AR", {
@@ -397,7 +357,7 @@ async function openComparison(group) {
     const dragHandle = window.innerWidth <= 480
         ? `<div class="modal-drag-handle"></div>`
         : "";
-    body.innerHTML = dragHandle + headerHtml + framingHtml + exclusiveHtml + coverageHtml;
+    body.innerHTML = dragHandle + headerHtml + framingHtml + coverageHtml;
 }
 
 function closeModal() {

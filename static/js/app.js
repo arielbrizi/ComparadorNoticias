@@ -11,11 +11,14 @@ let state = {
     category: "",
     multiOnly: true,
     sourceFilter: "",
+    currentView: "noticias",
+    metricsData: null,
 };
 
 // ── Init ──────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", async () => {
     setHeaderDate();
+    setupViewNav();
     setupFilters();
     setupModal();
     await loadData();
@@ -85,6 +88,261 @@ function populateFooterSources(sources) {
     $("#footer-sources").textContent = "Fuentes: " + Object.keys(sources).join(" · ");
 }
 
+// ── View navigation ───────────────────────────────────────────────────────
+function setupViewNav() {
+    $$(".view-tab").forEach(tab => {
+        tab.addEventListener("click", () => {
+            const view = tab.dataset.view;
+            if (view === state.currentView) return;
+            state.currentView = view;
+            $$(".view-tab").forEach(t => t.classList.remove("active"));
+            tab.classList.add("active");
+            switchView(view);
+        });
+    });
+}
+
+let _metricsFiltersReady = false;
+
+function switchView(view) {
+    const noticias = $("#view-noticias");
+    const metricas = $("#view-metricas");
+    const filtersBar = $("#filters-bar");
+
+    if (view === "metricas") {
+        noticias.hidden = true;
+        filtersBar.style.display = "none";
+        metricas.hidden = false;
+        if (!_metricsFiltersReady) {
+            setupMetricsFilters();
+            _metricsFiltersReady = true;
+        }
+        if (!state.metricsData) {
+            const { desde, hasta } = computeDateRange("hoy");
+            loadMetrics(desde, hasta);
+        }
+    } else {
+        metricas.hidden = true;
+        filtersBar.style.display = "";
+        noticias.hidden = false;
+    }
+}
+
+// ── Metrics ───────────────────────────────────────────────────────────────
+
+function setupMetricsFilters() {
+    $$(".date-quick-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            $$(".date-quick-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            const range = btn.dataset.range;
+            const { desde, hasta } = computeDateRange(range);
+            $("#metric-date-desde").value = desde || "";
+            $("#metric-date-hasta").value = hasta || "";
+            loadMetrics(desde, hasta);
+        });
+    });
+
+    $("#btn-apply-dates").addEventListener("click", () => {
+        $$(".date-quick-btn").forEach(b => b.classList.remove("active"));
+        const desde = $("#metric-date-desde").value || null;
+        const hasta = $("#metric-date-hasta").value || null;
+        loadMetrics(desde, hasta);
+    });
+}
+
+function computeDateRange(range) {
+    const now = new Date();
+    const fmt = (d) => d.toISOString().slice(0, 10);
+    const today = fmt(now);
+
+    switch (range) {
+        case "hoy":
+            return { desde: today, hasta: today };
+        case "7d": {
+            const d = new Date(now);
+            d.setDate(d.getDate() - 6);
+            return { desde: fmt(d), hasta: today };
+        }
+        case "30d": {
+            const d = new Date(now);
+            d.setDate(d.getDate() - 29);
+            return { desde: fmt(d), hasta: today };
+        }
+        case "todo":
+        default:
+            return { desde: null, hasta: null };
+    }
+}
+
+async function loadMetrics(desde = null, hasta = null) {
+    ["metric-first-publisher", "metric-reaction-time", "metric-exclusivity"].forEach(id => {
+        $(`#${id}`).innerHTML = `<div class="loading-state" style="padding:1.5rem"><div class="spinner"></div></div>`;
+    });
+
+    const params = new URLSearchParams();
+    if (desde) params.set("desde", desde);
+    if (hasta) params.set("hasta", hasta);
+    const qs = params.toString() ? `?${params}` : "";
+
+    try {
+        const data = await fetch(`${API}/api/metricas${qs}`).then(r => r.json());
+        state.metricsData = data;
+        renderMetricsSummary(data);
+        renderDateRangeInfo(data.date_range);
+        renderFirstPublisher(data.first_publisher_ranking);
+        renderReactionTime(data.avg_reaction_time);
+        renderExclusivity(data.exclusivity_index);
+    } catch (err) {
+        console.error("Error loading metrics:", err);
+        $(`#metric-first-publisher`).innerHTML = `<p style="color:var(--text-dim)">Error al cargar métricas</p>`;
+    }
+}
+
+function renderDateRangeInfo(range) {
+    const el = $("#date-range-info");
+    if (!range || !range.min) {
+        el.textContent = "";
+        return;
+    }
+    el.textContent = `Datos disponibles desde ${range.min} hasta ${range.max}`;
+}
+
+function renderMetricsSummary(data) {
+    $("#metrics-summary").innerHTML = `
+        <div class="metrics-summary-item"><strong>${data.multi_source_groups}</strong> noticias multi-fuente analizadas</div>
+        <div class="metrics-summary-item"><strong>${data.total_groups}</strong> grupos totales</div>
+        <div class="metrics-summary-item"><strong>${data.first_publisher_ranking.length}</strong> medios en competencia</div>
+    `;
+}
+
+function getSourceColor(sourceName) {
+    return state.sources[sourceName]?.color || "#888";
+}
+
+function renderFirstPublisher(ranking) {
+    const container = $("#metric-first-publisher");
+    if (!ranking.length) {
+        container.innerHTML = `<p style="color:var(--text-dim)">No hay datos suficientes aún</p>`;
+        return;
+    }
+
+    const medals = ["🥇", "🥈", "🥉"];
+    const podiumOrder = [1, 0, 2];
+    const top3 = ranking.slice(0, 3);
+    const rest = ranking.slice(3);
+    const maxCount = ranking[0].count;
+
+    let podioHtml = `<div class="podio-container">`;
+    podiumOrder.forEach(idx => {
+        if (idx >= top3.length) return;
+        const item = top3[idx];
+        podioHtml += `
+        <div class="podio-item">
+            <div class="podio-source">${escHtml(item.source)}</div>
+            <div class="podio-pedestal podio-pedestal-${idx + 1}">
+                <span class="podio-medal">${medals[idx]}</span>
+            </div>
+            <div class="podio-count">${item.count} veces primero</div>
+        </div>`;
+    });
+    podioHtml += `</div>`;
+
+    let restHtml = "";
+    if (rest.length) {
+        restHtml = `<div class="ranking-rest">`;
+        rest.forEach((item, i) => {
+            const pct = Math.max(8, (item.count / maxCount) * 100);
+            const color = getSourceColor(item.source);
+            restHtml += `
+            <div class="ranking-row">
+                <span class="ranking-pos">${i + 4}°</span>
+                <div class="ranking-bar-track">
+                    <div class="ranking-bar-fill" style="width:${pct}%;background:${escHtml(color)}">
+                        <span class="ranking-bar-label">${escHtml(item.source)}</span>
+                    </div>
+                </div>
+                <span class="ranking-count">${item.count}</span>
+            </div>`;
+        });
+        restHtml += `</div>`;
+    }
+
+    container.innerHTML = podioHtml + restHtml;
+}
+
+function renderReactionTime(reactions) {
+    const container = $("#metric-reaction-time");
+    if (!reactions.length) {
+        container.innerHTML = `<p style="color:var(--text-dim)">No hay datos suficientes aún</p>`;
+        return;
+    }
+
+    const maxMin = Math.max(...reactions.map(r => r.avg_minutes));
+
+    let html = `<div class="reaction-list">`;
+    reactions.forEach(r => {
+        const pct = Math.max(12, (r.avg_minutes / maxMin) * 100);
+        const color = getSourceColor(r.source);
+        const label = r.avg_minutes < 60
+            ? `${Math.round(r.avg_minutes)} min`
+            : `${(r.avg_minutes / 60).toFixed(1)}h`;
+
+        html += `
+        <div class="reaction-row">
+            <div class="reaction-source">
+                <span class="reaction-source-dot" style="background:${escHtml(color)}"></span>
+                ${escHtml(r.source)}
+            </div>
+            <div class="reaction-bar-track">
+                <div class="reaction-bar-fill" style="width:${pct}%;background:${escHtml(color)}">
+                    <span class="reaction-value">${label}</span>
+                </div>
+            </div>
+            <span class="reaction-note">${r.sample_size} noticias</span>
+        </div>`;
+    });
+    html += `</div>`;
+    container.innerHTML = html;
+}
+
+function renderExclusivity(exclusivity) {
+    const container = $("#metric-exclusivity");
+    if (!exclusivity.length) {
+        container.innerHTML = `<p style="color:var(--text-dim)">No hay datos suficientes aún</p>`;
+        return;
+    }
+
+    let html = `<div class="exclusivity-list">`;
+    exclusivity.forEach(e => {
+        const pct = Math.max(5, e.percentage);
+        const color = getSourceColor(e.source);
+
+        html += `
+        <div class="exclusivity-row">
+            <div class="exclusivity-source">
+                <span class="exclusivity-source-dot" style="background:${escHtml(color)}"></span>
+                ${escHtml(e.source)}
+            </div>
+            <div class="exclusivity-bar-track">
+                <div class="exclusivity-bar-fill" style="width:${pct}%;background:${escHtml(color)}">
+                    <span class="exclusivity-pct">${e.percentage}%</span>
+                </div>
+            </div>
+            <span class="exclusivity-detail">${e.exclusive}/${e.total}</span>
+        </div>`;
+    });
+    html += `</div>`;
+
+    html += `
+    <div class="exclusivity-legend">
+        <strong>Alta exclusividad</strong> = agenda propia, temas que otros no cubren.<br>
+        <strong>Baja exclusividad</strong> = cubre mayormente lo que cubren todos los medios.
+    </div>`;
+
+    container.innerHTML = html;
+}
+
 // ── Filters ───────────────────────────────────────────────────────────────
 function setupFilters() {
     $$("#category-filters .filter-btn").forEach(btn => {
@@ -112,7 +370,13 @@ function setupFilters() {
         btn.disabled = true;
         try {
             await fetch(`${API}/api/refresh`, { method: "POST" });
+            state.metricsData = null;
             await loadData();
+            if (state.currentView === "metricas") {
+                const desde = $("#metric-date-desde").value || null;
+                const hasta = $("#metric-date-hasta").value || null;
+                loadMetrics(desde, hasta);
+            }
         } finally {
             btn.classList.remove("spinning");
             btn.disabled = false;

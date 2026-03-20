@@ -21,6 +21,7 @@ from app.article_grouper import group_articles
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
+from app.metrics_store import init_db, query_metrics, save_group_metrics
 from app.models import Article, ArticleGroup, FeedStatus
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -51,6 +52,7 @@ async def refresh_news():
         _groups = groups
         _statuses = statuses
         _last_update = datetime.now(timezone.utc)
+    save_group_metrics(groups)
     ok = sum(1 for s in statuses if s.status == "ok")
     logger.info(
         "Listo: %d artículos, %d grupos, %d/%d feeds OK",
@@ -68,6 +70,7 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    init_db()
     asyncio.create_task(refresh_news())
     scheduler.add_job(refresh_news, "interval", minutes=10)
     scheduler.start()
@@ -177,6 +180,15 @@ async def get_status():
             "multi_source_groups": sum(1 for g in _groups if g.source_count >= 2),
             "feeds": _statuses,
         }
+
+
+@app.get("/api/metricas")
+async def get_metricas(
+    desde: str | None = Query(None, description="Fecha inicio YYYY-MM-DD"),
+    hasta: str | None = Query(None, description="Fecha fin YYYY-MM-DD"),
+):
+    """Métricas de agenda con filtro por rango de fechas (historial en SQLite)."""
+    return query_metrics(desde=desde, hasta=hasta)
 
 
 @app.post("/api/refresh")

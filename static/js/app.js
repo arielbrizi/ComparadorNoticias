@@ -264,7 +264,7 @@ function renderDateRangeInfo(range) {
 function renderMetricsSummary(data) {
     $("#metrics-summary").innerHTML = `
         <div class="metrics-summary-item"><strong>${data.multi_source_groups}</strong> noticias multi-fuente analizadas</div>
-        <div class="metrics-summary-item"><strong>${data.total_groups}</strong> grupos totales</div>
+        <div class="metrics-summary-item"><strong>${data.total_groups}</strong> noticias detectadas</div>
         <div class="metrics-summary-item"><strong>${data.first_publisher_ranking.length}</strong> medios en competencia</div>
     `;
 }

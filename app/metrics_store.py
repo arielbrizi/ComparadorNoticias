@@ -34,7 +34,7 @@ _SQLITE_PATH = Path(__file__).resolve().parent.parent / "data" / "metrics.db"
 def _get_conn():
     """Yield a DB connection with auto-commit on success, rollback on error."""
     if _use_pg:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
         try:
             yield conn
             conn.commit()

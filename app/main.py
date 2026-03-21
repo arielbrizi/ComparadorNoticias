@@ -80,7 +80,10 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    init_db()
+    try:
+        init_db()
+    except Exception as exc:
+        logger.error("init_db failed, starting without metrics persistence: %s", exc)
     asyncio.create_task(refresh_news())
     scheduler.add_job(refresh_news, "interval", minutes=10)
     scheduler.start()

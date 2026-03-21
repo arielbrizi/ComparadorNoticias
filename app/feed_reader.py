@@ -26,7 +26,12 @@ def _parse_date(entry) -> datetime | None:
         raw = entry.get(field)
         if raw:
             try:
-                return dateparser.parse(raw)
+                dt = dateparser.parse(raw)
+                if dt is None:
+                    continue
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
             except (ValueError, TypeError):
                 continue
     return None

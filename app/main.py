@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -26,6 +26,16 @@ from app.models import Article, ArticleGroup, FeedStatus
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = str(BASE_DIR / "static")
+
+ART = timezone(timedelta(hours=-3))
+
+
+def _ensure_aware(dt: datetime) -> datetime:
+    """Guarantee a datetime is timezone-aware (assume UTC if naive)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -114,6 +124,8 @@ async def get_noticias(
 async def get_grupos(
     categoria: str | None = Query(None),
     solo_multifuente: bool = Query(False, description="Solo noticias con 2+ fuentes"),
+    desde: str | None = Query(None, description="Fecha inicio YYYY-MM-DD"),
+    hasta: str | None = Query(None, description="Fecha fin YYYY-MM-DD"),
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -124,6 +136,18 @@ async def get_grupos(
         grps = [g for g in grps if g.category == categoria]
     if solo_multifuente:
         grps = [g for g in grps if g.source_count >= 2]
+    if desde:
+        desde_dt = datetime.fromisoformat(desde).replace(tzinfo=ART)
+        grps = [
+            g for g in grps
+            if g.published and _ensure_aware(g.published) >= desde_dt
+        ]
+    if hasta:
+        hasta_dt = datetime.fromisoformat(hasta).replace(tzinfo=ART) + timedelta(days=1)
+        grps = [
+            g for g in grps
+            if g.published and _ensure_aware(g.published) < hasta_dt
+        ]
 
     total = len(grps)
     grps = grps[offset : offset + limit]
@@ -173,14 +197,11 @@ async def get_categorias():
 @app.get("/api/status")
 async def get_status():
     async with _lock:
-        dates = [a.published for a in _articles if a.published]
         return {
             "last_update": _last_update.isoformat() if _last_update else None,
             "total_articles": len(_articles),
             "total_groups": len(_groups),
             "multi_source_groups": sum(1 for g in _groups if g.source_count >= 2),
-            "oldest_article": min(dates).isoformat() if dates else None,
-            "newest_article": max(dates).isoformat() if dates else None,
             "feeds": _statuses,
         }
 

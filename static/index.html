@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:wght@700;800;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/styles.css?v=6">
+    <link rel="stylesheet" href="/static/css/styles.css?v=7">
 </head>
 <body>
 
@@ -66,17 +66,19 @@
             <button class="filter-btn" data-category="sociedad">Sociedad</button>
             <button class="filter-btn" data-category="deportes">Deportes</button>
         </div>
-        <div class="filter-group">
-            <label class="toggle-label">
-                <input type="checkbox" id="toggle-multi" checked>
-                <span class="toggle-switch"></span>
-                Solo multi-fuente
-            </label>
-        </div>
-        <div class="filter-group">
-            <select id="source-filter" class="select-source">
-                <option value="">Todas las fuentes</option>
-            </select>
+        <div class="filters-right">
+            <div class="filter-group">
+                <label class="toggle-label">
+                    <input type="checkbox" id="toggle-multi" checked>
+                    <span class="toggle-switch"></span>
+                    Solo multi-fuente
+                </label>
+            </div>
+            <div class="filter-group">
+                <select id="source-filter" class="select-source">
+                    <option value="">Todas las fuentes</option>
+                </select>
+            </div>
         </div>
     </div>
 </nav>
@@ -176,6 +178,6 @@
     <p class="footer-sources" id="footer-sources"></p>
 </footer>
 
-<script src="/static/js/app.js?v=5"></script>
+<script src="/static/js/app.js?v=7"></script>
 </body>
 </html>

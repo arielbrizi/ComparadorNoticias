@@ -159,11 +159,19 @@ a:hover { text-decoration: underline; }
     padding: 0.75rem 1.5rem;
     display: flex;
     align-items: center;
-    gap: 1.5rem;
+    gap: 1rem;
     flex-wrap: wrap;
 }
 
 .filter-group { display: flex; align-items: center; gap: 0.5rem; }
+
+.filters-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-left: auto;
+    flex-wrap: wrap;
+}
 
 .filter-btn {
     background: transparent;
@@ -228,6 +236,47 @@ a:hover { text-decoration: underline; }
     cursor: pointer;
 }
 .select-source:focus { outline: none; border-color: var(--accent); }
+
+/* Date filter pills */
+.date-filter-group {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 0.2rem;
+}
+
+.date-icon {
+    color: var(--text-dim);
+    margin-left: 0.5rem;
+    flex-shrink: 0;
+    opacity: 0.6;
+}
+
+.date-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 0.3rem 0.7rem;
+    border-radius: 16px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: var(--font);
+    white-space: nowrap;
+}
+.date-btn:hover {
+    color: var(--text);
+    background: rgba(255,255,255,.06);
+}
+.date-btn.active {
+    color: var(--text);
+    background: var(--bg-raised);
+    box-shadow: 0 1px 3px rgba(0,0,0,.3);
+}
 
 /* ── Main content ─────────────────────────────────────────────────────── */
 .main-content {
@@ -351,9 +400,7 @@ a:hover { text-decoration: underline; }
     padding: 0.75rem 1.25rem;
     border-top: 1px solid var(--border);
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
+    flex-direction: column;
     gap: 0.5rem;
 }
 
@@ -368,6 +415,13 @@ a:hover { text-decoration: underline; }
     font-weight: 600;
     color: #fff;
     white-space: nowrap;
+}
+
+.card-footer-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
 }
 
 .card-compare-hint {
@@ -385,6 +439,7 @@ a:hover { text-decoration: underline; }
 .card-time {
     font-size: 0.72rem;
     color: var(--text-dim);
+    margin-left: auto;
 }
 
 /* ── Modal ────────────────────────────────────────────────────────────── */
@@ -1037,6 +1092,14 @@ a:hover { text-decoration: underline; }
         padding: 0.4rem 0.85rem;
     }
 
+    .filters-right {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem 0.75rem;
+        flex-wrap: nowrap;
+    }
+
     .metrics-grid { grid-template-columns: 1fr; }
     .metric-card-wide { grid-column: auto; }
     .podio-pedestal { width: 80px; }
@@ -1124,6 +1187,17 @@ a:hover { text-decoration: underline; }
         min-height: 36px;
         font-size: 0.78rem;
         padding: 0.4rem 0.6rem;
+        flex: 1;
+        min-width: 0;
+    }
+
+    .filters-right {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        flex-wrap: nowrap;
     }
 
     /* Cards: compact image and tighter spacing */

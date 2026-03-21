@@ -11,6 +11,7 @@ let state = {
     category: "",
     multiOnly: true,
     sourceFilter: "",
+    dateFilter: "todas",
     currentView: "noticias",
     metricsData: null,
 };
@@ -35,8 +36,14 @@ function setHeaderDate() {
 async function loadData() {
     showLoading(true);
     try {
+        const dateParams = computeNewsDateRange(state.dateFilter);
+        const gruposUrl = new URL(`${API}/api/grupos`, location.href);
+        gruposUrl.searchParams.set("limit", "200");
+        if (dateParams.desde) gruposUrl.searchParams.set("desde", dateParams.desde);
+        if (dateParams.hasta) gruposUrl.searchParams.set("hasta", dateParams.hasta);
+
         const [groupsRes, statusRes, sourcesRes] = await Promise.all([
-            fetch(`${API}/api/grupos?limit=200`).then(r => r.json()),
+            fetch(gruposUrl).then(r => r.json()),
             fetch(`${API}/api/status`).then(r => r.json()),
             fetch(`${API}/api/fuentes`).then(r => r.json()),
         ]);
@@ -60,6 +67,36 @@ async function loadData() {
     showLoading(false);
 }
 
+function computeNewsDateRange(range) {
+    const now = new Date();
+    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const today = fmt(now);
+
+    switch (range) {
+        case "hoy":
+            return { desde: today, hasta: today };
+        case "ayer": {
+            const d = new Date(now);
+            d.setDate(d.getDate() - 1);
+            const ayer = fmt(d);
+            return { desde: ayer, hasta: ayer };
+        }
+        case "3d": {
+            const d = new Date(now);
+            d.setDate(d.getDate() - 2);
+            return { desde: fmt(d), hasta: today };
+        }
+        case "7d": {
+            const d = new Date(now);
+            d.setDate(d.getDate() - 6);
+            return { desde: fmt(d), hasta: today };
+        }
+        case "todas":
+        default:
+            return { desde: null, hasta: null };
+    }
+}
+
 function showLoading(show) {
     $("#loading").style.display = show ? "flex" : "none";
 }
@@ -67,19 +104,30 @@ function showLoading(show) {
 function updateStats(status) {
     $("#stat-articles").textContent = `${status.total_articles} noticias recolectadas`;
     $("#stat-compared").textContent = `${status.multi_source_groups} noticias en 2+ medios`;
-    if (status.oldest_article && status.newest_article) {
-        const fmt = d => new Date(d).toLocaleDateString("es-AR", { day: "numeric", month: "short" });
-        const desde = fmt(status.oldest_article);
-        const hasta = fmt(status.newest_article);
-        $("#stat-dates").textContent = desde === hasta ? `Noticias del ${desde}` : `Noticias del ${desde} al ${hasta}`;
-    }
     if (status.last_update) {
         const d = new Date(status.last_update);
         $("#stat-updated").textContent = `Actualizado: ${d.toLocaleTimeString("es-AR")}`;
     }
 }
 
+function updateDateRangeStat(groups) {
+    const dates = groups.filter(g => g.published).map(g => new Date(g.published));
+    if (!dates.length) {
+        $("#stat-dates").textContent = "";
+        return;
+    }
+    const fmt = d => d.toLocaleDateString("es-AR", { day: "numeric", month: "short" });
+    const oldest = new Date(Math.min(...dates));
+    const newest = new Date(Math.max(...dates));
+    const desde = fmt(oldest);
+    const hasta = fmt(newest);
+    $("#stat-dates").textContent = desde === hasta ? `Noticias del ${desde}` : `Del ${desde} al ${hasta}`;
+}
+
+let _sourceFilterReady = false;
 function populateSourceFilter(sources) {
+    if (_sourceFilterReady) return;
+    _sourceFilterReady = true;
     const sel = $("#source-filter");
     Object.keys(sources).sort().forEach(name => {
         const opt = document.createElement("option");
@@ -415,6 +463,7 @@ function renderGroups() {
         return;
     }
 
+    updateDateRangeStat(groups);
     grid.innerHTML = groups.map(g => renderCard(g)).join("");
 
     grid.querySelectorAll(".news-card").forEach((card, i) => {
@@ -470,8 +519,10 @@ function renderCard(group) {
         </div>
         <div class="card-footer">
             <div class="source-badges">${badges}</div>
-            ${compareHint}
-            ${timeStr ? `<span class="card-time">${timeStr}</span>` : ""}
+            <div class="card-footer-meta">
+                ${compareHint}
+                ${timeStr ? `<span class="card-time">${timeStr}</span>` : ""}
+            </div>
         </div>
     </article>`;
 }

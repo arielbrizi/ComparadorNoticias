@@ -111,7 +111,8 @@ function updateStats(status) {
 }
 
 function updateDateRangeStat(groups) {
-    const dates = groups.filter(g => g.published).map(g => new Date(g.published));
+    const dates = groups
+        .flatMap(g => g.articles.filter(a => a.published).map(a => new Date(a.published)));
     if (!dates.length) {
         $("#stat-dates").textContent = "";
         return;

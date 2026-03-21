@@ -8,6 +8,7 @@ import logging
 import os
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.models import ArticleGroup
@@ -102,8 +103,36 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_me_source
             ON metric_events (source)
         """)
+        _normalize_published_to_utc(conn)
     backend = f"PostgreSQL ({DATABASE_URL.split('@')[-1]})" if _use_pg else str(_SQLITE_PATH)
     logger.info("Metrics DB ready — %s", backend)
+
+
+def _normalize_published_to_utc(conn) -> None:
+    """One-time migration: strip timezone offsets by converting to UTC naive ISO."""
+    rows = _query(conn, """
+        SELECT group_id, source, published FROM metric_events
+        WHERE published IS NOT NULL AND (published LIKE '%+%' OR published LIKE '%-%-%-%')
+    """).fetchall()
+
+    updated = 0
+    for r in rows:
+        raw = r["published"]
+        if "+" not in raw and raw.count("-") <= 2:
+            continue
+        try:
+            dt = datetime.fromisoformat(raw)
+            utc_str = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            _exec(conn, """
+                UPDATE metric_events SET published = ?
+                WHERE group_id = ? AND source = ?
+            """, (utc_str, r["group_id"], r["source"]))
+            updated += 1
+        except (ValueError, TypeError):
+            pass
+
+    if updated:
+        logger.info("Metrics: normalized %d published dates to UTC", updated)
 
 
 # ── Write ────────────────────────────────────────────────────────────────────
@@ -136,7 +165,8 @@ def save_group_metrics(groups: list[ArticleGroup]) -> int:
                 elif delta >= 0:
                     reaction = round(delta, 2)
 
-            pub_iso = a.published.isoformat() if a.published else None
+            pub_utc = a.published.astimezone(timezone.utc) if a.published else None
+            pub_iso = pub_utc.strftime("%Y-%m-%dT%H:%M:%S") if pub_utc else None
 
             rows.append((
                 g.group_id,

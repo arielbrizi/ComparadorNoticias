@@ -65,9 +65,14 @@ function showLoading(show) {
 }
 
 function updateStats(status) {
-    $("#stat-articles").textContent = `${status.total_articles} artículos`;
-    $("#stat-groups").textContent = `${status.total_groups} noticias agrupadas`;
-    $("#stat-compared").textContent = `${status.multi_source_groups} con múltiples fuentes`;
+    $("#stat-articles").textContent = `${status.total_articles} noticias recolectadas`;
+    $("#stat-compared").textContent = `${status.multi_source_groups} noticias en 2+ medios`;
+    if (status.oldest_article && status.newest_article) {
+        const fmt = d => new Date(d).toLocaleDateString("es-AR", { day: "numeric", month: "short" });
+        const desde = fmt(status.oldest_article);
+        const hasta = fmt(status.newest_article);
+        $("#stat-dates").textContent = desde === hasta ? `Noticias del ${desde}` : `Noticias del ${desde} al ${hasta}`;
+    }
     if (status.last_update) {
         const d = new Date(status.last_update);
         $("#stat-updated").textContent = `Actualizado: ${d.toLocaleTimeString("es-AR")}`;
@@ -153,7 +158,7 @@ function setupMetricsFilters() {
 
 function computeDateRange(range) {
     const now = new Date();
-    const fmt = (d) => d.toISOString().slice(0, 10);
+    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     const today = fmt(now);
 
     switch (range) {
@@ -438,6 +443,10 @@ function renderCard(group) {
         ? timeAgo(new Date(group.published))
         : "";
 
+    const dateStr = group.published
+        ? formatDate(new Date(group.published))
+        : "";
+
     const isMulti = group.source_count >= 2;
     const compareHint = isMulti
         ? `<span class="card-compare-hint">
@@ -452,7 +461,10 @@ function renderCard(group) {
     <article class="${cardClass}" data-group-id="${escHtml(group.group_id)}">
         ${img}
         <div class="card-body">
-            <span class="card-category">${escHtml(group.category)}</span>
+            <div class="card-meta">
+                <span class="card-category">${escHtml(group.category)}</span>
+                ${dateStr ? `<span class="card-date">${dateStr}</span>` : ""}
+            </div>
             <h3 class="card-title">${escHtml(group.representative_title)}</h3>
             <p class="card-summary">${escHtml(shortSummary)}</p>
         </div>
@@ -649,4 +661,18 @@ function timeAgo(date) {
     if (hours < 24) return `Hace ${hours}h`;
     if (days < 7) return `Hace ${days}d`;
     return date.toLocaleDateString("es-AR", { day: "numeric", month: "short" });
+}
+
+function formatDate(date) {
+    const now = new Date();
+    const isToday = date.toDateString() === now.toDateString();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const isYesterday = date.toDateString() === yesterday.toDateString();
+
+    const time = date.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
+
+    if (isToday) return `Hoy ${time}`;
+    if (isYesterday) return `Ayer ${time}`;
+    return date.toLocaleDateString("es-AR", { day: "numeric", month: "short" }) + ` ${time}`;
 }

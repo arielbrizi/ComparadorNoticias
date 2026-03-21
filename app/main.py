@@ -173,11 +173,14 @@ async def get_categorias():
 @app.get("/api/status")
 async def get_status():
     async with _lock:
+        dates = [a.published for a in _articles if a.published]
         return {
             "last_update": _last_update.isoformat() if _last_update else None,
             "total_articles": len(_articles),
             "total_groups": len(_groups),
             "multi_source_groups": sum(1 for g in _groups if g.source_count >= 2),
+            "oldest_article": min(dates).isoformat() if dates else None,
+            "newest_article": max(dates).isoformat() if dates else None,
             "feeds": _statuses,
         }
 

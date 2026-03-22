@@ -198,15 +198,30 @@ async def get_categorias():
 
 
 @app.get("/api/status")
-async def get_status():
+async def get_status(
+    desde: str | None = Query(None, description="Fecha inicio YYYY-MM-DD"),
+    hasta: str | None = Query(None, description="Fecha fin YYYY-MM-DD"),
+):
     async with _lock:
-        return {
-            "last_update": _last_update.isoformat() if _last_update else None,
-            "total_articles": len(_articles),
-            "total_groups": len(_groups),
-            "multi_source_groups": sum(1 for g in _groups if g.source_count >= 2),
-            "feeds": _statuses,
-        }
+        arts = list(_articles)
+        grps = list(_groups)
+
+    if desde:
+        desde_dt = datetime.fromisoformat(desde).replace(tzinfo=ART)
+        arts = [a for a in arts if a.published and _ensure_aware(a.published) >= desde_dt]
+        grps = [g for g in grps if g.published and _ensure_aware(g.published) >= desde_dt]
+    if hasta:
+        hasta_dt = datetime.fromisoformat(hasta).replace(tzinfo=ART) + timedelta(days=1)
+        arts = [a for a in arts if a.published and _ensure_aware(a.published) < hasta_dt]
+        grps = [g for g in grps if g.published and _ensure_aware(g.published) < hasta_dt]
+
+    return {
+        "last_update": _last_update.isoformat() if _last_update else None,
+        "total_articles": len(arts),
+        "total_groups": len(grps),
+        "multi_source_groups": sum(1 for g in grps if g.source_count >= 2),
+        "feeds": _statuses,
+    }
 
 
 @app.get("/api/metricas")

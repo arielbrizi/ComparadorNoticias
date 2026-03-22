@@ -11,7 +11,7 @@ let state = {
     category: "",
     multiOnly: true,
     sourceFilter: "",
-    dateFilter: "todas",
+    dateFilter: "hoy",
     currentView: "noticias",
     metricsData: null,
 };
@@ -42,14 +42,19 @@ async function loadData() {
         if (dateParams.desde) gruposUrl.searchParams.set("desde", dateParams.desde);
         if (dateParams.hasta) gruposUrl.searchParams.set("hasta", dateParams.hasta);
 
+        const statusUrl = new URL(`${API}/api/status`, location.href);
+        if (dateParams.desde) statusUrl.searchParams.set("desde", dateParams.desde);
+        if (dateParams.hasta) statusUrl.searchParams.set("hasta", dateParams.hasta);
+
         const [groupsRes, statusRes, sourcesRes] = await Promise.all([
             fetch(gruposUrl).then(r => r.json()),
-            fetch(`${API}/api/status`).then(r => r.json()),
+            fetch(statusUrl).then(r => r.json()),
             fetch(`${API}/api/fuentes`).then(r => r.json()),
         ]);
 
         state.groups = groupsRes.groups || [];
         state.sources = sourcesRes || {};
+        state.earlyFallback = !!dateParams.earlyFallback;
 
         updateStats(statusRes);
         populateSourceFilter(sourcesRes);
@@ -67,14 +72,26 @@ async function loadData() {
     showLoading(false);
 }
 
+const EARLY_HOUR_THRESHOLD = 8;
+
+function isEarlyMorning() {
+    return new Date().getHours() < EARLY_HOUR_THRESHOLD;
+}
+
 function computeNewsDateRange(range) {
     const now = new Date();
     const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     const today = fmt(now);
 
     switch (range) {
-        case "hoy":
-            return { desde: today, hasta: today };
+        case "hoy": {
+            if (isEarlyMorning()) {
+                const ayer = new Date(now);
+                ayer.setDate(ayer.getDate() - 1);
+                return { desde: fmt(ayer), hasta: today, earlyFallback: true };
+            }
+            return { desde: today, hasta: today, earlyFallback: false };
+        }
         case "ayer": {
             const d = new Date(now);
             d.setDate(d.getDate() - 1);
@@ -102,27 +119,20 @@ function showLoading(show) {
 }
 
 function updateStats(status) {
-    $("#stat-articles").textContent = `${status.total_articles} noticias recolectadas`;
-    $("#stat-compared").textContent = `${status.multi_source_groups} noticias en 2+ medios`;
+    let suffix = "";
+    if (state.dateFilter === "hoy") {
+        suffix = state.earlyFallback ? " (últimas horas)" : " hoy";
+    }
+    $("#stat-articles").textContent = `${status.total_articles} noticias recolectadas${suffix}`;
+    $("#stat-compared").textContent = `${status.multi_source_groups} noticias en 2+ medios${suffix}`;
     if (status.last_update) {
         const d = new Date(status.last_update);
         $("#stat-updated").textContent = `Actualizado: ${d.toLocaleTimeString("es-AR")}`;
     }
 }
 
-function updateDateRangeStat(groups) {
-    const dates = groups
-        .flatMap(g => g.articles.filter(a => a.published).map(a => new Date(a.published)));
-    if (!dates.length) {
-        $("#stat-dates").textContent = "";
-        return;
-    }
-    const fmt = d => d.toLocaleDateString("es-AR", { day: "numeric", month: "short" });
-    const oldest = new Date(Math.min(...dates));
-    const newest = new Date(Math.max(...dates));
-    const desde = fmt(oldest);
-    const hasta = fmt(newest);
-    $("#stat-dates").textContent = desde === hasta ? `Noticias del ${desde}` : `Del ${desde} al ${hasta}`;
+function updateDateRangeStat() {
+    $("#stat-dates").textContent = "";
 }
 
 let _sourceFilterReady = false;

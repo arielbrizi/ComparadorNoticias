@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
+import unicodedata
 from datetime import datetime, timezone
 
 import feedparser
@@ -19,6 +21,15 @@ from app.config import FETCH_TIMEOUT, MAX_ARTICLES_PER_FEED, SOURCES, USER_AGENT
 from app.models import Article, FeedStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_title(title: str) -> str:
+    """Lowercase, strip accents and punctuation for dedup comparison."""
+    text = title.lower().strip()
+    text = unicodedata.normalize("NFD", text)
+    text = re.sub(r"[\u0300-\u036f]", "", text)
+    text = re.sub(r"[^\w\s]", " ", text)
+    return " ".join(text.split())
 
 
 def _parse_date(entry) -> datetime | None:
@@ -177,15 +188,20 @@ async def fetch_all_feeds(
             all_articles.extend(articles)
             all_statuses.append(status)
 
-    # De-duplicate by link
+    # De-duplicate by link AND by (source + normalized title)
     seen_links: set[str] = set()
+    seen_source_title: set[str] = set()
     unique: list[Article] = []
     for art in all_articles:
-        if art.link and art.link not in seen_links:
+        if art.link and art.link in seen_links:
+            continue
+        st_key = f"{art.source}::{_normalize_title(art.title)}"
+        if st_key in seen_source_title:
+            continue
+        if art.link:
             seen_links.add(art.link)
-            unique.append(art)
-        elif not art.link:
-            unique.append(art)
+        seen_source_title.add(st_key)
+        unique.append(art)
 
     unique.sort(key=lambda a: a.published or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
 

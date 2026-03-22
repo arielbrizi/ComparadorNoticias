@@ -11,6 +11,7 @@ let state = {
     category: "",
     multiOnly: true,
     sourceFilter: "",
+    searchQuery: "",
     dateFilter: "hoy",
     currentView: "noticias",
     metricsData: null,
@@ -22,6 +23,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupViewNav();
     setupFilters();
     setupModal();
+    setupHeroSearch();
     await loadData();
 });
 
@@ -131,9 +133,7 @@ function updateStats(status) {
     }
 }
 
-function updateDateRangeStat() {
-    $("#stat-dates").textContent = "";
-}
+function updateDateRangeStat() {}
 
 let _sourceFilterReady = false;
 function populateSourceFilter(sources) {
@@ -154,16 +154,10 @@ function populateFooterSources(sources) {
 
 // ── View navigation ───────────────────────────────────────────────────────
 function setupViewNav() {
-    $$(".view-tab").forEach(tab => {
-        tab.addEventListener("click", () => {
-            const view = tab.dataset.view;
-            if (view === state.currentView) return;
-            state.currentView = view;
-            $$(".view-tab").forEach(t => t.classList.remove("active"));
-            tab.classList.add("active");
-            switchView(view);
-        });
-    });
+    const backBtn = $("#btn-back-home");
+    if (backBtn) {
+        backBtn.addEventListener("click", () => switchView("noticias"));
+    }
 }
 
 let _metricsFiltersReady = false;
@@ -171,11 +165,11 @@ let _metricsFiltersReady = false;
 function switchView(view) {
     const noticias = $("#view-noticias");
     const metricas = $("#view-metricas");
-    const filtersBar = $("#filters-bar");
+
+    state.currentView = view;
 
     if (view === "metricas") {
         noticias.hidden = true;
-        filtersBar.style.display = "none";
         metricas.hidden = false;
         if (!_metricsFiltersReady) {
             setupMetricsFilters();
@@ -185,9 +179,9 @@ function switchView(view) {
             const { desde, hasta } = computeDateRange("hoy");
             loadMetrics(desde, hasta);
         }
+        window.scrollTo({ top: 0, behavior: "smooth" });
     } else {
         metricas.hidden = true;
-        filtersBar.style.display = "";
         noticias.hidden = false;
     }
 }
@@ -448,6 +442,63 @@ function setupFilters() {
     });
 }
 
+// ── Hero search & action cards ────────────────────────────────────────────
+function setupHeroSearch() {
+    const input = $("#hero-search-input");
+    const clearBtn = $("#hero-search-clear");
+    let debounceTimer;
+
+    input.addEventListener("input", () => {
+        clearBtn.hidden = !input.value;
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            state.searchQuery = input.value.trim().toLowerCase();
+            renderGroups();
+        }, 250);
+    });
+
+    clearBtn.addEventListener("click", () => {
+        input.value = "";
+        clearBtn.hidden = true;
+        state.searchQuery = "";
+        renderGroups();
+        input.focus();
+    });
+
+    $$(".hero-action-card").forEach(card => {
+        card.addEventListener("click", () => {
+            const action = card.dataset.action;
+            if (action === "metricas") {
+                switchView("metricas");
+            } else {
+                showToast(actionLabels[action] || "Próximamente");
+            }
+        });
+    });
+}
+
+const actionLabels = {
+    reportes: "Reportes Comparativos — Próximamente",
+    temas: "Resumen de Temas — Próximamente",
+    semana: "Resumen de la Semana — Próximamente",
+    importante: "La noticia más importante del Día — Próximamente",
+};
+
+function showToast(msg) {
+    let toast = $("#toast-notification");
+    if (!toast) {
+        toast = document.createElement("div");
+        toast.id = "toast-notification";
+        toast.className = "toast";
+        document.body.appendChild(toast);
+    }
+    toast.textContent = msg;
+    toast.classList.remove("toast-show");
+    void toast.offsetWidth;
+    toast.classList.add("toast-show");
+    setTimeout(() => toast.classList.remove("toast-show"), 2800);
+}
+
 // ── Render Groups ─────────────────────────────────────────────────────────
 function renderGroups() {
     const grid = $("#news-grid");
@@ -462,6 +513,17 @@ function renderGroups() {
     if (state.sourceFilter) {
         groups = groups.filter(g =>
             g.articles.some(a => a.source === state.sourceFilter)
+        );
+    }
+    if (state.searchQuery) {
+        const q = state.searchQuery;
+        groups = groups.filter(g =>
+            g.representative_title.toLowerCase().includes(q) ||
+            g.articles.some(a =>
+                a.title.toLowerCase().includes(q) ||
+                a.source.toLowerCase().includes(q) ||
+                (a.summary && a.summary.toLowerCase().includes(q))
+            )
         );
     }
 

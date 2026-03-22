@@ -78,11 +78,13 @@ def save_articles_and_groups(
         for a in g.articles:
             group_id_map[a.id] = g.group_id
 
-    art_rows = []
+    art_seen: dict[str, tuple] = {}
     for a in articles:
+        if not a.id or a.id in art_seen:
+            continue
         pub_utc = a.published.astimezone(timezone.utc) if a.published else None
         pub_iso = pub_utc.strftime("%Y-%m-%dT%H:%M:%S") if pub_utc else None
-        art_rows.append((
+        art_seen[a.id] = (
             a.id,
             a.source,
             a.source_color,
@@ -94,13 +96,16 @@ def save_articles_and_groups(
             pub_iso,
             group_id_map.get(a.id, ""),
             now_iso,
-        ))
+        )
+    art_rows = list(art_seen.values())
 
-    grp_rows = []
+    grp_seen: dict[str, tuple] = {}
     for g in groups:
+        if g.group_id in grp_seen:
+            continue
         pub_utc = g.published.astimezone(timezone.utc) if g.published else None
         pub_iso = pub_utc.strftime("%Y-%m-%dT%H:%M:%S") if pub_utc else None
-        grp_rows.append((
+        grp_seen[g.group_id] = (
             g.group_id,
             g.representative_title,
             g.representative_image,
@@ -108,7 +113,8 @@ def save_articles_and_groups(
             pub_iso,
             g.source_count,
             now_iso,
-        ))
+        )
+    grp_rows = list(grp_seen.values())
 
     art_count = 0
     grp_count = 0

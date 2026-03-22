@@ -94,8 +94,8 @@ async def lifespan(_app: FastAPI):
 # ── App ──────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="Comparador de Noticias",
-    description="Agrega y compara noticias de los principales medios argentinos",
+    title="Vs News",
+    description="Más contexto, menos relato — Agrega y compara noticias de los principales medios argentinos",
     version="1.0.0",
     lifespan=lifespan,
 )

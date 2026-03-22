@@ -1,88 +1,27 @@
 """
-Persistencia de métricas — PostgreSQL (Railway / DATABASE_URL) con fallback a SQLite local.
+Persistencia de métricas — usa las utilidades de conexión de app.db.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 
+from app.db import get_conn, query, execute, is_postgres, DATABASE_URL
 from app.models import ArticleGroup
 
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-# Railway puede exponer postgres:// pero psycopg2 necesita postgresql://
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-_use_pg = bool(DATABASE_URL)
-
-if _use_pg:
-    import psycopg2
+if is_postgres():
     import psycopg2.extras
-
-_SQLITE_PATH = Path(__file__).resolve().parent.parent / "data" / "metrics.db"
-
-
-@contextmanager
-def _get_conn():
-    """Yield a DB connection with auto-commit on success, rollback on error."""
-    if _use_pg:
-        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-    else:
-        _SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(_SQLITE_PATH))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-
-def _query(conn, sql: str, params=()):
-    """Execute a SELECT and return a cursor whose rows support r['col'] access."""
-    if _use_pg:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql.replace("?", "%s"), params)
-        return cur
-    conn.row_factory = sqlite3.Row
-    return conn.execute(sql, params)
-
-
-def _exec(conn, sql: str, params=()):
-    """Execute a DDL/DML statement."""
-    if _use_pg:
-        cur = conn.cursor()
-        cur.execute(sql.replace("?", "%s"), params)
-        return cur
-    return conn.execute(sql, params)
 
 
 # ── Schema ───────────────────────────────────────────────────────────────────
 
 
 def init_db() -> None:
-    with _get_conn() as conn:
-        _exec(conn, """
+    with get_conn() as conn:
+        execute(conn, """
             CREATE TABLE IF NOT EXISTS metric_events (
                 group_id       TEXT    NOT NULL,
                 source         TEXT    NOT NULL,
@@ -95,22 +34,22 @@ def init_db() -> None:
                 PRIMARY KEY (group_id, source)
             )
         """)
-        _exec(conn, """
+        execute(conn, """
             CREATE INDEX IF NOT EXISTS idx_me_published
             ON metric_events (published)
         """)
-        _exec(conn, """
+        execute(conn, """
             CREATE INDEX IF NOT EXISTS idx_me_source
             ON metric_events (source)
         """)
         _normalize_published_to_utc(conn)
-    backend = f"PostgreSQL ({DATABASE_URL.split('@')[-1]})" if _use_pg else str(_SQLITE_PATH)
+    backend = f"PostgreSQL ({DATABASE_URL.split('@')[-1]})" if is_postgres() else "SQLite"
     logger.info("Metrics DB ready — %s", backend)
 
 
 def _normalize_published_to_utc(conn) -> None:
     """One-time migration: strip timezone offsets by converting to UTC naive ISO."""
-    rows = _query(conn, """
+    rows = query(conn, """
         SELECT group_id, source, published FROM metric_events
         WHERE published IS NOT NULL AND (published LIKE '%+%' OR published LIKE '%-%-%-%')
     """).fetchall()
@@ -123,7 +62,7 @@ def _normalize_published_to_utc(conn) -> None:
         try:
             dt = datetime.fromisoformat(raw)
             utc_str = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-            _exec(conn, """
+            execute(conn, """
                 UPDATE metric_events SET published = ?
                 WHERE group_id = ? AND source = ?
             """, (utc_str, r["group_id"], r["source"]))
@@ -182,8 +121,8 @@ def save_group_metrics(groups: list[ArticleGroup]) -> int:
     if not rows:
         return 0
 
-    with _get_conn() as conn:
-        if _use_pg:
+    with get_conn() as conn:
+        if is_postgres():
             cur = conn.cursor()
             psycopg2.extras.execute_values(
                 cur,
@@ -232,8 +171,8 @@ def query_metrics(
 
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    with _get_conn() as conn:
-        first_rows = _query(conn, f"""
+    with get_conn() as conn:
+        first_rows = query(conn, f"""
             SELECT source, COUNT(*) as cnt
             FROM metric_events
             {where_sql} {"AND" if where_clauses else "WHERE"} is_first = 1
@@ -243,7 +182,7 @@ def query_metrics(
 
         first_ranking = [{"source": r["source"], "count": r["cnt"]} for r in first_rows]
 
-        reaction_rows = _query(conn, f"""
+        reaction_rows = query(conn, f"""
             SELECT source,
                    AVG(reaction_min) as avg_min,
                    COUNT(*) as cnt
@@ -262,7 +201,7 @@ def query_metrics(
             for r in reaction_rows
         ]
 
-        total_rows = _query(conn, f"""
+        total_rows = query(conn, f"""
             SELECT source,
                    COUNT(DISTINCT group_id) as total,
                    SUM(CASE WHEN source_count = 1 THEN 1 ELSE 0 END) as exclusive
@@ -283,7 +222,7 @@ def query_metrics(
             for r in total_rows
         ]
 
-        summary = _query(conn, f"""
+        summary = query(conn, f"""
             SELECT
                 COUNT(DISTINCT group_id) as total_groups,
                 COUNT(DISTINCT CASE WHEN source_count >= 2 THEN group_id END) as multi_groups
@@ -291,7 +230,7 @@ def query_metrics(
             {where_sql}
         """, params).fetchone()
 
-        date_range = _query(conn, """
+        date_range = query(conn, """
             SELECT MIN(published) as min_date, MAX(published) as max_date
             FROM metric_events
             WHERE published IS NOT NULL

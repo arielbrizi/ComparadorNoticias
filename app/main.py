@@ -23,6 +23,12 @@ from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
 from app.metrics_store import init_db, query_metrics, save_group_metrics
 from app.models import Article, ArticleGroup, FeedStatus
+from app.news_store import (
+    init_news_tables,
+    load_groups_from_db,
+    purge_old_news,
+    save_articles_and_groups,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = str(BASE_DIR / "static")
@@ -63,6 +69,10 @@ async def refresh_news():
         _statuses = statuses
         _last_update = datetime.now(timezone.utc)
     save_group_metrics(groups)
+    try:
+        save_articles_and_groups(articles, groups)
+    except Exception as exc:
+        logger.error("Failed to persist news to DB: %s", exc)
     ok = sum(1 for s in statuses if s.status == "ok")
     logger.info(
         "Listo: %d artículos, %d grupos, %d/%d feeds OK",
@@ -80,12 +90,30 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    global _articles, _groups
     try:
         init_db()
     except Exception as exc:
         logger.error("init_db failed, starting without metrics persistence: %s", exc)
+    try:
+        init_news_tables()
+    except Exception as exc:
+        logger.error("init_news_tables failed: %s", exc)
+
+    try:
+        today = datetime.now(ART).strftime("%Y-%m-%d")
+        db_articles, db_groups = load_groups_from_db(desde=today)
+        if db_articles:
+            async with _lock:
+                _articles = db_articles
+                _groups = db_groups
+            logger.info("Loaded %d articles from DB on startup", len(db_articles))
+    except Exception as exc:
+        logger.error("Failed to load news from DB on startup: %s", exc)
+
     asyncio.create_task(refresh_news())
     scheduler.add_job(refresh_news, "interval", minutes=10)
+    scheduler.add_job(purge_old_news, "cron", hour=7, minute=0)
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)

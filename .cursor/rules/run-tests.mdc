@@ -1,0 +1,34 @@
+---
+description: Run all tests before completing any code change
+globs: 
+alwaysApply: true
+---
+
+# Testing Protocol
+
+Before completing ANY code change in this project, you MUST:
+
+1. Run the full test suite with `python -m pytest --tb=short -q`
+2. If any test fails, fix the issue before presenting the solution
+3. If you added new functionality, add corresponding tests in `tests/`
+4. If you modified existing functionality, verify existing tests still pass
+
+## Running Tests
+
+```bash
+python -m pytest --tb=short -q
+```
+
+## Test Structure
+
+- `tests/unit/` — Unit tests (pure logic, no I/O, fast)
+- `tests/integration/` — Integration tests (DB, API endpoints)
+- `tests/fixtures/` — Sample data files (RSS XML, etc.)
+- `tests/conftest.py` — Shared fixtures (`make_article`, `sample_articles`, `sample_groups`, `temp_db`)
+
+## Rules
+
+- Never skip or delete failing tests to make CI pass
+- Always add tests for new features or bug fixes
+- Keep test data in `tests/conftest.py` or `tests/fixtures/`
+- Integration tests that need DB must use the `temp_db` fixture

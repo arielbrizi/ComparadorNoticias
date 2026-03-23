@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>Test Feed</title>
+    <link>https://example.com</link>
+    <description>A test RSS feed for automated testing</description>
+    <item>
+      <title>Inflación de marzo fue del 3,5%</title>
+      <link>https://example.com/inflacion</link>
+      <description>&lt;p&gt;La inflación del mes de marzo alcanzó el 3,5 por ciento según el INDEC.&lt;/p&gt;</description>
+      <pubDate>Sun, 15 Jun 2025 12:00:00 +0000</pubDate>
+      <enclosure url="https://example.com/img.jpg" type="image/jpeg" length="12345"/>
+    </item>
+    <item>
+      <title>River venció 3-0 a Boca</title>
+      <link>https://example.com/river</link>
+      <description>River Plate goleó a Boca Juniors en el Monumental por la fecha 15.</description>
+      <pubDate>Sun, 15 Jun 2025 10:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title></title>
+      <link>https://example.com/empty</link>
+      <description>This entry has an empty title and should be skipped.</description>
+    </item>
+  </channel>
+</rss>

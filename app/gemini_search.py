@@ -37,10 +37,25 @@ def _build_context(groups: list[ArticleGroup], max_groups: int = 150) -> str:
     lines = []
     for g in groups[:max_groups]:
         sources = ", ".join(a.source for a in g.articles)
-        lines.append(
+        extra_titles = [
+            a.title for a in g.articles
+            if a.title != g.representative_title
+        ]
+        summary = ""
+        for a in g.articles:
+            if a.summary:
+                summary = a.short_summary(160)
+                break
+
+        line = (
             f"- ID:{g.group_id} | {g.representative_title} "
             f"| Cat:{g.category} | Fuentes:{sources}"
         )
+        if extra_titles:
+            line += f" | También: {'; '.join(extra_titles[:3])}"
+        if summary:
+            line += f" | Resumen: {summary}"
+        lines.append(line)
     return "\n".join(lines)
 
 

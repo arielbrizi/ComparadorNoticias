@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 _client: genai.Client | None = None
 MODEL = "gemini-3-flash-preview"
 MAX_RETRIES = 1
+GEMINI_TIMEOUT = 30
 
 _rate_limit_until: float = 0
 
@@ -93,10 +94,17 @@ async def _call_gemini(client: genai.Client, prompt: str) -> str:
     last_exc = None
     for attempt in range(1 + MAX_RETRIES):
         try:
-            response = await client.aio.models.generate_content(
-                model=MODEL, contents=prompt,
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=MODEL, contents=prompt,
+                ),
+                timeout=GEMINI_TIMEOUT,
             )
             return response.text
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"Gemini call timed out after {GEMINI_TIMEOUT}s"
+            )
         except Exception as exc:
             last_exc = exc
             wait = _parse_retry_seconds(exc)

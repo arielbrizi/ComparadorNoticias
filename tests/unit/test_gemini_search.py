@@ -1,7 +1,12 @@
-from unittest.mock import patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.gemini_search import (
+    GEMINI_TIMEOUT,
     _build_context,
+    _call_gemini,
     _clean_json_response,
     _parse_retry_seconds,
     gemini_search,
@@ -64,6 +69,36 @@ class TestParseRetrySeconds:
         exc = Exception("429 Too Many Requests")
         result = _parse_retry_seconds(exc)
         assert result == 5.0
+
+
+class TestCallGemini:
+    async def test_timeout_raises_runtime_error(self, monkeypatch):
+        monkeypatch.setattr("app.gemini_search._rate_limit_until", 0)
+        monkeypatch.setattr("app.gemini_search.GEMINI_TIMEOUT", 0.1)
+
+        async def _hang(*args, **kwargs):
+            await asyncio.sleep(300)
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = _hang
+
+        with pytest.raises(RuntimeError, match="timed out"):
+            await _call_gemini(mock_client, "test prompt")
+
+    async def test_successful_call(self, monkeypatch):
+        monkeypatch.setattr("app.gemini_search._rate_limit_until", 0)
+
+        mock_response = MagicMock()
+        mock_response.text = '{"answer": "ok"}'
+
+        async def _fast(*args, **kwargs):
+            return mock_response
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = _fast
+
+        result = await _call_gemini(mock_client, "test prompt")
+        assert result == '{"answer": "ok"}'
 
 
 class TestGeminiSearch:

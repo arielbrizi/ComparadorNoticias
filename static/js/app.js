@@ -535,17 +535,21 @@ function setupHeroSearch() {
 async function prefetchTopics() {
     if (_topicsCache || _topicsLoading) return;
     _topicsLoading = true;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
     try {
-        const resp = await fetch(`${API}/api/topics`);
+        const resp = await fetch(`${API}/api/topics`, { signal: controller.signal });
         const data = await resp.json();
         if (data.ai_available && data.topics?.length) {
             _topicsCache = data.topics;
         }
     } catch (err) {
         console.error("Failed to prefetch topics:", err);
+    } finally {
+        clearTimeout(timer);
+        _topicsLoading = false;
+        hideSuggestions();
     }
-    _topicsLoading = false;
-    hideSuggestions();
 }
 
 function showSuggestions() {
@@ -578,6 +582,7 @@ function showSuggestions() {
         box.innerHTML = `<div class="suggestions-header"><div class="ai-pulse-dot"></div> Cargando temas del día…</div>`;
         box.hidden = false;
     } else {
+        prefetchTopics();
         box.hidden = true;
     }
 }

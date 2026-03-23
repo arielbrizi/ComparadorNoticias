@@ -6,6 +6,9 @@ import respx
 
 from app.feed_reader import (
     _clean_html,
+    _extract_image,
+    _fetch_og_image,
+    _fill_missing_images,
     _make_id,
     _normalize_title,
     _parse_date,
@@ -152,3 +155,135 @@ class TestFetchSingleFeed:
                     client, "TestSource", "#000", "portada", "https://test.com/feed"
                 )
         assert len(articles) == 0
+
+
+class TestExtractImage:
+    def test_media_content(self):
+        entry = {"media_content": [{"url": "https://img.com/photo.jpg"}]}
+        assert _extract_image(entry) == "https://img.com/photo.jpg"
+
+    def test_media_thumbnail(self):
+        entry = {"media_thumbnail": [{"url": "https://img.com/thumb.jpg"}]}
+        assert _extract_image(entry) == "https://img.com/thumb.jpg"
+
+    def test_enclosure(self):
+        entry = {
+            "enclosures": [
+                {"type": "image/jpeg", "href": "https://img.com/enc.jpg"}
+            ]
+        }
+        assert _extract_image(entry) == "https://img.com/enc.jpg"
+
+    def test_img_in_content(self):
+        entry = {
+            "content": [
+                {"value": '<p>Text <img src="https://img.com/inline.jpg"/> more</p>'}
+            ]
+        }
+        assert _extract_image(entry) == "https://img.com/inline.jpg"
+
+    def test_img_in_summary_string(self):
+        entry = {"summary": '<p><img src="https://img.com/sum.jpg"/></p>'}
+        assert _extract_image(entry) == "https://img.com/sum.jpg"
+
+    def test_no_image_returns_empty(self):
+        entry = {"title": "No image here", "summary": "Plain text summary"}
+        assert _extract_image(entry) == ""
+
+    def test_priority_media_content_over_enclosure(self):
+        entry = {
+            "media_content": [{"url": "https://img.com/media.jpg"}],
+            "enclosures": [
+                {"type": "image/jpeg", "href": "https://img.com/enc.jpg"}
+            ],
+        }
+        assert _extract_image(entry) == "https://img.com/media.jpg"
+
+
+class TestFetchOgImage:
+    async def test_extracts_og_image(self):
+        html = """
+        <html><head>
+            <meta property="og:image" content="https://img.com/og.jpg"/>
+        </head><body></body></html>
+        """
+        async with respx.mock:
+            respx.get("https://example.com/article").mock(
+                return_value=httpx.Response(200, text=html)
+            )
+            async with httpx.AsyncClient() as client:
+                result = await _fetch_og_image(client, "https://example.com/article")
+        assert result == "https://img.com/og.jpg"
+
+    async def test_falls_back_to_twitter_image(self):
+        html = """
+        <html><head>
+            <meta name="twitter:image" content="https://img.com/tw.jpg"/>
+        </head><body></body></html>
+        """
+        async with respx.mock:
+            respx.get("https://example.com/article").mock(
+                return_value=httpx.Response(200, text=html)
+            )
+            async with httpx.AsyncClient() as client:
+                result = await _fetch_og_image(client, "https://example.com/article")
+        assert result == "https://img.com/tw.jpg"
+
+    async def test_returns_empty_on_http_error(self):
+        async with respx.mock:
+            respx.get("https://example.com/article").mock(
+                return_value=httpx.Response(404)
+            )
+            async with httpx.AsyncClient() as client:
+                result = await _fetch_og_image(client, "https://example.com/article")
+        assert result == ""
+
+    async def test_returns_empty_when_no_meta_tags(self):
+        html = "<html><head><title>No image</title></head><body></body></html>"
+        async with respx.mock:
+            respx.get("https://example.com/article").mock(
+                return_value=httpx.Response(200, text=html)
+            )
+            async with httpx.AsyncClient() as client:
+                result = await _fetch_og_image(client, "https://example.com/article")
+        assert result == ""
+
+
+class TestFillMissingImages:
+    async def test_fills_articles_without_images(self):
+        from app.models import Article
+
+        html = '<html><head><meta property="og:image" content="https://img.com/og.jpg"/></head></html>'
+        art = Article(
+            source="Test", title="T", link="https://example.com/a1", image=""
+        )
+        async with respx.mock:
+            respx.get("https://example.com/a1").mock(
+                return_value=httpx.Response(200, text=html)
+            )
+            async with httpx.AsyncClient() as client:
+                await _fill_missing_images(client, [art])
+        assert art.image == "https://img.com/og.jpg"
+
+    async def test_skips_articles_that_already_have_images(self):
+        from app.models import Article
+
+        art = Article(
+            source="Test",
+            title="T",
+            link="https://example.com/a1",
+            image="https://existing.com/img.jpg",
+        )
+        async with respx.mock:
+            async with httpx.AsyncClient() as client:
+                await _fill_missing_images(client, [art])
+        assert art.image == "https://existing.com/img.jpg"
+
+    async def test_skips_articles_without_link(self):
+        from app.models import Article
+
+        art = Article(source="Test", title="T", link="", image="")
+        async with respx.mock:
+            async with httpx.AsyncClient() as client:
+                await _fill_missing_images(client, [art])
+        assert art.image == ""

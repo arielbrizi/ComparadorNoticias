@@ -22,6 +22,9 @@ from app.models import Article, FeedStatus
 
 logger = logging.getLogger(__name__)
 
+OG_IMAGE_TIMEOUT = 8
+OG_IMAGE_CONCURRENCY = 10
+
 
 def _normalize_title(title: str) -> str:
     """Lowercase, strip accents and punctuation for dedup comparison."""
@@ -157,6 +160,50 @@ async def fetch_single_feed(
         return [], status
 
 
+async def _fetch_og_image(client: httpx.AsyncClient, url: str) -> str:
+    """Fetch the og:image meta tag from an article page."""
+    try:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        html = resp.text[:50_000]
+        soup = BeautifulSoup(html, "lxml")
+        tag = soup.find("meta", property="og:image") or soup.find(
+            "meta", attrs={"name": "og:image"}
+        )
+        if tag:
+            content = tag.get("content", "")
+            if content:
+                return content
+        tag_tw = soup.find("meta", attrs={"name": "twitter:image"})
+        if tag_tw:
+            content = tag_tw.get("content", "")
+            if content:
+                return content
+    except Exception:
+        pass
+    return ""
+
+
+async def _fill_missing_images(
+    client: httpx.AsyncClient,
+    articles: list[Article],
+) -> None:
+    """Best-effort: scrape og:image for articles that have no image from RSS."""
+    missing = [a for a in articles if not a.image and a.link]
+    if not missing:
+        return
+
+    sem = asyncio.Semaphore(OG_IMAGE_CONCURRENCY)
+
+    async def _resolve(art: Article) -> None:
+        async with sem:
+            img = await _fetch_og_image(client, art.link)
+            if img:
+                art.image = img
+
+    await asyncio.gather(*(_resolve(a) for a in missing))
+
+
 async def fetch_all_feeds(
     categories: list[str] | None = None,
 ) -> tuple[list[Article], list[FeedStatus]]:
@@ -202,6 +249,14 @@ async def fetch_all_feeds(
             seen_links.add(art.link)
         seen_source_title.add(st_key)
         unique.append(art)
+
+    # Fallback: scrape og:image for articles still missing images
+    async with httpx.AsyncClient(
+        timeout=OG_IMAGE_TIMEOUT,
+        headers={"User-Agent": USER_AGENT},
+        follow_redirects=True,
+    ) as client:
+        await _fill_missing_images(client, unique)
 
     unique.sort(key=lambda a: a.published or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
 

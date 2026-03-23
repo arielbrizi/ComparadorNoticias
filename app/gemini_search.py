@@ -143,6 +143,13 @@ async def gemini_search(query: str, groups: list[ArticleGroup]) -> dict:
     if not client:
         return {"ai_available": False, "error": "API key not configured"}
 
+    cache_key = query.strip().lower()
+    is_topic = cache_key in _get_cached_topic_labels()
+
+    if is_topic and cache_key in _search_cache:
+        logger.info("Search cache hit for topic: %s", query)
+        return _search_cache[cache_key]
+
     context = _build_context(groups)
     prompt = SEARCH_PROMPT.format(query=query, context=context)
 
@@ -151,6 +158,11 @@ async def gemini_search(query: str, groups: list[ArticleGroup]) -> dict:
         text = _clean_json_response(raw)
         result = json.loads(text)
         result["ai_available"] = True
+
+        if is_topic:
+            _search_cache[cache_key] = result
+            logger.info("Search result cached for topic: %s", query)
+
         return result
 
     except json.JSONDecodeError as exc:
@@ -164,7 +176,13 @@ async def gemini_search(query: str, groups: list[ArticleGroup]) -> dict:
 # ── Trending topics ──────────────────────────────────────────────────────
 
 _topics_cache: dict = {"topics": [], "ts": 0}
-TOPICS_TTL = 600  # 10 minutes
+_search_cache: dict[str, dict] = {}
+TOPICS_TTL = 3600  # 1 hour
+
+
+def _get_cached_topic_labels() -> set[str]:
+    """Return the current cached topic labels in lowercase for matching."""
+    return {t["label"].strip().lower() for t in _topics_cache["topics"] if "label" in t}
 
 TOPICS_PROMPT = """Sos un editor de un comparador de noticias argentino.
 Analizá las noticias del día y extraé los 6 temas más importantes.
@@ -208,6 +226,8 @@ async def gemini_topics(groups: list[ArticleGroup]) -> dict:
         topics = result.get("topics", [])[:6]
         _topics_cache["topics"] = topics
         _topics_cache["ts"] = now
+        _search_cache.clear()
+        logger.info("Topics regenerated — search cache cleared (%d topics)", len(topics))
         return {"topics": topics, "ai_available": True, "cached": False}
 
     except Exception as exc:

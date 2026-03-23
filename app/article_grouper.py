@@ -68,9 +68,23 @@ def _titles_similar(a: str, b: str) -> float:
     return fuzzy * (0.85 + 0.15 * jaccard)
 
 
+_DAILY_QUOTE_RE = re.compile(
+    r"(d[oó]lar|blue|cotiza|riesgo pa[ií]s|merval|acciones|bonos"
+    r"|cripto|bitcoin|soja|ma[ií]z|trigo|pesos?|moneda)",
+    re.IGNORECASE,
+)
+
+
+def _is_daily_quote(art: Article) -> bool:
+    """Detect articles about daily prices/quotes that shouldn't cross days."""
+    return bool(_DAILY_QUOTE_RE.search(art.title))
+
+
 def _time_compatible(a: Article, b: Article, max_hours: int = 48) -> bool:
     if not a.published or not b.published:
         return True
+    if _is_daily_quote(a) or _is_daily_quote(b):
+        return abs(a.published - b.published) <= timedelta(hours=14)
     return abs(a.published - b.published) <= timedelta(hours=max_hours)
 
 

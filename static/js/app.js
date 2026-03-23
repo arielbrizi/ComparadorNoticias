@@ -15,6 +15,15 @@ let state = {
     dateFilter: "hoy",
     currentView: "noticias",
     metricsData: null,
+    aiSearch: {
+        loading: false,
+        loadingHistory: false,
+        available: null,
+        summary: "",
+        relevantIds: [],
+        active: false,
+        hasResults: true,
+    },
 };
 
 // ── Init ──────────────────────────────────────────────────────────────────
@@ -443,24 +452,68 @@ function setupFilters() {
 }
 
 // ── Hero search & action cards ────────────────────────────────────────────
+let _aiSearchController = null;
+let _topicsCache = null;
+let _topicsLoading = false;
+
 function setupHeroSearch() {
     const input = $("#hero-search-input");
     const clearBtn = $("#hero-search-clear");
-    let debounceTimer;
+    const suggestions = $("#search-suggestions");
+    let localTimer;
+    let aiTimer;
 
     input.addEventListener("input", () => {
         clearBtn.hidden = !input.value;
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
+        clearTimeout(localTimer);
+        clearTimeout(aiTimer);
+        hideSuggestions();
+
+        localTimer = setTimeout(() => {
             state.searchQuery = input.value.trim().toLowerCase();
+            if (!state.aiSearch.active) renderGroups();
+        }, 200);
+
+        const raw = input.value.trim();
+        if (raw.length >= 3) {
+            aiTimer = setTimeout(() => performAISearch(raw), 600);
+        } else {
+            clearAISearch();
             renderGroups();
-        }, 250);
+        }
+    });
+
+    input.addEventListener("focus", () => {
+        if (!input.value.trim()) showSuggestions();
+    });
+
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            hideSuggestions();
+            clearTimeout(localTimer);
+            clearTimeout(aiTimer);
+            const raw = input.value.trim();
+            state.searchQuery = raw.toLowerCase();
+            if (raw.length >= 3) {
+                performAISearch(raw);
+            } else {
+                clearAISearch();
+                renderGroups();
+            }
+        }
+        if (e.key === "Escape") hideSuggestions();
+    });
+
+    document.addEventListener("click", (e) => {
+        if (!e.target.closest(".hero-input-wrap")) hideSuggestions();
     });
 
     clearBtn.addEventListener("click", () => {
         input.value = "";
         clearBtn.hidden = true;
         state.searchQuery = "";
+        clearAISearch();
         renderGroups();
         input.focus();
     });
@@ -475,6 +528,226 @@ function setupHeroSearch() {
             }
         });
     });
+
+    prefetchTopics();
+}
+
+async function prefetchTopics() {
+    if (_topicsCache || _topicsLoading) return;
+    _topicsLoading = true;
+    try {
+        const resp = await fetch(`${API}/api/topics`);
+        const data = await resp.json();
+        if (data.ai_available && data.topics?.length) {
+            _topicsCache = data.topics;
+        }
+    } catch (err) {
+        console.error("Failed to prefetch topics:", err);
+    }
+    _topicsLoading = false;
+    hideSuggestions();
+}
+
+function showSuggestions() {
+    const box = $("#search-suggestions");
+    if (!box) return;
+
+    if (_topicsCache?.length) {
+        box.innerHTML =
+            `<div class="suggestions-header">Temas del día</div>` +
+            _topicsCache.map(t =>
+                `<button class="suggestion-item" data-query="${escHtml(t.label)}">`
+                + `<span class="suggestion-emoji">${t.emoji}</span>`
+                + `<span class="suggestion-label">${escHtml(t.label)}</span>`
+                + `</button>`
+            ).join("");
+        box.hidden = false;
+
+        box.querySelectorAll(".suggestion-item").forEach(btn => {
+            btn.addEventListener("mousedown", (e) => {
+                e.preventDefault();
+                const query = btn.dataset.query;
+                const input = $("#hero-search-input");
+                input.value = query;
+                $("#hero-search-clear").hidden = false;
+                hideSuggestions();
+                performAISearch(query);
+            });
+        });
+    } else if (_topicsLoading) {
+        box.innerHTML = `<div class="suggestions-header"><div class="ai-pulse-dot"></div> Cargando temas del día…</div>`;
+        box.hidden = false;
+    } else {
+        box.hidden = true;
+    }
+}
+
+function hideSuggestions() {
+    const box = $("#search-suggestions");
+    if (box) box.hidden = true;
+}
+
+async function performAISearch(query) {
+    if (_aiSearchController) _aiSearchController.abort();
+    _aiSearchController = new AbortController();
+    const signal = _aiSearchController.signal;
+
+    state.searchQuery = query.toLowerCase();
+    state.aiSearch.loading = true;
+    state.aiSearch.loadingHistory = false;
+    state.aiSearch.active = false;
+    renderAIStatus();
+    renderAISummary();
+    renderGroups();
+
+    const dateParams = computeNewsDateRange(state.dateFilter);
+    const qEnc = encodeURIComponent(query);
+
+    // ── Phase 1: today's news ──
+    let phase1Url = `${API}/api/search?q=${qEnc}`;
+    if (dateParams.desde) phase1Url += `&desde=${dateParams.desde}`;
+    if (dateParams.hasta) phase1Url += `&hasta=${dateParams.hasta}`;
+
+    try {
+        const resp = await fetch(phase1Url, { signal });
+        const data = await resp.json();
+
+        if (data.ai_available) {
+            state.aiSearch.available = true;
+            state.aiSearch.summary = data.summary || "";
+            state.aiSearch.relevantIds = data.relevant_group_ids || [];
+            state.aiSearch.active = true;
+            state.aiSearch.hasResults = data.has_results !== false;
+        } else {
+            state.aiSearch.available = false;
+            state.aiSearch.active = false;
+        }
+    } catch (err) {
+        if (err.name === "AbortError") {
+            state.aiSearch.loading = false;
+            renderAIStatus(); renderAISummary(); renderGroups();
+            return;
+        }
+        console.error("AI search phase 1 failed:", err);
+        state.aiSearch.available = false;
+        state.aiSearch.active = false;
+    }
+
+    state.aiSearch.loading = false;
+    renderAIStatus();
+    renderAISummary();
+    renderGroups();
+
+    // ── Phase 2: older news (background) ──
+    if (signal.aborted || !dateParams.desde) return;
+
+    state.aiSearch.loadingHistory = true;
+    renderAISummary();
+
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const hastaHistory = fmt(yesterday);
+    if (dateParams.desde <= hastaHistory) {
+        state.aiSearch.loadingHistory = false;
+        renderAISummary();
+        return;
+    }
+    const phase2Url = `${API}/api/search?q=${qEnc}&hasta=${hastaHistory}`;
+
+    try {
+        const resp = await fetch(phase2Url, { signal });
+        const data = await resp.json();
+
+        if (data.ai_available && data.relevant_group_ids?.length) {
+            const existingIds = new Set(state.aiSearch.relevantIds);
+            const newIds = data.relevant_group_ids.filter(id => !existingIds.has(id));
+            if (newIds.length) {
+                state.aiSearch.relevantIds = [...state.aiSearch.relevantIds, ...newIds];
+                state.aiSearch.active = true;
+                state.aiSearch.hasResults = true;
+                renderGroups();
+            }
+        }
+    } catch (err) {
+        if (err.name !== "AbortError") {
+            console.error("AI search phase 2 failed:", err);
+        }
+    }
+
+    state.aiSearch.loadingHistory = false;
+    _aiSearchController = null;
+    renderAISummary();
+}
+
+function clearAISearch() {
+    if (_aiSearchController) { _aiSearchController.abort(); _aiSearchController = null; }
+    state.aiSearch = { loading: false, loadingHistory: false, available: null, summary: "", relevantIds: [], active: false, hasResults: true };
+    renderAIStatus();
+    renderAISummary();
+}
+
+function renderAISummary() {
+    const container = $("#ai-summary-container");
+    if (!container) return;
+
+    if (state.aiSearch.loading) {
+        container.innerHTML = `
+            <div class="ai-summary-panel ai-summary-loading">
+                <div class="ai-summary-header">
+                    <div class="ai-pulse-dot"></div>
+                    <span class="ai-summary-label">Buscando con IA…</span>
+                </div>
+            </div>`;
+        container.hidden = false;
+        return;
+    }
+
+    if (state.aiSearch.active && state.aiSearch.summary) {
+        const historyHint = state.aiSearch.loadingHistory
+            ? `<div class="ai-summary-history"><div class="ai-pulse-dot"></div> Buscando en noticias anteriores…</div>`
+            : "";
+        container.innerHTML = `
+            <div class="ai-summary-panel">
+                <div class="ai-summary-header">
+                    <svg class="ai-sparkle-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 3l1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/>
+                        <path d="M19 1l.5 2 2 .5-2 .5-.5 2-.5-2-2-.5 2-.5z" opacity=".6"/>
+                    </svg>
+                    <span class="ai-summary-label">Resumen IA</span>
+                </div>
+                <p class="ai-summary-text">${escHtml(state.aiSearch.summary)}</p>
+                ${historyHint}
+            </div>`;
+        container.hidden = false;
+    } else {
+        container.innerHTML = "";
+        container.hidden = true;
+    }
+}
+
+function renderAIStatus() {
+    const el = $("#ai-status-indicator");
+    if (!el) return;
+
+    if (state.aiSearch.loading) {
+        el.className = "ai-status ai-status-loading";
+        el.title = "IA buscando…";
+        el.innerHTML = '<div class="ai-pulse-dot-sm"></div>';
+        el.hidden = false;
+    } else if (state.aiSearch.available === false) {
+        el.className = "ai-status ai-status-off";
+        el.title = "IA desconectada";
+        el.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l22 22"/><path d="M9.5 4a8 8 0 0 1 11 11m-2 2A8 8 0 0 1 7.5 6"/></svg>`;
+        el.hidden = false;
+    } else if (state.aiSearch.available === true) {
+        el.className = "ai-status ai-status-on";
+        el.title = "IA conectada";
+        el.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/></svg>`;
+        el.hidden = false;
+    } else {
+        el.hidden = true;
+    }
 }
 
 const actionLabels = {
@@ -507,15 +780,19 @@ function renderGroups() {
     if (state.category) {
         groups = groups.filter(g => g.category === state.category);
     }
-    if (state.multiOnly) {
+    const isSearching = state.aiSearch.active || state.searchQuery;
+    if (state.multiOnly && !isSearching) {
         groups = groups.filter(g => g.source_count >= 2);
     }
-    if (state.sourceFilter) {
+    if (state.sourceFilter && !isSearching) {
         groups = groups.filter(g =>
             g.articles.some(a => a.source === state.sourceFilter)
         );
     }
-    if (state.searchQuery) {
+    if (state.aiSearch.active && state.aiSearch.relevantIds.length > 0) {
+        const ids = new Set(state.aiSearch.relevantIds);
+        groups = groups.filter(g => ids.has(g.group_id));
+    } else if (state.searchQuery) {
         const q = state.searchQuery;
         groups = groups.filter(g =>
             g.representative_title.toLowerCase().includes(q) ||
@@ -528,6 +805,10 @@ function renderGroups() {
     }
 
     if (!groups.length) {
+        if (state.aiSearch.loading) {
+            grid.innerHTML = "";
+            return;
+        }
         grid.innerHTML = `
             <div class="empty-state" style="grid-column: 1/-1">
                 <h3>No se encontraron noticias</h3>

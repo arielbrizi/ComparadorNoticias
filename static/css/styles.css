@@ -258,6 +258,17 @@ a:hover { text-decoration: underline; }
     letter-spacing: -0.015em;
 }
 
+.hero-ai-icon {
+    display: inline-block;
+    vertical-align: middle;
+    margin-left: 0.2rem;
+    margin-bottom: 0.15rem;
+    stroke: var(--accent);
+    opacity: 0.55;
+    transition: opacity 0.3s;
+}
+.hero-title:hover .hero-ai-icon { opacity: 0.85; }
+
 .hero-input-wrap {
     position: relative;
     max-width: 540px;
@@ -1515,4 +1526,161 @@ a:hover { text-decoration: underline; }
 .toast-show {
     transform: translateX(-50%) translateY(0);
     opacity: 1;
+}
+
+/* ── AI Search ─────────────────────────────────────────────────────── */
+
+/* Status indicator inside the search bar */
+.ai-status {
+    position: absolute;
+    right: 2.6rem;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    transition: all 0.3s ease;
+}
+/* Suggestions dropdown */
+.search-suggestions {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-hi);
+    border-radius: var(--radius);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    z-index: 50;
+    overflow: hidden;
+    animation: aiFadeIn 0.2s ease;
+}
+.suggestions-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1rem 0.35rem;
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+}
+.suggestion-item {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    width: 100%;
+    padding: 0.55rem 1rem;
+    background: none;
+    border: none;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s;
+}
+.suggestion-item:hover { background: rgba(255,255,255,0.05); }
+.suggestion-item:last-child { border-radius: 0 0 var(--radius) var(--radius); }
+.suggestion-emoji {
+    font-size: 1rem;
+    width: 1.4rem;
+    text-align: center;
+    flex-shrink: 0;
+}
+.suggestion-label { flex: 1; }
+
+.ai-status-on svg { stroke: var(--green); opacity: 0.8; }
+.ai-status-off {
+    cursor: help;
+}
+.ai-status-off svg { stroke: var(--red); opacity: 0.7; }
+.ai-status-loading { cursor: default; }
+
+.ai-pulse-dot-sm {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: aiPulse 1s ease-in-out infinite;
+}
+
+@keyframes aiPulse {
+    0%, 100% { opacity: 0.4; transform: scale(0.8); }
+    50%      { opacity: 1;   transform: scale(1.2); }
+}
+
+/* Summary panel */
+.ai-summary-panel {
+    max-width: 660px;
+    margin: 0 auto 1.25rem;
+    padding: 1rem 1.25rem;
+    background: linear-gradient(135deg, rgba(64, 136, 199, 0.07), rgba(64, 136, 199, 0.02));
+    border: 1px solid rgba(64, 136, 199, 0.18);
+    border-radius: var(--radius);
+    text-align: left;
+    animation: aiFadeIn 0.35s ease;
+}
+.ai-summary-loading {
+    background: linear-gradient(135deg, rgba(64, 136, 199, 0.04), transparent);
+    border-color: rgba(64, 136, 199, 0.1);
+}
+
+.ai-summary-header {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-bottom: 0.5rem;
+}
+.ai-summary-loading .ai-summary-header { margin-bottom: 0; }
+
+.ai-sparkle-icon { stroke: var(--accent); flex-shrink: 0; }
+
+.ai-summary-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+}
+
+.ai-pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: aiPulse 1s ease-in-out infinite;
+    flex-shrink: 0;
+}
+
+.ai-summary-text {
+    font-size: 0.88rem;
+    line-height: 1.6;
+    color: var(--text);
+    margin: 0;
+}
+
+.ai-summary-history {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.6rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(255,255,255,0.05);
+    font-size: 0.75rem;
+    color: var(--text-dim);
+}
+
+@keyframes aiFadeIn {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 600px) {
+    .ai-summary-panel { margin: 0 0.75rem 1rem; padding: 0.85rem 1rem; }
+    .ai-status { right: 2.2rem; }
 }

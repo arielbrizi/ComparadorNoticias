@@ -21,6 +21,7 @@ from app.article_grouper import group_articles
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
+from app.gemini_search import gemini_search, gemini_topics
 from app.metrics_store import init_db, query_metrics, save_group_metrics
 from app.models import Article, ArticleGroup, FeedStatus
 from app.news_store import (
@@ -259,6 +260,34 @@ async def get_metricas(
 ):
     """Métricas de agenda con filtro por rango de fechas (historial en SQLite)."""
     return query_metrics(desde=desde, hasta=hasta)
+
+
+@app.get("/api/search")
+async def ai_search(
+    q: str = Query(..., min_length=2, description="Search query"),
+    desde: str | None = Query(None, description="Fecha inicio YYYY-MM-DD"),
+    hasta: str | None = Query(None, description="Fecha fin YYYY-MM-DD"),
+):
+    """Semantic search powered by Gemini, with optional date filtering."""
+    async with _lock:
+        grps = list(_groups)
+
+    if desde:
+        desde_dt = datetime.fromisoformat(desde).replace(tzinfo=ART)
+        grps = [g for g in grps if g.published and _ensure_aware(g.published) >= desde_dt]
+    if hasta:
+        hasta_dt = datetime.fromisoformat(hasta).replace(tzinfo=ART) + timedelta(days=1)
+        grps = [g for g in grps if g.published and _ensure_aware(g.published) < hasta_dt]
+
+    return await gemini_search(q, grps)
+
+
+@app.get("/api/topics")
+async def trending_topics():
+    """Top topics of the day, powered by Gemini (cached 10 min)."""
+    async with _lock:
+        grps = list(_groups)
+    return await gemini_topics(grps)
 
 
 @app.post("/api/refresh")

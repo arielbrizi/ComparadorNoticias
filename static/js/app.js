@@ -455,6 +455,12 @@ function setupFilters() {
 let _aiSearchController = null;
 let _topicsCache = null;
 let _topicsLoading = false;
+let _topicsCacheTs = 0;
+const _topicsTTL = 55 * 60 * 1000; // 55 min (slightly less than server's 1h TTL)
+
+function _isTopicsCacheValid() {
+    return _topicsCache && (Date.now() - _topicsCacheTs) < _topicsTTL;
+}
 
 function setupHeroSearch() {
     const input = $("#hero-search-input");
@@ -530,10 +536,19 @@ function setupHeroSearch() {
     });
 
     prefetchTopics();
+
+    setInterval(() => {
+        if (!_isTopicsCacheValid() && !_topicsLoading) {
+            _topicsCache = null;
+            _topicsCacheTs = 0;
+            prefetchTopics();
+        }
+    }, 10 * 60 * 1000); // check every 10 min
 }
 
 async function prefetchTopics() {
-    if (_topicsCache || _topicsLoading) return;
+    if (_topicsLoading) return;
+    if (_isTopicsCacheValid()) return;
     _topicsLoading = true;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
@@ -542,13 +557,17 @@ async function prefetchTopics() {
         const data = await resp.json();
         if (data.ai_available && data.topics?.length) {
             _topicsCache = data.topics;
+            _topicsCacheTs = Date.now();
         }
     } catch (err) {
         console.error("Failed to prefetch topics:", err);
     } finally {
         clearTimeout(timer);
         _topicsLoading = false;
-        hideSuggestions();
+        const input = $("#hero-search-input");
+        if (input && document.activeElement === input && !input.value.trim()) {
+            showSuggestions();
+        }
     }
 }
 
@@ -556,7 +575,7 @@ function showSuggestions() {
     const box = $("#search-suggestions");
     if (!box) return;
 
-    if (_topicsCache?.length) {
+    if (_isTopicsCacheValid() && _topicsCache?.length) {
         box.innerHTML =
             `<div class="suggestions-header">Temas del día</div>` +
             _topicsCache.map(t =>
@@ -582,8 +601,9 @@ function showSuggestions() {
         box.innerHTML = `<div class="suggestions-header"><div class="ai-pulse-dot"></div> Cargando temas del día…</div>`;
         box.hidden = false;
     } else {
+        box.innerHTML = `<div class="suggestions-header"><div class="ai-pulse-dot"></div> Cargando temas del día…</div>`;
+        box.hidden = false;
         prefetchTopics();
-        box.hidden = true;
     }
 }
 
@@ -617,6 +637,11 @@ async function performAISearch(query) {
         const resp = await fetch(phase1Url, { signal });
         const data = await resp.json();
 
+        // Si el usuario cerró la búsqueda (X) o hubo un abort, no pisar el estado limpio
+        if (signal.aborted) {
+            return;
+        }
+
         if (data.ai_available) {
             state.aiSearch.available = true;
             state.aiSearch.summary = data.summary || "";
@@ -636,6 +661,10 @@ async function performAISearch(query) {
         console.error("AI search phase 1 failed:", err);
         state.aiSearch.available = false;
         state.aiSearch.active = false;
+    }
+
+    if (signal.aborted) {
+        return;
     }
 
     state.aiSearch.loading = false;
@@ -663,6 +692,10 @@ async function performAISearch(query) {
     try {
         const resp = await fetch(phase2Url, { signal });
         const data = await resp.json();
+
+        if (signal.aborted) {
+            return;
+        }
 
         if (data.ai_available && data.relevant_group_ids?.length) {
             const existingIds = new Set(state.aiSearch.relevantIds);
@@ -752,6 +785,9 @@ function renderAIStatus() {
         el.hidden = false;
     } else {
         el.hidden = true;
+        el.className = "ai-status";
+        el.removeAttribute("title");
+        el.innerHTML = "";
     }
 }
 

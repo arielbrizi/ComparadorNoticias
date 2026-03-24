@@ -290,7 +290,7 @@ a:hover { text-decoration: underline; }
     background: var(--bg-raised);
     border: 1px solid var(--border-hi);
     border-radius: var(--radius);
-    padding: 0.8rem 2.6rem;
+    padding: 0.8rem 4rem 0.8rem 2.6rem;
     font-family: var(--font);
     font-size: 0.88rem;
     color: var(--text);
@@ -320,6 +320,35 @@ a:hover { text-decoration: underline; }
     transition: all 0.2s;
 }
 .hero-input-clear:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+
+.hero-ai-badge {
+    position: absolute;
+    right: 0.7rem;
+    top: 50%;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.2rem 0.5rem 0.2rem 0.35rem;
+    border-radius: 6px;
+    background: linear-gradient(135deg, rgba(64,136,199,0.12) 0%, rgba(100,80,200,0.10) 100%);
+    border: 1px solid rgba(64,136,199,0.18);
+    color: var(--accent);
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    opacity: 0.55;
+    transition: opacity 0.3s;
+}
+.hero-ai-badge svg {
+    stroke: var(--accent);
+    opacity: 0.85;
+}
+.hero-input:focus ~ .hero-ai-badge { opacity: 0.85; }
+.hero-input-clear:not([hidden]) ~ .hero-ai-badge { display: none; }
+.hero-input-clear:not([hidden]) ~ .ai-status { right: 3.2rem; }
+.ai-status:not([hidden]) ~ .hero-ai-badge { display: none; }
 
 .hero-actions-wrap { position: relative; }
 
@@ -1683,4 +1712,5 @@ a:hover { text-decoration: underline; }
 @media (max-width: 600px) {
     .ai-summary-panel { margin: 0 0.75rem 1rem; padding: 0.85rem 1rem; }
     .ai-status { right: 2.2rem; }
+    .hero-input-clear:not([hidden]) ~ .ai-status { right: 2.8rem; }
 }

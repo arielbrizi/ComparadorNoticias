@@ -1365,7 +1365,7 @@ a:hover { text-decoration: underline; }
 
     .hero-search { padding: 1.25rem 0 1rem; margin-bottom: 0.75rem; }
     .hero-title { font-size: 1.05rem; margin-bottom: 0.85rem; }
-    .hero-input { font-size: 0.85rem; padding: 0.7rem 2.4rem; }
+    .hero-input { font-size: 0.85rem; padding: 0.7rem 3.8rem 0.7rem 2.4rem; }
     .hero-action-card { min-width: 110px; width: 110px; }
     .hero-action-icon svg { width: 20px; height: 20px; }
     .hero-action-label { font-size: 0.65rem; }

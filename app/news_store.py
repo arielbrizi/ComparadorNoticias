@@ -302,6 +302,116 @@ def load_groups_from_db(
     return all_articles, all_groups
 
 
+# ── Text search ──────────────────────────────────────────────────────────────
+
+
+def text_search_groups(
+    search_text: str,
+    limit: int = 20,
+) -> list[ArticleGroup]:
+    """Search articles/groups by title and summary using SQL LIKE.
+
+    Returns reconstructed ArticleGroup objects for matches, sorted by
+    source_count desc then published desc.
+    """
+    tokens = [t.strip() for t in search_text.split() if len(t.strip()) >= 2]
+    if not tokens:
+        return []
+
+    like_clauses: list[str] = []
+    params: list[str] = []
+    placeholder = "?" if not is_postgres() else "%s"
+    for token in tokens:
+        like_clauses.append(
+            f"(a.title LIKE {placeholder} OR a.summary LIKE {placeholder})"
+        )
+        pat = f"%{token}%"
+        params.extend([pat, pat])
+
+    where_sql = " AND ".join(like_clauses)
+
+    with get_conn() as conn:
+        rows = query(conn, f"""
+            SELECT DISTINCT a.group_id
+            FROM articles a
+            WHERE {where_sql} AND a.group_id IS NOT NULL AND a.group_id != ''
+        """, params).fetchall()
+
+    group_ids = [r["group_id"] for r in rows]
+    if not group_ids:
+        return []
+
+    placeholders = ", ".join([placeholder] * len(group_ids))
+
+    with get_conn() as conn:
+        art_rows = query(conn, f"""
+            SELECT a.id, a.source, a.source_color, a.title, a.summary,
+                   a.link, a.image, a.category, a.published, a.group_id
+            FROM articles a
+            WHERE a.group_id IN ({placeholders})
+            ORDER BY a.published DESC
+        """, group_ids).fetchall()
+
+        grp_rows = query(conn, f"""
+            SELECT group_id, representative_title, representative_image,
+                   category, published, source_count
+            FROM article_groups
+            WHERE group_id IN ({placeholders})
+        """, group_ids).fetchall()
+
+    groups_map: dict[str, list[Article]] = {}
+    for r in art_rows:
+        pub = None
+        if r["published"]:
+            try:
+                pub = datetime.fromisoformat(r["published"]).replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                pass
+        article = Article(
+            id=r["id"],
+            source=r["source"],
+            source_color=r["source_color"] or "",
+            title=r["title"],
+            summary=r["summary"] or "",
+            link=r["link"] or "",
+            image=r["image"] or "",
+            category=r["category"] or "portada",
+            published=pub,
+        )
+        gid = r["group_id"]
+        if gid:
+            groups_map.setdefault(gid, []).append(article)
+
+    grp_meta = {r["group_id"]: r for r in grp_rows}
+
+    result: list[ArticleGroup] = []
+    for gid in group_ids:
+        members = groups_map.get(gid, [])
+        meta = grp_meta.get(gid)
+        if not members or not meta:
+            continue
+        pub = None
+        if meta["published"]:
+            try:
+                pub = datetime.fromisoformat(meta["published"]).replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                pass
+        result.append(ArticleGroup(
+            group_id=gid,
+            representative_title=meta["representative_title"],
+            representative_image=meta["representative_image"] or "",
+            category=meta["category"] or "portada",
+            published=pub,
+            articles=sorted(members, key=lambda a: a.source),
+        ))
+
+    result.sort(key=lambda g: (
+        -g.source_count,
+        -(g.published.timestamp() if g.published else 0),
+    ))
+    return result[:limit]
+
+
 # ── Purge ────────────────────────────────────────────────────────────────────
 
 

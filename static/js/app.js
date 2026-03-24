@@ -697,22 +697,14 @@ async function performAISearch(query) {
     renderAISummary();
     renderGroups();
 
-    const dateParams = computeNewsDateRange(state.dateFilter);
     const qEnc = encodeURIComponent(query);
-
-    // ── Phase 1: today's news ──
-    let phase1Url = `${API}/api/search?q=${qEnc}`;
-    if (dateParams.desde) phase1Url += `&desde=${dateParams.desde}`;
-    if (dateParams.hasta) phase1Url += `&hasta=${dateParams.hasta}`;
+    const searchUrl = `${API}/api/search?q=${qEnc}`;
 
     try {
-        const resp = await fetch(phase1Url, { signal });
+        const resp = await fetch(searchUrl, { signal });
         const data = await resp.json();
 
-        // Si el usuario cerró la búsqueda (X) o hubo un abort, no pisar el estado limpio
-        if (signal.aborted) {
-            return;
-        }
+        if (signal.aborted) return;
 
         if (data.ai_available) {
             state.aiSearch.available = true;
@@ -721,6 +713,10 @@ async function performAISearch(query) {
             state.aiSearch.active = true;
             state.aiSearch.hasResults = data.has_results !== false;
             state.aiSearch.provider = data.ai_provider || "";
+
+            if (data.matched_groups?.length) {
+                _mergeMatchedGroups(data.matched_groups);
+            }
         } else {
             state.aiSearch.available = false;
             state.aiSearch.active = false;
@@ -731,64 +727,28 @@ async function performAISearch(query) {
             renderAIStatus(); renderAISummary(); renderGroups();
             return;
         }
-        console.error("AI search phase 1 failed:", err);
+        console.error("AI search failed:", err);
         state.aiSearch.available = false;
         state.aiSearch.active = false;
     }
 
-    if (signal.aborted) {
-        return;
-    }
+    if (signal.aborted) return;
 
     state.aiSearch.loading = false;
+    _aiSearchController = null;
     renderAIStatus();
     renderAISummary();
     renderGroups();
+}
 
-    // ── Phase 2: older news (background) ──
-    if (signal.aborted || !dateParams.desde) return;
-
-    state.aiSearch.loadingHistory = true;
-    renderAISummary();
-
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    const hastaHistory = fmt(yesterday);
-    if (dateParams.desde <= hastaHistory) {
-        state.aiSearch.loadingHistory = false;
-        renderAISummary();
-        return;
-    }
-    const phase2Url = `${API}/api/search?q=${qEnc}&hasta=${hastaHistory}`;
-
-    try {
-        const resp = await fetch(phase2Url, { signal });
-        const data = await resp.json();
-
-        if (signal.aborted) {
-            return;
-        }
-
-        if (data.ai_available && data.relevant_group_ids?.length) {
-            const existingIds = new Set(state.aiSearch.relevantIds);
-            const newIds = data.relevant_group_ids.filter(id => !existingIds.has(id));
-            if (newIds.length) {
-                state.aiSearch.relevantIds = [...state.aiSearch.relevantIds, ...newIds];
-                state.aiSearch.active = true;
-                state.aiSearch.hasResults = true;
-                renderGroups();
-            }
-        }
-    } catch (err) {
-        if (err.name !== "AbortError") {
-            console.error("AI search phase 2 failed:", err);
+function _mergeMatchedGroups(matchedGroups) {
+    const existingIds = new Set(state.groups.map(g => g.group_id));
+    for (const g of matchedGroups) {
+        if (!existingIds.has(g.group_id)) {
+            state.groups.push(g);
+            existingIds.add(g.group_id);
         }
     }
-
-    state.aiSearch.loadingHistory = false;
-    _aiSearchController = null;
-    renderAISummary();
 }
 
 function clearAISearch() {

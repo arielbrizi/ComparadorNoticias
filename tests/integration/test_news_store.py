@@ -6,6 +6,7 @@ from app.news_store import (
     load_groups_from_db,
     purge_old_news,
     save_articles_and_groups,
+    text_search_groups,
 )
 
 
@@ -69,3 +70,30 @@ class TestNewsStore:
         with get_conn() as conn:
             rows = query(conn, "SELECT COUNT(*) as cnt FROM articles").fetchone()
             assert rows["cnt"] == len(sample_articles)
+
+    def test_text_search_finds_matching_articles(self, sample_articles, sample_groups):
+        save_articles_and_groups(sample_articles, sample_groups)
+        results = text_search_groups("inflación INDEC")
+        assert len(results) >= 1
+        assert any("inflación" in g.representative_title.lower() for g in results)
+
+    def test_text_search_no_results(self, sample_articles, sample_groups):
+        save_articles_and_groups(sample_articles, sample_groups)
+        results = text_search_groups("tema inexistente xyz123")
+        assert len(results) == 0
+
+    def test_text_search_partial_match(self, sample_articles, sample_groups):
+        save_articles_and_groups(sample_articles, sample_groups)
+        results = text_search_groups("dólar blue")
+        assert len(results) >= 1
+        assert any("dólar" in g.representative_title.lower() for g in results)
+
+    def test_text_search_empty_query(self, sample_articles, sample_groups):
+        save_articles_and_groups(sample_articles, sample_groups)
+        results = text_search_groups("")
+        assert len(results) == 0
+
+    def test_text_search_respects_limit(self, sample_articles, sample_groups):
+        save_articles_and_groups(sample_articles, sample_groups)
+        results = text_search_groups("inflación", limit=1)
+        assert len(results) <= 1

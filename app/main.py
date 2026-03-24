@@ -33,6 +33,7 @@ from app.news_store import (
     load_groups_from_db,
     purge_old_news,
     save_articles_and_groups,
+    text_search_groups,
 )
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -61,6 +62,15 @@ _groups: list[ArticleGroup] = []
 _statuses: list[FeedStatus] = []
 _last_update: datetime | None = None
 _lock = asyncio.Lock()
+
+
+def _db_text_search(query: str, limit: int = 20) -> list[ArticleGroup]:
+    """Fallback text search in DB when AI finds no results."""
+    try:
+        return text_search_groups(query, limit=limit)
+    except Exception as exc:
+        logger.warning("DB text search failed: %s", exc)
+        return []
 
 
 async def refresh_news():
@@ -269,28 +279,36 @@ async def get_metricas(
 @app.get("/api/search")
 async def ai_search(
     q: str = Query(..., min_length=2, description="Search query"),
-    desde: str | None = Query(None, description="Fecha inicio YYYY-MM-DD"),
-    hasta: str | None = Query(None, description="Fecha fin YYYY-MM-DD"),
 ):
-    """Semantic search powered by AI (Gemini/Groq), with optional date filtering."""
+    """Semantic search powered by AI (Gemini/Groq).
+
+    Searches ALL in-memory groups regardless of date so the AI can find
+    articles from any day within the retention window.
+    """
     async with _lock:
         grps = list(_groups)
-
-    if desde:
-        desde_dt = datetime.fromisoformat(desde).replace(tzinfo=ART)
-        grps = [g for g in grps if g.published and _ensure_aware(g.published) >= desde_dt]
-    if hasta:
-        hasta_dt = datetime.fromisoformat(hasta).replace(tzinfo=ART) + timedelta(days=1)
-        grps = [g for g in grps if g.published and _ensure_aware(g.published) < hasta_dt]
 
     result = await ai_news_search(q, grps)
 
     ids = set(result.get("relevant_group_ids", []))
+    by_id = {g.group_id: g for g in grps}
+
     if ids:
-        by_id = {g.group_id: g for g in grps}
         result["matched_groups"] = [
             by_id[gid].model_dump(mode="json") for gid in ids if gid in by_id
         ]
+
+    if not ids or not result.get("matched_groups"):
+        db_groups = _db_text_search(q)
+        existing = {g["group_id"] for g in result.get("matched_groups", [])}
+        for g in db_groups:
+            if g.group_id not in existing:
+                result.setdefault("matched_groups", []).append(
+                    g.model_dump(mode="json")
+                )
+                result.setdefault("relevant_group_ids", []).append(g.group_id)
+        if result.get("matched_groups") and not result.get("has_results", False):
+            result["has_results"] = True
 
     return result
 

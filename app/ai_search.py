@@ -255,11 +255,11 @@ async def ai_news_search(query: str, groups: list[ArticleGroup]) -> dict:
         logger.info("Search cache hit for topic: %s", query)
         return _search_cache[cache_key]
 
-    context = _build_context(groups)
+    context = _build_context(groups, max_groups=150)
     prompt = SEARCH_PROMPT.format(query=query, context=context)
 
     try:
-        raw, provider = await _call_ai(prompt)
+        raw, provider = await _call_ai_search(prompt, query, groups)
         text = _clean_json_response(raw)
         result = json.loads(text)
         result["ai_available"] = True
@@ -277,6 +277,36 @@ async def ai_news_search(query: str, groups: list[ArticleGroup]) -> dict:
     except Exception as exc:
         logger.error("AI search failed: %s", exc)
         return {"ai_available": False, "error": str(exc)}
+
+
+async def _call_ai_search(
+    prompt: str, query: str, groups: list[ArticleGroup],
+) -> tuple[str, str]:
+    """Try Gemini with full context; fall back to Groq with a right-sized prompt."""
+    gemini_ok = _get_gemini_client() is not None
+    groq_ok = _get_groq_client() is not None
+
+    if not gemini_ok and not groq_ok:
+        raise RuntimeError("No AI provider configured")
+
+    if gemini_ok:
+        try:
+            text = await _call_gemini(prompt, timeout=GEMINI_TIMEOUT)
+            return text, "Gemini"
+        except Exception as exc:
+            if not groq_ok:
+                raise
+            logger.warning("Gemini failed (%s), falling back to Groq", exc)
+
+    prompt_overhead = len(SEARCH_PROMPT.format(query=query, context=""))
+    groq_context_budget = GROQ_MAX_PROMPT_CHARS - prompt_overhead - 100
+    groq_context = _build_context(
+        groups, max_groups=150, max_chars=max(groq_context_budget, 2000),
+    )
+    groq_prompt = SEARCH_PROMPT.format(query=query, context=groq_context)
+
+    text = await _call_groq(groq_prompt, timeout=60)
+    return text, "Groq"
 
 
 # ── Trending topics ──────────────────────────────────────────────────────

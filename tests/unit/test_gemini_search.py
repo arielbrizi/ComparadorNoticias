@@ -8,6 +8,7 @@ from app.gemini_search import (
     _build_context,
     _call_gemini,
     _clean_json_response,
+    gemini_top_story,
     _parse_retry_seconds,
     gemini_search,
     gemini_topics,
@@ -167,4 +168,61 @@ class TestGeminiWeeklySummary:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.setattr("app.gemini_search._client", None)
         result = await gemini_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
+        assert result["ai_available"] is False
+
+
+class TestGeminiTopStory:
+    async def test_returns_unavailable_without_api_key(self, sample_groups, monkeypatch):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr("app.gemini_search._client", None)
+        result = await gemini_top_story(sample_groups, "2026-03-24")
+        assert result["ai_available"] is False
+        assert result["story"] is None
+
+    async def test_returns_none_story_for_no_groups(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        monkeypatch.setattr("app.gemini_search._client", MagicMock())
+        result = await gemini_top_story([], "2026-03-24")
+        assert result["ai_available"] is True
+        assert result["story"] is None
+        assert result["date"] == "2026-03-24"
+
+    async def test_cache_hit(self, sample_groups, monkeypatch):
+        import time
+        top = sample_groups[0]
+        monkeypatch.setattr("app.gemini_search._topstory_cache", {
+            "data": {
+                "ai_available": True,
+                "story": {
+                    "title": "Test editorial", "emoji": "🔥",
+                    "summary": "Resumen test", "key_points": ["Punto 1"],
+                    "original_title": top.representative_title,
+                    "image": "", "sources": ["Clarín"], "articles": [],
+                    "source_count": 2, "category": "portada",
+                    "published": None, "group_id": top.group_id,
+                },
+                "date": "2026-03-24",
+            },
+            "ts": time.time(),
+            "cache_key": f"2026-03-24_{top.group_id}",
+        })
+        result = await gemini_top_story(sample_groups, "2026-03-24")
+        assert result["cached"] is True
+        assert result["story"]["title"] == "Test editorial"
+
+    async def test_cache_miss_different_day(self, sample_groups, monkeypatch):
+        import time
+        top = sample_groups[0]
+        monkeypatch.setattr("app.gemini_search._topstory_cache", {
+            "data": {
+                "ai_available": True,
+                "story": {"title": "Yesterday", "emoji": "📰"},
+                "date": "2026-03-23",
+            },
+            "ts": time.time(),
+            "cache_key": f"2026-03-23_{top.group_id}",
+        })
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr("app.gemini_search._client", None)
+        result = await gemini_top_story(sample_groups, "2026-03-24")
         assert result["ai_available"] is False

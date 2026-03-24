@@ -1889,6 +1889,206 @@ a:hover { text-decoration: underline; }
     .weekly-title { font-size: 1.25rem; }
 }
 
+/* ── Top Story View ───────────────────────────────────────────────── */
+
+.topstory-view {
+    padding: 2rem 1.5rem;
+    max-width: 1100px;
+    margin: 0 auto;
+}
+.topstory-header {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+.topstory-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.8rem;
+    font-weight: 900;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+}
+.topstory-title svg {
+    stroke: var(--accent);
+    flex-shrink: 0;
+}
+.topstory-subtitle {
+    color: var(--text-dim);
+    font-size: 0.9rem;
+    margin-top: 0.3rem;
+    font-style: italic;
+}
+
+.topstory-hero {
+    max-width: 900px;
+    margin: 0 auto;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-hi);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+.topstory-hero-image {
+    width: 100%;
+    height: 420px;
+    object-fit: cover;
+    display: block;
+}
+.topstory-hero-image-placeholder {
+    width: 100%;
+    height: 180px;
+    background: linear-gradient(135deg, rgba(64,136,199,0.08) 0%, rgba(100,80,200,0.06) 100%);
+}
+.topstory-hero-body {
+    padding: 2rem 2.5rem 2.5rem;
+}
+
+.topstory-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+}
+.topstory-category {
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+}
+.topstory-source-count {
+    font-weight: 500;
+}
+.topstory-time {
+    opacity: 0.7;
+}
+
+.topstory-emoji {
+    font-size: 2rem;
+    display: block;
+    margin-bottom: 0.4rem;
+}
+
+.topstory-headline {
+    font-family: 'Playfair Display', serif;
+    font-size: 2rem;
+    font-weight: 900;
+    color: var(--text);
+    line-height: 1.2;
+    margin-bottom: 0.6rem;
+}
+
+.topstory-original-title {
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    font-style: italic;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.topstory-summary {
+    font-family: 'Libre Baskerville', serif;
+    font-size: 1.05rem;
+    line-height: 1.8;
+    color: var(--text-secondary);
+    margin-bottom: 1.5rem;
+}
+
+.topstory-key-points {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+.topstory-key-points li {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    font-size: 0.92rem;
+    line-height: 1.5;
+    color: var(--text);
+    padding: 0.65rem 1rem;
+    background: rgba(64, 136, 199, 0.06);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.topstory-sources-section,
+.topstory-articles-section {
+    margin-top: 1.5rem;
+}
+.topstory-section-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    margin-bottom: 0.6rem;
+}
+
+.topstory-articles-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+}
+.topstory-article-link {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.7rem 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    text-decoration: none;
+    transition: background 0.15s;
+}
+.topstory-article-link:hover {
+    background: rgba(255,255,255,0.03);
+}
+.topstory-article-link:last-child {
+    border-bottom: none;
+}
+.topstory-article-source {
+    font-weight: 600;
+    font-size: 0.82rem;
+    white-space: nowrap;
+    min-width: 80px;
+}
+.topstory-article-title {
+    flex: 1;
+    font-size: 0.88rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+.topstory-article-link svg {
+    flex-shrink: 0;
+    stroke: var(--text-dim);
+    opacity: 0.5;
+}
+
+@media (max-width: 768px) {
+    .topstory-hero-image { height: 280px; }
+    .topstory-hero-body { padding: 1.5rem; }
+    .topstory-headline { font-size: 1.5rem; }
+    .topstory-summary { font-size: 0.95rem; }
+    .topstory-title { font-size: 1.4rem; }
+}
+@media (max-width: 480px) {
+    .topstory-view { padding: 1rem 0.75rem; }
+    .topstory-hero-image { height: 200px; }
+    .topstory-hero-body { padding: 1rem; }
+    .topstory-headline { font-size: 1.25rem; }
+    .topstory-summary { font-size: 0.9rem; }
+    .topstory-title { font-size: 1.2rem; }
+    .topstory-article-source { min-width: 60px; font-size: 0.75rem; }
+    .topstory-article-title { font-size: 0.82rem; }
+}
+
 /* ── AI Search ─────────────────────────────────────────────────────── */
 
 /* Status indicator inside the search bar */

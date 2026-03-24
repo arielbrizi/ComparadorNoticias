@@ -25,7 +25,7 @@ from app.article_grouper import group_articles
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
-from app.gemini_search import gemini_search, gemini_topics, gemini_weekly_summary
+from app.gemini_search import gemini_search, gemini_topics, gemini_top_story, gemini_weekly_summary
 from app.metrics_store import init_db, query_metrics, save_group_metrics
 from app.models import Article, ArticleGroup, FeedStatus
 from app.news_store import (
@@ -320,6 +320,17 @@ async def weekly_summary():
     if len(groups) > 200:
         groups = groups[:200]
     return await gemini_weekly_summary(groups, week_start, week_end)
+
+
+@app.get("/api/top-story")
+async def top_story():
+    """La noticia más importante del día, generada por IA."""
+    today = datetime.now(ART).strftime("%Y-%m-%d")
+    _articles_db, groups = load_groups_from_db(desde=today, hasta=today)
+    if not groups:
+        async with _lock:
+            groups = list(_groups)
+    return await gemini_top_story(groups, today)
 
 
 @app.post("/api/refresh")

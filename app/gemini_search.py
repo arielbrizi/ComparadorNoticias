@@ -353,3 +353,130 @@ async def gemini_weekly_summary(
     except Exception as exc:
         logger.error("Gemini weekly summary failed: %s", exc)
         return {"themes": [], "ai_available": False, "error": str(exc)}
+
+
+# ── Top story of the day ──────────────────────────────────────────────
+
+_topstory_cache: dict = {"data": None, "ts": 0, "cache_key": ""}
+TOPSTORY_TTL = 10800  # 3 hours
+TOPSTORY_TIMEOUT = 60
+
+TOPSTORY_PROMPT = """Sos el editor jefe de un diario argentino. Te presento la noticia con mayor \
+cobertura del día (la que más medios cubrieron). Generá un análisis editorial profundo.
+
+Noticia principal:
+- Título representativo: {title}
+- Fuentes que la cubrieron: {sources}
+- Categoría: {category}
+
+Titulares de cada medio:
+{headlines}
+
+Resúmenes disponibles:
+{summaries}
+
+Respondé ÚNICAMENTE con JSON válido (sin markdown, sin bloques de código):
+{{
+  "title": "Título editorial impactante y periodístico (máximo 15 palabras)",
+  "emoji": "emoji representativo",
+  "summary": "Análisis editorial profundo de 4-6 oraciones en español argentino. \
+Explicá el contexto, por qué es la noticia más importante, qué implica y hacia dónde puede ir. \
+Tono profesional, informativo y neutro.",
+  "key_points": [
+    "Punto clave 1 (oración corta y directa)",
+    "Punto clave 2",
+    "Punto clave 3"
+  ]
+}}
+
+Reglas:
+- El título debe ser editorial, no repetir el título original.
+- El summary debe ser un análisis, no una mera repetición de los titulares.
+- Entre 3 y 5 key_points, cada uno una oración corta y directa.
+- Todo en español argentino, profesional y neutro.
+- Devolvé SOLO el JSON."""
+
+
+async def gemini_top_story(
+    groups: list[ArticleGroup],
+    today: str,
+) -> dict:
+    """Generate an editorial analysis of the day's top story (most covered)."""
+    if not groups:
+        return {"ai_available": True, "story": None, "date": today}
+
+    top = groups[0]
+    cache_key = f"{today}_{top.group_id}"
+    now = time.time()
+    if (
+        _topstory_cache["data"]
+        and _topstory_cache["cache_key"] == cache_key
+        and (now - _topstory_cache["ts"]) < TOPSTORY_TTL
+    ):
+        return {**_topstory_cache["data"], "cached": True}
+
+    client = _get_client()
+    if not client:
+        return {"ai_available": False, "story": None, "date": today}
+
+    headlines = "\n".join(
+        f"- {a.source}: \"{a.title}\"" for a in top.articles
+    )
+    summaries = "\n".join(
+        f"- {a.source}: {a.short_summary(200)}" for a in top.articles if a.summary
+    )
+    sources_str = ", ".join(a.source for a in top.articles)
+
+    prompt = TOPSTORY_PROMPT.format(
+        title=top.representative_title,
+        sources=sources_str,
+        category=top.category,
+        headlines=headlines,
+        summaries=summaries or "(sin resúmenes disponibles)",
+    )
+
+    try:
+        saved_timeout = GEMINI_TIMEOUT
+        import app.gemini_search as _self
+        _self.GEMINI_TIMEOUT = TOPSTORY_TIMEOUT
+        try:
+            raw = await _call_gemini(client, prompt)
+        finally:
+            _self.GEMINI_TIMEOUT = saved_timeout
+
+        text = _clean_json_response(raw)
+        result = json.loads(text)
+
+        articles_data = [
+            {"source": a.source, "title": a.title, "link": a.link, "source_color": a.source_color}
+            for a in top.articles
+        ]
+
+        story = {
+            "title": result.get("title", top.representative_title),
+            "emoji": result.get("emoji", ""),
+            "summary": result.get("summary", ""),
+            "key_points": result.get("key_points", [])[:5],
+            "original_title": top.representative_title,
+            "image": top.representative_image,
+            "sources": sorted({a.source for a in top.articles}),
+            "articles": articles_data,
+            "source_count": top.source_count,
+            "category": top.category,
+            "published": top.published.isoformat() if top.published else None,
+            "group_id": top.group_id,
+        }
+
+        payload = {"ai_available": True, "story": story, "date": today}
+        _topstory_cache["data"] = payload
+        _topstory_cache["ts"] = now
+        _topstory_cache["cache_key"] = cache_key
+        logger.info("Top story generated: %s (%d sources)", story["title"][:60], top.source_count)
+        return payload
+
+    except json.JSONDecodeError as exc:
+        logger.error("Gemini top story returned invalid JSON: %s — raw: %s", exc, text[:300])
+        return {"ai_available": False, "story": None, "date": today, "error": "Invalid AI response"}
+    except Exception as exc:
+        logger.error("Gemini top story failed: %s", exc)
+        return {"ai_available": False, "story": None, "date": today, "error": str(exc)}

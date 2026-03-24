@@ -197,3 +197,20 @@ class TestApiWeeklySummary:
         assert "week_end" in data
         assert len(data["week_start"]) == 10
         assert len(data["week_end"]) == 10
+
+
+class TestApiTopStory:
+    async def test_returns_structure_without_api_key(self, client):
+        resp = await client.get("/api/top-story")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "ai_available" in data
+        assert "story" in data
+        assert "date" in data
+        assert data["ai_available"] is False
+
+    async def test_returns_date_field(self, client):
+        resp = await client.get("/api/top-story")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["date"]) == 10

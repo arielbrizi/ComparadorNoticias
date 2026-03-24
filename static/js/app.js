@@ -163,14 +163,10 @@ function populateFooterSources(sources) {
 
 // ── View navigation ───────────────────────────────────────────────────────
 function setupViewNav() {
-    const backBtn = $("#btn-back-home");
-    if (backBtn) {
-        backBtn.addEventListener("click", () => switchView("noticias"));
-    }
-    const backBtnWeekly = $("#btn-back-home-weekly");
-    if (backBtnWeekly) {
-        backBtnWeekly.addEventListener("click", () => switchView("noticias"));
-    }
+    ["btn-back-home", "btn-back-home-weekly", "btn-back-home-topstory"].forEach(id => {
+        const btn = $(`#${id}`);
+        if (btn) btn.addEventListener("click", () => switchView("noticias"));
+    });
 }
 
 let _metricsFiltersReady = false;
@@ -179,12 +175,14 @@ function switchView(view) {
     const noticias = $("#view-noticias");
     const metricas = $("#view-metricas");
     const semana = $("#view-semana");
+    const importante = $("#view-importante");
 
     state.currentView = view;
 
     noticias.hidden = true;
     metricas.hidden = true;
     if (semana) semana.hidden = true;
+    if (importante) importante.hidden = true;
 
     if (view === "metricas") {
         metricas.hidden = false;
@@ -200,6 +198,10 @@ function switchView(view) {
     } else if (view === "semana") {
         if (semana) semana.hidden = false;
         loadWeeklySummary();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (view === "importante") {
+        if (importante) importante.hidden = false;
+        loadTopStory();
         window.scrollTo({ top: 0, behavior: "smooth" });
     } else {
         noticias.hidden = false;
@@ -544,6 +546,8 @@ function setupHeroSearch() {
                 switchView("metricas");
             } else if (action === "semana") {
                 switchView("semana");
+            } else if (action === "importante") {
+                switchView("importante");
             } else {
                 showToast(actionLabels[action] || "Próximamente");
             }
@@ -844,8 +848,6 @@ function renderAIStatus() {
 const actionLabels = {
     reportes: "Reportes Comparativos — Próximamente",
     temas: "Resumen de Temas — Próximamente",
-    semana: "Resumen de la Semana — Próximamente",
-    importante: "La noticia más importante del Día — Próximamente",
 };
 
 function showToast(msg) {
@@ -1304,6 +1306,157 @@ function renderWeeklySummary(data) {
         footer.innerHTML = `Fuentes analizadas: ${[...allSources].sort().join(" · ")}`;
         footer.hidden = false;
     }
+}
+
+// ── Top Story ─────────────────────────────────────────────────────────────
+
+let _topStoryData = null;
+
+function _setTopStoryAttr(attrState, dateStr) {
+    const attr = $("#topstory-ai-attr");
+    if (!attr) return;
+    const datePart = dateStr
+        ? `<span class="weekly-ai-sep">·</span><span class="weekly-ai-dates">${dateStr}</span>`
+        : "";
+
+    if (attrState === "loading") {
+        attr.className = "weekly-ai-attribution weekly-ai-loading";
+        attr.innerHTML = `<div class="ai-pulse-dot-sm"></div><span>Generando con IA</span>${datePart}`;
+        attr.hidden = false;
+    } else if (attrState === "done") {
+        attr.className = "weekly-ai-attribution weekly-ai-done";
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${datePart}`;
+        attr.hidden = false;
+        setTimeout(() => {
+            const check = attr.querySelector(".weekly-ai-check");
+            if (check) check.classList.add("weekly-ai-check-hide");
+        }, 2500);
+    } else {
+        attr.className = "weekly-ai-attribution";
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${datePart}`;
+        attr.hidden = false;
+    }
+}
+
+function _todayLabel() {
+    const d = new Date();
+    return d.toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+}
+
+async function loadTopStory() {
+    if (_topStoryData) {
+        renderTopStory(_topStoryData);
+        return;
+    }
+
+    const loading = $("#topstory-loading");
+    const error = $("#topstory-error");
+    const content = $("#topstory-content");
+    const dateEl = $("#topstory-date");
+
+    if (error) error.hidden = true;
+    if (content) content.innerHTML = "";
+
+    const label = _todayLabel();
+    if (dateEl) dateEl.textContent = label.charAt(0).toUpperCase() + label.slice(1);
+
+    _setTopStoryAttr("loading", new Date().toLocaleDateString("es-AR", { day: "numeric", month: "short", year: "numeric" }));
+    if (loading) loading.hidden = false;
+
+    let timer;
+    try {
+        const ctrl = new AbortController();
+        timer = setTimeout(() => ctrl.abort(), 120000);
+        const resp = await fetch(`${API}/api/top-story`, { signal: ctrl.signal });
+        clearTimeout(timer); timer = null;
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        if (loading) loading.hidden = true;
+
+        if (data.ai_available && data.story) {
+            _topStoryData = data;
+            renderTopStory(data);
+        } else if (data.ai_available && !data.story) {
+            _setTopStoryAttr("static", "");
+            if (error) { error.innerHTML = `<p>No hay suficientes noticias hoy para destacar una.</p>`; error.hidden = false; }
+        } else {
+            _setTopStoryAttr("static", "");
+            if (error) { error.innerHTML = `<p>La IA no está disponible en este momento. Intentá de nuevo más tarde.</p>`; error.hidden = false; }
+        }
+    } catch (err) {
+        if (loading) loading.hidden = true;
+        const msg = err.name === "AbortError"
+            ? "La generación tardó demasiado. Intentá de nuevo."
+            : "Error al generar el análisis. Intentá de nuevo más tarde.";
+        if (error) { error.innerHTML = `<p>${msg}</p>`; error.hidden = false; }
+        _setTopStoryAttr("static", "");
+        console.error("Top story failed:", err);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+function renderTopStory(data) {
+    const loading = $("#topstory-loading");
+    const content = $("#topstory-content");
+    if (loading) loading.hidden = true;
+
+    const s = data.story;
+    const dateLabel = new Date().toLocaleDateString("es-AR", { day: "numeric", month: "short", year: "numeric" });
+    _setTopStoryAttr("done", dateLabel);
+
+    const heroImg = s.image
+        ? `<img class="topstory-hero-image" src="${escHtml(s.image)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+        : `<div class="topstory-hero-image-placeholder"></div>`;
+
+    const kpHtml = (s.key_points || []).length
+        ? `<ul class="topstory-key-points">
+            ${s.key_points.map(kp => `<li>${escHtml(kp)}</li>`).join("")}
+           </ul>`
+        : "";
+
+    const sourceBadges = (s.sources || []).map(src =>
+        `<span class="weekly-source-badge">${escHtml(src)}</span>`
+    ).join("");
+
+    const articlesHtml = (s.articles || []).map(a => `
+        <a href="${escHtml(a.link)}" target="_blank" rel="noopener" class="topstory-article-link">
+            <span class="topstory-article-source" style="color:${escHtml(a.source_color || '#888')}">${escHtml(a.source)}</span>
+            <span class="topstory-article-title">${escHtml(a.title)}</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        </a>
+    `).join("");
+
+    const publishedStr = s.published
+        ? formatDate(new Date(s.published))
+        : "";
+
+    content.innerHTML = `
+        <article class="topstory-hero">
+            ${heroImg}
+            <div class="topstory-hero-body">
+                <div class="topstory-meta">
+                    <span class="topstory-category">${escHtml(s.category)}</span>
+                    <span class="topstory-source-count">${s.source_count} fuentes cubrieron esta noticia</span>
+                    ${publishedStr ? `<span class="topstory-time">${publishedStr}</span>` : ""}
+                </div>
+                <span class="topstory-emoji">${s.emoji || ""}</span>
+                <h3 class="topstory-headline">${escHtml(s.title)}</h3>
+                <p class="topstory-original-title">Título original: "${escHtml(s.original_title)}"</p>
+                <div class="topstory-summary">${escHtml(s.summary).replace(/\n/g, "<br>")}</div>
+                ${kpHtml}
+                <div class="topstory-sources-section">
+                    <h4 class="topstory-section-label">Fuentes que la cubrieron</h4>
+                    <div class="weekly-theme-sources">${sourceBadges}</div>
+                </div>
+                <div class="topstory-articles-section">
+                    <h4 class="topstory-section-label">Leer la nota en cada medio</h4>
+                    <div class="topstory-articles-list">${articlesHtml}</div>
+                </div>
+            </div>
+        </article>`;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

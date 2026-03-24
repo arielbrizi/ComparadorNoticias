@@ -3,17 +3,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.gemini_search import (
+from app.ai_search import (
     GEMINI_TIMEOUT,
     _build_context,
+    _call_ai,
     _call_gemini,
+    _call_groq,
     _clean_json_response,
-    gemini_top_story,
+    ai_top_story,
     _parse_retry_seconds,
-    gemini_search,
-    gemini_topics,
-    gemini_weekly_summary,
+    ai_news_search,
+    ai_topics,
+    ai_weekly_summary,
 )
+
+
+def _no_ai(monkeypatch):
+    """Helper: disable both AI providers."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setattr("app.ai_search._gemini_client", None)
+    monkeypatch.setattr("app.ai_search._groq_client", None)
 
 
 class TestBuildContext:
@@ -32,6 +42,12 @@ class TestBuildContext:
         context = _build_context(sample_groups, max_groups=1)
         lines = [line for line in context.split("\n") if line.strip()]
         assert len(lines) == 1
+
+    def test_respects_max_chars(self, sample_groups):
+        full = _build_context(sample_groups)
+        limited = _build_context(sample_groups, max_chars=200)
+        assert len(limited) <= 200
+        assert len(limited) < len(full)
 
 
 class TestCleanJsonResponse:
@@ -75,20 +91,21 @@ class TestParseRetrySeconds:
 
 class TestCallGemini:
     async def test_timeout_raises_runtime_error(self, monkeypatch):
-        monkeypatch.setattr("app.gemini_search._rate_limit_until", 0)
-        monkeypatch.setattr("app.gemini_search.GEMINI_TIMEOUT", 0.1)
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
 
         async def _hang(*args, **kwargs):
             await asyncio.sleep(300)
 
         mock_client = MagicMock()
         mock_client.aio.models.generate_content = _hang
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_client)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
         with pytest.raises(RuntimeError, match="timed out"):
-            await _call_gemini(mock_client, "test prompt")
+            await _call_gemini("test prompt", timeout=0.1)
 
     async def test_successful_call(self, monkeypatch):
-        monkeypatch.setattr("app.gemini_search._rate_limit_until", 0)
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
 
         mock_response = MagicMock()
         mock_response.text = '{"answer": "ok"}'
@@ -98,40 +115,107 @@ class TestCallGemini:
 
         mock_client = MagicMock()
         mock_client.aio.models.generate_content = _fast
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_client)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
-        result = await _call_gemini(mock_client, "test prompt")
+        result = await _call_gemini("test prompt")
         assert result == '{"answer": "ok"}'
 
 
-class TestGeminiSearch:
-    async def test_returns_unavailable_without_api_key(self, sample_groups, monkeypatch):
+class TestCallAiFallback:
+    async def test_falls_back_to_groq_when_gemini_fails(self, monkeypatch):
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+
+        async def _gemini_fail(*a, **kw):
+            raise RuntimeError("Gemini down")
+
+        mock_gemini = MagicMock()
+        mock_gemini.aio.models.generate_content = _gemini_fail
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        mock_choice = MagicMock()
+        mock_choice.message.content = '{"result": "from groq"}'
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+
+        mock_groq = AsyncMock()
+        mock_groq.chat.completions.create = AsyncMock(return_value=mock_resp)
+        monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
+
+        text, provider = await _call_ai("test prompt")
+        assert text == '{"result": "from groq"}'
+        assert provider == "Groq"
+
+    async def test_uses_gemini_when_available(self, monkeypatch):
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+
+        mock_response = MagicMock()
+        mock_response.text = '{"result": "from gemini"}'
+
+        async def _fast(*a, **kw):
+            return mock_response
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = _fast
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_client)
+
+        text, provider = await _call_ai("test prompt")
+        assert text == '{"result": "from gemini"}'
+        assert provider == "Gemini"
+
+    async def test_groq_only_when_no_gemini_key(self, monkeypatch):
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.setattr("app.gemini_search._client", None)
-        result = await gemini_search("inflación", sample_groups)
+        monkeypatch.setattr("app.ai_search._gemini_client", None)
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+
+        mock_choice = MagicMock()
+        mock_choice.message.content = '{"result": "groq only"}'
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+
+        mock_groq = AsyncMock()
+        mock_groq.chat.completions.create = AsyncMock(return_value=mock_resp)
+        monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
+
+        text, provider = await _call_ai("test prompt")
+        assert text == '{"result": "groq only"}'
+        assert provider == "Groq"
+
+    async def test_raises_when_no_provider(self, monkeypatch):
+        _no_ai(monkeypatch)
+        with pytest.raises(RuntimeError, match="No AI provider"):
+            await _call_ai("test prompt")
+
+
+class TestAiNewsSearch:
+    async def test_returns_unavailable_without_api_key(self, sample_groups, monkeypatch):
+        _no_ai(monkeypatch)
+        result = await ai_news_search("inflación", sample_groups)
         assert result["ai_available"] is False
 
 
-class TestGeminiTopics:
+class TestAiTopics:
     async def test_returns_unavailable_without_api_key(self, sample_groups, monkeypatch):
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.setattr("app.gemini_search._client", None)
-        result = await gemini_topics(sample_groups)
+        _no_ai(monkeypatch)
+        result = await ai_topics(sample_groups)
         assert result["ai_available"] is False
         assert result["topics"] == []
 
 
-class TestGeminiWeeklySummary:
+class TestAiWeeklySummary:
     async def test_returns_unavailable_without_api_key(self, sample_groups, monkeypatch):
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.setattr("app.gemini_search._client", None)
-        result = await gemini_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
+        _no_ai(monkeypatch)
+        result = await ai_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
         assert result["ai_available"] is False
         assert result["themes"] == []
 
     async def test_returns_empty_for_no_groups(self, monkeypatch):
         monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
-        monkeypatch.setattr("app.gemini_search._client", MagicMock())
-        result = await gemini_weekly_summary([], "2026-03-17", "2026-03-23")
+        monkeypatch.setattr("app.ai_search._gemini_client", MagicMock())
+        result = await ai_weekly_summary([], "2026-03-17", "2026-03-23")
         assert result["ai_available"] is True
         assert result["themes"] == []
         assert result["week_start"] == "2026-03-17"
@@ -139,7 +223,7 @@ class TestGeminiWeeklySummary:
 
     async def test_cache_hit(self, sample_groups, monkeypatch):
         import time
-        monkeypatch.setattr("app.gemini_search._weekly_cache", {
+        monkeypatch.setattr("app.ai_search._weekly_cache", {
             "data": {
                 "themes": [{"label": "Test", "emoji": "🧪", "summary": "Test", "group_ids": [], "image": "", "sources": []}],
                 "ai_available": True,
@@ -149,13 +233,13 @@ class TestGeminiWeeklySummary:
             "ts": time.time(),
             "week_key": "2026-03-17_2026-03-23",
         })
-        result = await gemini_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
+        result = await ai_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
         assert result["cached"] is True
         assert len(result["themes"]) == 1
 
     async def test_cache_miss_different_week(self, sample_groups, monkeypatch):
         import time
-        monkeypatch.setattr("app.gemini_search._weekly_cache", {
+        monkeypatch.setattr("app.ai_search._weekly_cache", {
             "data": {
                 "themes": [{"label": "Old", "emoji": "📅", "summary": "Old", "group_ids": [], "image": "", "sources": []}],
                 "ai_available": True,
@@ -165,24 +249,22 @@ class TestGeminiWeeklySummary:
             "ts": time.time(),
             "week_key": "2026-03-10_2026-03-16",
         })
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.setattr("app.gemini_search._client", None)
-        result = await gemini_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
+        _no_ai(monkeypatch)
+        result = await ai_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
         assert result["ai_available"] is False
 
 
-class TestGeminiTopStory:
+class TestAiTopStory:
     async def test_returns_unavailable_without_api_key(self, sample_groups, monkeypatch):
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.setattr("app.gemini_search._client", None)
-        result = await gemini_top_story(sample_groups, "2026-03-24")
+        _no_ai(monkeypatch)
+        result = await ai_top_story(sample_groups, "2026-03-24")
         assert result["ai_available"] is False
         assert result["story"] is None
 
     async def test_returns_none_story_for_no_groups(self, monkeypatch):
         monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
-        monkeypatch.setattr("app.gemini_search._client", MagicMock())
-        result = await gemini_top_story([], "2026-03-24")
+        monkeypatch.setattr("app.ai_search._gemini_client", MagicMock())
+        result = await ai_top_story([], "2026-03-24")
         assert result["ai_available"] is True
         assert result["story"] is None
         assert result["date"] == "2026-03-24"
@@ -190,7 +272,7 @@ class TestGeminiTopStory:
     async def test_cache_hit(self, sample_groups, monkeypatch):
         import time
         top = sample_groups[0]
-        monkeypatch.setattr("app.gemini_search._topstory_cache", {
+        monkeypatch.setattr("app.ai_search._topstory_cache", {
             "data": {
                 "ai_available": True,
                 "story": {
@@ -206,14 +288,14 @@ class TestGeminiTopStory:
             "ts": time.time(),
             "cache_key": f"2026-03-24_{top.group_id}",
         })
-        result = await gemini_top_story(sample_groups, "2026-03-24")
+        result = await ai_top_story(sample_groups, "2026-03-24")
         assert result["cached"] is True
         assert result["story"]["title"] == "Test editorial"
 
     async def test_cache_miss_different_day(self, sample_groups, monkeypatch):
         import time
         top = sample_groups[0]
-        monkeypatch.setattr("app.gemini_search._topstory_cache", {
+        monkeypatch.setattr("app.ai_search._topstory_cache", {
             "data": {
                 "ai_available": True,
                 "story": {"title": "Yesterday", "emoji": "📰"},
@@ -222,7 +304,6 @@ class TestGeminiTopStory:
             "ts": time.time(),
             "cache_key": f"2026-03-23_{top.group_id}",
         })
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.setattr("app.gemini_search._client", None)
-        result = await gemini_top_story(sample_groups, "2026-03-24")
+        _no_ai(monkeypatch)
+        result = await ai_top_story(sample_groups, "2026-03-24")
         assert result["ai_available"] is False

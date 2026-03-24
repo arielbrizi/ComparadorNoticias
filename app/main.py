@@ -25,7 +25,7 @@ from app.article_grouper import group_articles
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
-from app.gemini_search import gemini_search, gemini_topics, gemini_top_story, gemini_weekly_summary
+from app.ai_search import ai_news_search, ai_topics, ai_top_story, ai_weekly_summary
 from app.metrics_store import init_db, query_metrics, save_group_metrics
 from app.models import Article, ArticleGroup, FeedStatus
 from app.news_store import (
@@ -272,7 +272,7 @@ async def ai_search(
     desde: str | None = Query(None, description="Fecha inicio YYYY-MM-DD"),
     hasta: str | None = Query(None, description="Fecha fin YYYY-MM-DD"),
 ):
-    """Semantic search powered by Gemini, with optional date filtering."""
+    """Semantic search powered by AI (Gemini/Groq), with optional date filtering."""
     async with _lock:
         grps = list(_groups)
 
@@ -283,15 +283,15 @@ async def ai_search(
         hasta_dt = datetime.fromisoformat(hasta).replace(tzinfo=ART) + timedelta(days=1)
         grps = [g for g in grps if g.published and _ensure_aware(g.published) < hasta_dt]
 
-    return await gemini_search(q, grps)
+    return await ai_news_search(q, grps)
 
 
 @app.get("/api/topics")
 async def trending_topics():
-    """Top topics of the day, powered by Gemini (cached 10 min)."""
+    """Top topics of the day, powered by AI (cached 1h)."""
     async with _lock:
         grps = list(_groups)
-    return await gemini_topics(grps)
+    return await ai_topics(grps)
 
 
 def _current_week_bounds() -> tuple[str, str]:
@@ -316,10 +316,10 @@ async def weekly_summary():
     week_start, week_end = _current_week_bounds()
 
     _articles_db, groups = load_groups_from_db(desde=week_start, hasta=week_end)
-    # Limitar contexto para que Gemini responda a tiempo
+    # Limitar contexto para que la IA responda a tiempo
     if len(groups) > 200:
         groups = groups[:200]
-    return await gemini_weekly_summary(groups, week_start, week_end)
+    return await ai_weekly_summary(groups, week_start, week_end)
 
 
 @app.get("/api/top-story")
@@ -330,7 +330,7 @@ async def top_story():
     if not groups:
         async with _lock:
             groups = list(_groups)
-    return await gemini_top_story(groups, today)
+    return await ai_top_story(groups, today)
 
 
 @app.post("/api/refresh")

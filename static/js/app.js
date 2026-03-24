@@ -167,6 +167,15 @@ function setupViewNav() {
         const btn = $(`#${id}`);
         if (btn) btn.addEventListener("click", () => switchView("noticias"));
     });
+    const btnTemas = $("#btn-back-temas");
+    if (btnTemas) btnTemas.addEventListener("click", () => {
+        if (_temasSubview === "detail") {
+            _temasSubview = "topics";
+            loadTemasView();
+        } else {
+            switchView("noticias");
+        }
+    });
 }
 
 let _metricsFiltersReady = false;
@@ -176,6 +185,7 @@ function switchView(view) {
     const metricas = $("#view-metricas");
     const semana = $("#view-semana");
     const importante = $("#view-importante");
+    const temas = $("#view-temas");
 
     state.currentView = view;
 
@@ -183,6 +193,7 @@ function switchView(view) {
     metricas.hidden = true;
     if (semana) semana.hidden = true;
     if (importante) importante.hidden = true;
+    if (temas) temas.hidden = true;
 
     if (view === "metricas") {
         metricas.hidden = false;
@@ -202,6 +213,11 @@ function switchView(view) {
     } else if (view === "importante") {
         if (importante) importante.hidden = false;
         loadTopStory();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (view === "temas") {
+        if (temas) temas.hidden = false;
+        _temasSubview = "topics";
+        loadTemasView();
         window.scrollTo({ top: 0, behavior: "smooth" });
     } else {
         noticias.hidden = false;
@@ -548,6 +564,8 @@ function setupHeroSearch() {
                 switchView("semana");
             } else if (action === "importante") {
                 switchView("importante");
+            } else if (action === "temas") {
+                switchView("temas");
             } else {
                 showToast(actionLabels[action] || "Próximamente");
             }
@@ -702,6 +720,7 @@ async function performAISearch(query) {
             state.aiSearch.relevantIds = data.relevant_group_ids || [];
             state.aiSearch.active = true;
             state.aiSearch.hasResults = data.has_results !== false;
+            state.aiSearch.provider = data.ai_provider || "";
         } else {
             state.aiSearch.available = false;
             state.aiSearch.active = false;
@@ -774,7 +793,7 @@ async function performAISearch(query) {
 
 function clearAISearch() {
     if (_aiSearchController) { _aiSearchController.abort(); _aiSearchController = null; }
-    state.aiSearch = { loading: false, loadingHistory: false, available: null, summary: "", relevantIds: [], active: false, hasResults: true };
+    state.aiSearch = { loading: false, loadingHistory: false, available: null, summary: "", relevantIds: [], active: false, hasResults: true, provider: "" };
     renderAIStatus();
     renderAISummary();
 }
@@ -799,6 +818,9 @@ function renderAISummary() {
         const historyHint = state.aiSearch.loadingHistory
             ? `<div class="ai-summary-history"><div class="ai-pulse-dot"></div> Buscando en noticias anteriores…</div>`
             : "";
+        const provBadge = state.aiSearch.provider
+            ? `<span class="ai-summary-provider">Powered by ${escHtml(state.aiSearch.provider)}</span>`
+            : "";
         container.innerHTML = `
             <div class="ai-summary-panel">
                 <div class="ai-summary-header">
@@ -807,6 +829,7 @@ function renderAISummary() {
                         <path d="M19 1l.5 2 2 .5-2 .5-.5 2-.5-2-2-.5 2-.5z" opacity=".6"/>
                     </svg>
                     <span class="ai-summary-label">Resumen IA</span>
+                    ${provBadge}
                 </div>
                 <p class="ai-summary-text">${escHtml(state.aiSearch.summary)}</p>
                 ${historyHint}
@@ -847,7 +870,6 @@ function renderAIStatus() {
 
 const actionLabels = {
     reportes: "Reportes Comparativos — Próximamente",
-    temas: "Resumen de Temas — Próximamente",
 };
 
 function showToast(msg) {
@@ -1163,11 +1185,12 @@ function _setWeeklyHeader(ws, we) {
     el.textContent = `${s.charAt(0).toUpperCase() + s.slice(1)} — ${e.charAt(0).toUpperCase() + e.slice(1)}, ${new Date(we + "T12:00:00").getFullYear()}`;
 }
 
-function _setAttr(state, ws, we) {
+function _setAttr(state, ws, we, provider) {
     const attr = $("#weekly-ai-attribution");
     if (!attr) return;
     const range = _weeklyDateRange(ws, we);
     const sep = range ? `<span class="weekly-ai-sep">·</span><span class="weekly-ai-dates">${range}</span>` : "";
+    const pw = provider ? `<span class="weekly-ai-sep">·</span><span class="ai-provider">Powered by ${escHtml(provider)}</span>` : "";
 
     if (state === "loading") {
         attr.className = "weekly-ai-attribution weekly-ai-loading";
@@ -1175,7 +1198,7 @@ function _setAttr(state, ws, we) {
         attr.hidden = false;
     } else if (state === "done") {
         attr.className = "weekly-ai-attribution weekly-ai-done";
-        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${sep}`;
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${pw}${sep}`;
         attr.hidden = false;
         setTimeout(() => {
             const check = attr.querySelector(".weekly-ai-check");
@@ -1183,7 +1206,7 @@ function _setAttr(state, ws, we) {
         }, 2500);
     } else {
         attr.className = "weekly-ai-attribution";
-        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${sep}`;
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${pw}${sep}`;
         attr.hidden = false;
     }
 }
@@ -1254,7 +1277,7 @@ function renderWeeklySummary(data) {
     if (loading) loading.hidden = true;
 
     _setWeeklyHeader(data.week_start, data.week_end);
-    _setAttr("done", data.week_start, data.week_end);
+    _setAttr("done", data.week_start, data.week_end, data.ai_provider);
 
     const themes = (data.themes || []).filter(t => t && typeof t === "object");
     if (!themes.length) {
@@ -1312,12 +1335,13 @@ function renderWeeklySummary(data) {
 
 let _topStoryData = null;
 
-function _setTopStoryAttr(attrState, dateStr) {
+function _setTopStoryAttr(attrState, dateStr, provider) {
     const attr = $("#topstory-ai-attr");
     if (!attr) return;
     const datePart = dateStr
         ? `<span class="weekly-ai-sep">·</span><span class="weekly-ai-dates">${dateStr}</span>`
         : "";
+    const pw = provider ? `<span class="weekly-ai-sep">·</span><span class="ai-provider">Powered by ${escHtml(provider)}</span>` : "";
 
     if (attrState === "loading") {
         attr.className = "weekly-ai-attribution weekly-ai-loading";
@@ -1325,7 +1349,7 @@ function _setTopStoryAttr(attrState, dateStr) {
         attr.hidden = false;
     } else if (attrState === "done") {
         attr.className = "weekly-ai-attribution weekly-ai-done";
-        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${datePart}`;
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${pw}${datePart}`;
         attr.hidden = false;
         setTimeout(() => {
             const check = attr.querySelector(".weekly-ai-check");
@@ -1333,7 +1357,7 @@ function _setTopStoryAttr(attrState, dateStr) {
         }, 2500);
     } else {
         attr.className = "weekly-ai-attribution";
-        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${datePart}`;
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${pw}${datePart}`;
         attr.hidden = false;
     }
 }
@@ -1405,7 +1429,7 @@ function renderTopStory(data) {
 
     const s = data.story;
     const dateLabel = new Date().toLocaleDateString("es-AR", { day: "numeric", month: "short", year: "numeric" });
-    _setTopStoryAttr("done", dateLabel);
+    _setTopStoryAttr("done", dateLabel, data.ai_provider);
 
     const heroImg = s.image
         ? `<img class="topstory-hero-image" src="${escHtml(s.image)}" alt="" loading="lazy" onerror="this.style.display='none'">`
@@ -1457,6 +1481,183 @@ function renderTopStory(data) {
                 </div>
             </div>
         </article>`;
+}
+
+// ── Resumen de Temas ──────────────────────────────────────────────────────
+
+let _temasSubview = "topics"; // "topics" | "detail"
+
+function _setTemasAttr(attrState, extra, provider) {
+    const attr = $("#temas-ai-attr");
+    if (!attr) return;
+    const datePart = extra
+        ? `<span class="weekly-ai-sep">·</span><span class="weekly-ai-dates">${escHtml(extra)}</span>`
+        : "";
+    const pw = provider ? `<span class="weekly-ai-sep">·</span><span class="ai-provider">Powered by ${escHtml(provider)}</span>` : "";
+
+    if (attrState === "loading") {
+        attr.className = "weekly-ai-attribution weekly-ai-loading";
+        attr.innerHTML = `<div class="ai-pulse-dot-sm"></div><span>Buscando con IA</span>${datePart}`;
+        attr.hidden = false;
+    } else if (attrState === "done") {
+        attr.className = "weekly-ai-attribution weekly-ai-done";
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${pw}${datePart}`;
+        attr.hidden = false;
+        setTimeout(() => {
+            const check = attr.querySelector(".weekly-ai-check");
+            if (check) check.classList.add("weekly-ai-check-hide");
+        }, 2500);
+    } else {
+        attr.className = "weekly-ai-attribution";
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${pw}${datePart}`;
+        attr.hidden = false;
+    }
+}
+
+function _updateTemasBackBtn() {
+    const label = $("#btn-back-temas-label");
+    if (label) label.textContent = _temasSubview === "detail" ? "Volver a temas" : "Volver a noticias";
+}
+
+async function loadTemasView() {
+    _temasSubview = "topics";
+    _updateTemasBackBtn();
+
+    const loading = $("#temas-loading");
+    const error = $("#temas-error");
+    const content = $("#temas-content");
+    const subtitle = $("#temas-subtitle");
+
+    if (error) error.hidden = true;
+    if (content) content.innerHTML = "";
+    if (subtitle) subtitle.textContent = "Los temas más importantes del día";
+
+    if (_isTopicsCacheValid() && _topicsCache?.length) {
+        renderTemasCards(_topicsCache);
+        _setTemasAttr("static", "");
+        return;
+    }
+
+    if (loading) loading.hidden = false;
+    _setTemasAttr("loading", "");
+
+    try {
+        const resp = await fetch(`${API}/api/topics`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        if (loading) loading.hidden = true;
+
+        if (data.ai_available && data.topics?.length) {
+            _topicsCache = data.topics;
+            _topicsCacheTs = Date.now();
+            renderTemasCards(data.topics);
+            _setTemasAttr("done", "", data.ai_provider);
+        } else if (data.ai_available) {
+            _setTemasAttr("static", "");
+            if (error) { error.innerHTML = "<p>No hay suficientes noticias para extraer temas.</p>"; error.hidden = false; }
+        } else {
+            _setTemasAttr("static", "");
+            if (error) { error.innerHTML = "<p>La IA no está disponible en este momento.</p>"; error.hidden = false; }
+        }
+    } catch (err) {
+        if (loading) loading.hidden = true;
+        _setTemasAttr("static", "");
+        if (error) { error.innerHTML = "<p>Error al cargar los temas. Intentá de nuevo.</p>"; error.hidden = false; }
+        console.error("Temas load failed:", err);
+    }
+}
+
+function renderTemasCards(topics) {
+    const content = $("#temas-content");
+    if (!content) return;
+
+    const cardsHtml = topics.map(t => `
+        <button class="tema-card" data-query="${escHtml(t.label)}">
+            <span class="tema-card-emoji">${t.emoji}</span>
+            <span class="tema-card-label">${escHtml(t.label)}</span>
+            <span class="tema-card-hint">Explorar noticias</span>
+        </button>
+    `).join("");
+
+    content.innerHTML = `<div class="temas-grid">${cardsHtml}</div>`;
+
+    content.querySelectorAll(".tema-card").forEach(card => {
+        card.addEventListener("click", () => loadTemaDetail(card.dataset.query));
+    });
+}
+
+async function loadTemaDetail(label) {
+    _temasSubview = "detail";
+    _updateTemasBackBtn();
+
+    const loading = $("#temas-loading");
+    const error = $("#temas-error");
+    const content = $("#temas-content");
+    const subtitle = $("#temas-subtitle");
+
+    if (error) error.hidden = true;
+    if (content) content.innerHTML = "";
+    if (subtitle) subtitle.textContent = label;
+
+    _setTemasAttr("loading", label);
+    if (loading) loading.hidden = false;
+
+    let timer;
+    try {
+        const ctrl = new AbortController();
+        timer = setTimeout(() => ctrl.abort(), 60000);
+        const resp = await fetch(`${API}/api/search?q=${encodeURIComponent(label)}`, { signal: ctrl.signal });
+        clearTimeout(timer); timer = null;
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        if (loading) loading.hidden = true;
+
+        if (data.ai_available && data.relevant_group_ids?.length) {
+            const ids = new Set(data.relevant_group_ids);
+            const matched = state.groups.filter(g => ids.has(g.group_id));
+
+            const summaryHtml = data.summary
+                ? `<div class="temas-detail-summary">
+                    <p>${escHtml(data.summary)}</p>
+                   </div>`
+                : "";
+
+            const countHtml = `<div class="temas-detail-count">${matched.length} noticia${matched.length !== 1 ? "s" : ""} encontrada${matched.length !== 1 ? "s" : ""}</div>`;
+
+            const newsHtml = matched.length
+                ? matched.map(g => renderCard(g)).join("")
+                : `<div class="empty-state"><h3>No se encontraron noticias para este tema</h3></div>`;
+
+            content.innerHTML = summaryHtml + countHtml + `<div class="news-grid">${newsHtml}</div>`;
+
+            content.querySelectorAll(".news-card").forEach((card, i) => {
+                card.addEventListener("click", () => openComparison(matched[i]));
+            });
+
+            _setTemasAttr("done", label, data.ai_provider);
+        } else if (data.ai_available) {
+            _setTemasAttr("static", label);
+            if (error) { error.innerHTML = "<p>No se encontraron noticias para este tema.</p>"; error.hidden = false; }
+        } else {
+            _setTemasAttr("static", "");
+            if (error) { error.innerHTML = "<p>La IA no está disponible en este momento.</p>"; error.hidden = false; }
+        }
+    } catch (err) {
+        if (loading) loading.hidden = true;
+        const msg = err.name === "AbortError"
+            ? "La búsqueda tardó demasiado. Intentá de nuevo."
+            : "Error al buscar noticias. Intentá de nuevo.";
+        if (error) { error.innerHTML = `<p>${msg}</p>`; error.hidden = false; }
+        _setTemasAttr("static", "");
+        console.error("Tema detail failed:", err);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+
+    window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

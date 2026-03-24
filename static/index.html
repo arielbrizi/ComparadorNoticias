@@ -220,6 +220,27 @@
     <div id="weekly-footer" class="weekly-footer" hidden></div>
 </section>
 
+<!-- ── Main content: Resumen de Temas ─────────────────────────────────── -->
+<section class="main-content temas-view" id="view-temas" hidden>
+    <div class="temas-header">
+        <button id="btn-back-temas" class="btn-back" title="Volver">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><polyline points="12 19 5 12 12 5"/></svg>
+            <span id="btn-back-temas-label">Volver a noticias</span>
+        </button>
+        <h2 class="temas-title">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M4 12h10"/><path d="M4 18h14"/><circle cx="19" cy="12" r="2"/></svg>
+            Resumen de Temas
+        </h2>
+        <p class="temas-subtitle" id="temas-subtitle">Los temas más importantes del día</p>
+        <div id="temas-ai-attr" class="weekly-ai-attribution" hidden></div>
+    </div>
+    <div id="temas-loading" class="weekly-loading-area" hidden>
+        <div class="spinner"></div>
+    </div>
+    <div id="temas-error" class="weekly-error" hidden></div>
+    <div id="temas-content"></div>
+</section>
+
 <!-- ── Main content: Noticia Más Importante ────────────────────────────── -->
 <section class="main-content topstory-view" id="view-importante" hidden>
     <div class="topstory-header">

@@ -15,6 +15,7 @@ async def client(tmp_path, monkeypatch):
     monkeypatch.setattr("app.db._use_pg", False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     from app.metrics_store import init_db
     from app.news_store import init_news_tables

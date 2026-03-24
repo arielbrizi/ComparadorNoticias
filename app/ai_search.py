@@ -1,4 +1,7 @@
-"""Gemini-powered semantic search and topic extraction for news groups."""
+"""AI-powered semantic search and topic extraction for news groups.
+
+Uses Google Gemini as primary provider and Groq (Llama) as fallback.
+"""
 
 from __future__ import annotations
 
@@ -10,32 +13,61 @@ import re
 import time
 
 from google import genai
+from groq import AsyncGroq
 
 from app.models import ArticleGroup
 
 logger = logging.getLogger(__name__)
 
-_client: genai.Client | None = None
-MODEL = "gemini-3-flash-preview"
+# ── Gemini (primary) ─────────────────────────────────────────────────────
+
+_gemini_client: genai.Client | None = None
+GEMINI_MODEL = "gemini-3-flash-preview"
 MAX_RETRIES = 1
 GEMINI_TIMEOUT = 30
 
 _rate_limit_until: float = 0
 
 
-def _get_client() -> genai.Client | None:
-    global _client
+def _get_gemini_client() -> genai.Client | None:
+    global _gemini_client
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        logger.warning("GEMINI_API_KEY not set — AI search disabled")
         return None
-    if _client is None:
-        _client = genai.Client(api_key=api_key)
-    return _client
+    if _gemini_client is None:
+        _gemini_client = genai.Client(api_key=api_key)
+    return _gemini_client
 
 
-def _build_context(groups: list[ArticleGroup], max_groups: int = 150) -> str:
-    lines = []
+# ── Groq fallback ────────────────────────────────────────────────────────
+
+_groq_client: AsyncGroq | None = None
+GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MAX_PROMPT_CHARS = 10000
+
+
+def _get_groq_client() -> AsyncGroq | None:
+    global _groq_client
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        return None
+    if _groq_client is None:
+        _groq_client = AsyncGroq(api_key=api_key)
+    return _groq_client
+
+
+def _ai_available() -> bool:
+    """True if at least one AI provider is configured."""
+    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GROQ_API_KEY"))
+
+
+def _build_context(
+    groups: list[ArticleGroup],
+    max_groups: int = 80,
+    max_chars: int = 0,
+) -> str:
+    lines: list[str] = []
+    total = 0
     for g in groups[:max_groups]:
         sources = ", ".join(a.source for a in g.articles)
         extra_titles = [
@@ -56,7 +88,11 @@ def _build_context(groups: list[ArticleGroup], max_groups: int = 150) -> str:
             line += f" | También: {'; '.join(extra_titles[:3])}"
         if summary:
             line += f" | Resumen: {summary}"
+
+        if max_chars and total + len(line) + 1 > max_chars:
+            break
         lines.append(line)
+        total += len(line) + 1
     return "\n".join(lines)
 
 
@@ -83,9 +119,13 @@ def _clean_json_response(text: str) -> str:
     return text.strip()
 
 
-async def _call_gemini(client: genai.Client, prompt: str) -> str:
+async def _call_gemini(prompt: str, timeout: float = GEMINI_TIMEOUT) -> str:
     """Call Gemini with automatic retry on 429 rate-limit errors."""
     global _rate_limit_until
+
+    client = _get_gemini_client()
+    if not client:
+        raise RuntimeError("Gemini client not available")
 
     if time.time() < _rate_limit_until:
         remaining = int(_rate_limit_until - time.time())
@@ -96,14 +136,14 @@ async def _call_gemini(client: genai.Client, prompt: str) -> str:
         try:
             response = await asyncio.wait_for(
                 client.aio.models.generate_content(
-                    model=MODEL, contents=prompt,
+                    model=GEMINI_MODEL, contents=prompt,
                 ),
-                timeout=GEMINI_TIMEOUT,
+                timeout=timeout,
             )
             return response.text
         except asyncio.TimeoutError:
             raise RuntimeError(
-                f"Gemini call timed out after {GEMINI_TIMEOUT}s"
+                f"Gemini call timed out after {timeout}s"
             )
         except Exception as exc:
             last_exc = exc
@@ -111,7 +151,7 @@ async def _call_gemini(client: genai.Client, prompt: str) -> str:
             if wait is not None:
                 _rate_limit_until = time.time() + wait + 2
                 if attempt < MAX_RETRIES:
-                    logger.info("Rate limited, retrying in %.0fs (attempt %d/%d)",
+                    logger.info("Gemini rate limited, retrying in %.0fs (attempt %d/%d)",
                                 wait, attempt + 1, MAX_RETRIES)
                     await asyncio.sleep(wait)
                 else:
@@ -121,13 +161,68 @@ async def _call_gemini(client: genai.Client, prompt: str) -> str:
     raise last_exc  # unreachable, but keeps type-checkers happy
 
 
+GROQ_SYSTEM_MSG = (
+    "Respondé ÚNICAMENTE con JSON válido. "
+    "Sin texto explicativo, sin markdown, sin bloques de código. Solo el objeto JSON."
+)
+
+
+async def _call_groq(prompt: str, timeout: float = 30) -> str:
+    """Call Groq (Llama) as fallback provider."""
+    client = _get_groq_client()
+    if not client:
+        raise RuntimeError("Groq client not available")
+
+    if len(prompt) > GROQ_MAX_PROMPT_CHARS:
+        logger.info("Truncating prompt for Groq (%d → %d chars)", len(prompt), GROQ_MAX_PROMPT_CHARS)
+        prompt = prompt[:GROQ_MAX_PROMPT_CHARS] + "\n\n[contexto truncado por límite del modelo]"
+
+    response = await asyncio.wait_for(
+        client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": GROQ_SYSTEM_MSG},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"},
+        ),
+        timeout=timeout,
+    )
+    text = response.choices[0].message.content
+    if not text:
+        raise RuntimeError("Groq returned empty response")
+    return text
+
+
+async def _call_ai(prompt: str, timeout: float = GEMINI_TIMEOUT) -> tuple[str, str]:
+    """Try Gemini first; if it fails, fall back to Groq.
+
+    Returns (response_text, provider_name).
+    """
+    gemini_ok = _get_gemini_client() is not None
+    groq_ok = _get_groq_client() is not None
+
+    if not gemini_ok and not groq_ok:
+        raise RuntimeError("No AI provider configured")
+
+    if gemini_ok:
+        try:
+            text = await _call_gemini(prompt, timeout=timeout)
+            return text, "Gemini"
+        except Exception as exc:
+            if not groq_ok:
+                raise
+            logger.warning("Gemini failed (%s), falling back to Groq", exc)
+
+    text = await _call_groq(prompt, timeout=min(timeout, 60))
+    return text, "Groq"
+
+
 # ── Search ───────────────────────────────────────────────────────────────
 
 SEARCH_PROMPT = """Sos un asistente de un comparador de noticias argentino llamado "Vs News".
 El usuario busca: "{query}"
-
-Noticias disponibles:
-{context}
 
 Respondé ÚNICAMENTE con JSON válido (sin markdown, sin bloques de código), con este formato:
 {{
@@ -142,13 +237,15 @@ Reglas:
 - Si es un tema amplio (ej: "economía"), incluí todo lo relacionado.
 - El resumen debe ser informativo, neutral y basado SOLO en los títulos disponibles.
 - Si no hay resultados relevantes, poné has_results: false y explicá brevemente en summary.
-- Devolvé SOLO el JSON."""
+- Devolvé SOLO el JSON.
+
+Noticias disponibles:
+{context}"""
 
 
-async def gemini_search(query: str, groups: list[ArticleGroup]) -> dict:
-    """Send query + groups context to Gemini and return structured results."""
-    client = _get_client()
-    if not client:
+async def ai_news_search(query: str, groups: list[ArticleGroup]) -> dict:
+    """Send query + groups context to AI and return structured results."""
+    if not _ai_available():
         return {"ai_available": False, "error": "API key not configured"}
 
     cache_key = query.strip().lower()
@@ -162,10 +259,11 @@ async def gemini_search(query: str, groups: list[ArticleGroup]) -> dict:
     prompt = SEARCH_PROMPT.format(query=query, context=context)
 
     try:
-        raw = await _call_gemini(client, prompt)
+        raw, provider = await _call_ai(prompt)
         text = _clean_json_response(raw)
         result = json.loads(text)
         result["ai_available"] = True
+        result["ai_provider"] = provider
 
         if is_topic:
             _search_cache[cache_key] = result
@@ -174,10 +272,10 @@ async def gemini_search(query: str, groups: list[ArticleGroup]) -> dict:
         return result
 
     except json.JSONDecodeError as exc:
-        logger.error("Gemini returned invalid JSON: %s — raw: %s", exc, text[:300])
+        logger.error("AI returned invalid JSON: %s — raw: %s", exc, text[:300])
         return {"ai_available": False, "error": "Invalid AI response"}
     except Exception as exc:
-        logger.error("Gemini search failed: %s", exc)
+        logger.error("AI search failed: %s", exc)
         return {"ai_available": False, "error": str(exc)}
 
 
@@ -195,9 +293,6 @@ def _get_cached_topic_labels() -> set[str]:
 TOPICS_PROMPT = """Sos un editor de un comparador de noticias argentino.
 Analizá las noticias del día y extraé los 6 temas más importantes.
 
-Noticias disponibles:
-{context}
-
 Respondé ÚNICAMENTE con JSON válido (sin markdown, sin bloques de código):
 {{
   "topics": [
@@ -211,35 +306,39 @@ Reglas:
 - Cada label debe ser conciso y funcionar como término de búsqueda (ej: "Dólar y mercados", "Crisis energética").
 - Elegí emojis representativos pero profesionales.
 - Basate en la cantidad de fuentes y artículos por tema para determinar importancia.
-- Devolvé SOLO el JSON."""
+- Devolvé SOLO el JSON.
+
+Noticias disponibles:
+{context}"""
 
 
-async def gemini_topics(groups: list[ArticleGroup]) -> dict:
+async def ai_topics(groups: list[ArticleGroup]) -> dict:
     """Extract trending topics from current news groups."""
     now = time.time()
     if _topics_cache["topics"] and (now - _topics_cache["ts"]) < TOPICS_TTL:
-        return {"topics": _topics_cache["topics"], "ai_available": True, "cached": True}
+        return {"topics": _topics_cache["topics"], "ai_available": True, "cached": True,
+                "ai_provider": _topics_cache.get("ai_provider", "unknown")}
 
-    client = _get_client()
-    if not client:
+    if not _ai_available():
         return {"topics": [], "ai_available": False}
 
     context = _build_context(groups)
     prompt = TOPICS_PROMPT.format(context=context)
 
     try:
-        raw = await _call_gemini(client, prompt)
+        raw, provider = await _call_ai(prompt)
         text = _clean_json_response(raw)
         result = json.loads(text)
         topics = result.get("topics", [])[:6]
         _topics_cache["topics"] = topics
         _topics_cache["ts"] = now
+        _topics_cache["ai_provider"] = provider
         _search_cache.clear()
-        logger.info("Topics regenerated — search cache cleared (%d topics)", len(topics))
-        return {"topics": topics, "ai_available": True, "cached": False}
+        logger.info("Topics regenerated via %s — search cache cleared (%d topics)", provider, len(topics))
+        return {"topics": topics, "ai_available": True, "cached": False, "ai_provider": provider}
 
     except Exception as exc:
-        logger.error("Gemini topics failed: %s", exc)
+        logger.error("AI topics failed: %s", exc)
         return {"topics": [], "ai_available": False}
 
 
@@ -250,10 +349,7 @@ WEEKLY_TTL = 3600  # 1 hour
 WEEKLY_TIMEOUT = 120
 
 WEEKLY_PROMPT = """Sos el editor jefe de un diario argentino preparando el resumen semanal.
-Analizá todas las noticias de la semana y extraé los temas más importantes.
-
-Noticias de la semana ({week_start} a {week_end}):
-{context}
+Analizá todas las noticias de la semana ({week_start} a {week_end}) y extraé los temas más importantes.
 
 Respondé ÚNICAMENTE con JSON válido (sin markdown, sin bloques de código):
 {{
@@ -275,10 +371,13 @@ Reglas:
 - Cada summary debe ser informativo, neutral, en español argentino, y basarse SOLO en las noticias disponibles.
 - Incluí en group_ids TODOS los grupos relevantes a cada tema.
 - Elegí emojis representativos pero profesionales.
-- Devolvé SOLO el JSON."""
+- Devolvé SOLO el JSON.
+
+Noticias de la semana:
+{context}"""
 
 
-async def gemini_weekly_summary(
+async def ai_weekly_summary(
     groups: list[ArticleGroup],
     week_start: str,
     week_end: str,
@@ -293,14 +392,13 @@ async def gemini_weekly_summary(
     ):
         return {**_weekly_cache["data"], "cached": True}
 
-    client = _get_client()
-    if not client:
+    if not _ai_available():
         return {"themes": [], "ai_available": False}
 
     if not groups:
         return {"themes": [], "ai_available": True, "week_start": week_start, "week_end": week_end}
 
-    context = _build_context(groups, max_groups=200)
+    context = _build_context(groups, max_groups=120)
     prompt = WEEKLY_PROMPT.format(
         week_start=week_start,
         week_end=week_end,
@@ -308,14 +406,7 @@ async def gemini_weekly_summary(
     )
 
     try:
-        saved_timeout = GEMINI_TIMEOUT
-        import app.gemini_search as _self
-        _self.GEMINI_TIMEOUT = WEEKLY_TIMEOUT
-        try:
-            raw = await _call_gemini(client, prompt)
-        finally:
-            _self.GEMINI_TIMEOUT = saved_timeout
-
+        raw, provider = await _call_ai(prompt, timeout=WEEKLY_TIMEOUT)
         text = _clean_json_response(raw)
         result = json.loads(text)
         themes = result.get("themes", [])[:10]
@@ -338,6 +429,7 @@ async def gemini_weekly_summary(
         payload = {
             "themes": themes,
             "ai_available": True,
+            "ai_provider": provider,
             "week_start": week_start,
             "week_end": week_end,
         }
@@ -348,10 +440,10 @@ async def gemini_weekly_summary(
         return payload
 
     except json.JSONDecodeError as exc:
-        logger.error("Gemini weekly returned invalid JSON: %s — raw: %s", exc, text[:300])
+        logger.error("AI weekly returned invalid JSON: %s — raw: %s", exc, text[:300])
         return {"themes": [], "ai_available": False, "error": "Invalid AI response"}
     except Exception as exc:
-        logger.error("Gemini weekly summary failed: %s", exc)
+        logger.error("AI weekly summary failed: %s", exc)
         return {"themes": [], "ai_available": False, "error": str(exc)}
 
 
@@ -363,17 +455,6 @@ TOPSTORY_TIMEOUT = 60
 
 TOPSTORY_PROMPT = """Sos el editor jefe de un diario argentino. Te presento la noticia con mayor \
 cobertura del día (la que más medios cubrieron). Generá un análisis editorial profundo.
-
-Noticia principal:
-- Título representativo: {title}
-- Fuentes que la cubrieron: {sources}
-- Categoría: {category}
-
-Titulares de cada medio:
-{headlines}
-
-Resúmenes disponibles:
-{summaries}
 
 Respondé ÚNICAMENTE con JSON válido (sin markdown, sin bloques de código):
 {{
@@ -394,10 +475,21 @@ Reglas:
 - El summary debe ser un análisis, no una mera repetición de los titulares.
 - Entre 3 y 5 key_points, cada uno una oración corta y directa.
 - Todo en español argentino, profesional y neutro.
-- Devolvé SOLO el JSON."""
+- Devolvé SOLO el JSON.
+
+Noticia principal:
+- Título representativo: {title}
+- Fuentes que la cubrieron: {sources}
+- Categoría: {category}
+
+Titulares de cada medio:
+{headlines}
+
+Resúmenes disponibles:
+{summaries}"""
 
 
-async def gemini_top_story(
+async def ai_top_story(
     groups: list[ArticleGroup],
     today: str,
 ) -> dict:
@@ -415,8 +507,7 @@ async def gemini_top_story(
     ):
         return {**_topstory_cache["data"], "cached": True}
 
-    client = _get_client()
-    if not client:
+    if not _ai_available():
         return {"ai_available": False, "story": None, "date": today}
 
     headlines = "\n".join(
@@ -436,14 +527,7 @@ async def gemini_top_story(
     )
 
     try:
-        saved_timeout = GEMINI_TIMEOUT
-        import app.gemini_search as _self
-        _self.GEMINI_TIMEOUT = TOPSTORY_TIMEOUT
-        try:
-            raw = await _call_gemini(client, prompt)
-        finally:
-            _self.GEMINI_TIMEOUT = saved_timeout
-
+        raw, provider = await _call_ai(prompt, timeout=TOPSTORY_TIMEOUT)
         text = _clean_json_response(raw)
         result = json.loads(text)
 
@@ -467,7 +551,7 @@ async def gemini_top_story(
             "group_id": top.group_id,
         }
 
-        payload = {"ai_available": True, "story": story, "date": today}
+        payload = {"ai_available": True, "ai_provider": provider, "story": story, "date": today}
         _topstory_cache["data"] = payload
         _topstory_cache["ts"] = now
         _topstory_cache["cache_key"] = cache_key
@@ -475,8 +559,8 @@ async def gemini_top_story(
         return payload
 
     except json.JSONDecodeError as exc:
-        logger.error("Gemini top story returned invalid JSON: %s — raw: %s", exc, text[:300])
+        logger.error("AI top story returned invalid JSON: %s — raw: %s", exc, text[:300])
         return {"ai_available": False, "story": None, "date": today, "error": "Invalid AI response"}
     except Exception as exc:
-        logger.error("Gemini top story failed: %s", exc)
+        logger.error("AI top story failed: %s", exc)
         return {"ai_available": False, "story": None, "date": today, "error": str(exc)}

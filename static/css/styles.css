@@ -1671,6 +1671,11 @@ a:hover { text-decoration: underline; }
     color: var(--text-dim);
     font-weight: 400;
 }
+.weekly-ai-attribution .ai-provider {
+    color: var(--text-dim);
+    font-weight: 400;
+    font-style: italic;
+}
 
 /* Loading state — animated pulse dot + text */
 .weekly-ai-loading {
@@ -1887,6 +1892,122 @@ a:hover { text-decoration: underline; }
     .weekly-card-title { font-size: 0.95rem; }
     .weekly-card-summary { font-size: 0.82rem; }
     .weekly-title { font-size: 1.25rem; }
+}
+
+/* ── Resumen de Temas View ────────────────────────────────────────── */
+
+.temas-view {
+    padding: 2rem 1.5rem;
+    max-width: 1100px;
+    margin: 0 auto;
+}
+.temas-header {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+.temas-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.8rem;
+    font-weight: 900;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+}
+.temas-title svg {
+    stroke: var(--accent);
+    flex-shrink: 0;
+}
+.temas-subtitle {
+    color: var(--text-dim);
+    font-size: 0.9rem;
+    margin-top: 0.3rem;
+    font-style: italic;
+}
+
+.temas-grid {
+    max-width: 720px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+}
+
+.tema-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 1.8rem 1rem;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-hi);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
+    text-align: center;
+    font-family: var(--font);
+    color: var(--text);
+}
+.tema-card:hover {
+    border-color: rgba(64, 136, 199, 0.4);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2);
+    transform: translateY(-2px);
+}
+
+.tema-card-emoji {
+    font-size: 2.2rem;
+    line-height: 1;
+}
+.tema-card-label {
+    font-size: 0.95rem;
+    font-weight: 600;
+    line-height: 1.3;
+}
+.tema-card-hint {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+.tema-card:hover .tema-card-hint {
+    opacity: 1;
+}
+
+.temas-detail-summary {
+    max-width: 700px;
+    margin: 0 auto 1.25rem;
+    padding: 1rem 1.25rem;
+    background: linear-gradient(135deg, rgba(64, 136, 199, 0.07), rgba(64, 136, 199, 0.02));
+    border: 1px solid rgba(64, 136, 199, 0.18);
+    border-radius: var(--radius);
+    font-family: 'Libre Baskerville', serif;
+    font-size: 0.92rem;
+    line-height: 1.7;
+    color: var(--text-secondary);
+}
+
+.temas-detail-count {
+    max-width: 700px;
+    margin: 0 auto 1rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+@media (max-width: 768px) {
+    .temas-grid { grid-template-columns: repeat(2, 1fr); }
+    .temas-title { font-size: 1.4rem; }
+}
+@media (max-width: 480px) {
+    .temas-view { padding: 1rem 0.75rem; }
+    .temas-grid { grid-template-columns: repeat(2, 1fr); gap: 0.75rem; }
+    .tema-card { padding: 1.2rem 0.75rem; }
+    .tema-card-emoji { font-size: 1.8rem; }
+    .tema-card-label { font-size: 0.85rem; }
+    .temas-title { font-size: 1.2rem; }
 }
 
 /* ── Top Story View ───────────────────────────────────────────────── */
@@ -2207,6 +2328,13 @@ a:hover { text-decoration: underline; }
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--accent);
+}
+.ai-summary-provider {
+    font-size: 0.68rem;
+    font-weight: 400;
+    font-style: italic;
+    color: var(--text-dim);
+    margin-left: auto;
 }
 
 .ai-pulse-dot {

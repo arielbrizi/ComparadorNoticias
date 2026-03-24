@@ -1616,8 +1616,9 @@ async function loadTemaDetail(label) {
         if (loading) loading.hidden = true;
 
         if (data.ai_available && data.relevant_group_ids?.length) {
-            const ids = new Set(data.relevant_group_ids);
-            const matched = state.groups.filter(g => ids.has(g.group_id));
+            const matched = data.matched_groups?.length
+                ? data.matched_groups
+                : state.groups.filter(g => new Set(data.relevant_group_ids).has(g.group_id));
 
             const summaryHtml = data.summary
                 ? `<div class="temas-detail-summary">

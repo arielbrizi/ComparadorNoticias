@@ -283,7 +283,16 @@ async def ai_search(
         hasta_dt = datetime.fromisoformat(hasta).replace(tzinfo=ART) + timedelta(days=1)
         grps = [g for g in grps if g.published and _ensure_aware(g.published) < hasta_dt]
 
-    return await ai_news_search(q, grps)
+    result = await ai_news_search(q, grps)
+
+    ids = set(result.get("relevant_group_ids", []))
+    if ids:
+        by_id = {g.group_id: g for g in grps}
+        result["matched_groups"] = [
+            by_id[gid].model_dump(mode="json") for gid in ids if gid in by_id
+        ]
+
+    return result
 
 
 @app.get("/api/topics")

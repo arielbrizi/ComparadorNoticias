@@ -462,6 +462,8 @@ function _isTopicsCacheValid() {
     return _topicsCache && (Date.now() - _topicsCacheTs) < _topicsTTL;
 }
 
+const _isTouchDevice = matchMedia("(pointer: coarse)").matches;
+
 function setupHeroSearch() {
     const input = $("#hero-search-input");
     const clearBtn = $("#hero-search-clear");
@@ -490,7 +492,7 @@ function setupHeroSearch() {
     });
 
     input.addEventListener("focus", () => {
-        if (!input.value.trim()) showSuggestions();
+        if (!input.value.trim() && !_isTouchDevice) showSuggestions();
     });
 
     input.addEventListener("keydown", (e) => {
@@ -536,6 +538,7 @@ function setupHeroSearch() {
     });
 
     prefetchTopics();
+    if (_isTouchDevice) renderTopicChips();
 
     setInterval(() => {
         if (!_isTopicsCacheValid() && !_topicsLoading) {
@@ -564,9 +567,13 @@ async function prefetchTopics() {
     } finally {
         clearTimeout(timer);
         _topicsLoading = false;
-        const input = $("#hero-search-input");
-        if (input && document.activeElement === input && !input.value.trim()) {
-            showSuggestions();
+        if (_isTouchDevice) {
+            renderTopicChips();
+        } else {
+            const input = $("#hero-search-input");
+            if (input && document.activeElement === input && !input.value.trim()) {
+                showSuggestions();
+            }
         }
     }
 }
@@ -610,6 +617,36 @@ function showSuggestions() {
 function hideSuggestions() {
     const box = $("#search-suggestions");
     if (box) box.hidden = true;
+}
+
+function renderTopicChips() {
+    const container = $("#topics-chips");
+    if (!container) return;
+
+    if (_isTopicsCacheValid() && _topicsCache?.length) {
+        container.innerHTML = _topicsCache.map(t =>
+            `<button class="topic-chip" data-query="${escHtml(t.label)}">`
+            + `<span class="topic-chip-emoji">${t.emoji}</span>`
+            + `<span>${escHtml(t.label)}</span>`
+            + `</button>`
+        ).join("");
+        container.hidden = false;
+
+        container.querySelectorAll(".topic-chip").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const query = btn.dataset.query;
+                const input = $("#hero-search-input");
+                input.value = query;
+                $("#hero-search-clear").hidden = false;
+                performAISearch(query);
+            });
+        });
+    } else if (_topicsLoading) {
+        container.innerHTML = `<span class="topic-chip-loading"><div class="ai-pulse-dot"></div> Cargando temas…</span>`;
+        container.hidden = false;
+    } else {
+        container.hidden = true;
+    }
 }
 
 async function performAISearch(query) {

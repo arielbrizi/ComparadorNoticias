@@ -350,6 +350,60 @@ a:hover { text-decoration: underline; }
 .hero-input-clear:not([hidden]) ~ .ai-status { right: 3.2rem; }
 .ai-status:not([hidden]) ~ .hero-ai-badge { display: none; }
 
+/* ── Topic chips (mobile) ─────────────────────────────────────── */
+.topics-chips {
+    display: none;
+    max-width: 540px;
+    margin: 0 auto 0.75rem;
+}
+
+@media (pointer: coarse) {
+    .topics-chips:not([hidden]) {
+        display: flex;
+        gap: 0.45rem;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        padding: 0.15rem 0.25rem;
+    }
+    .topics-chips::-webkit-scrollbar { display: none; }
+
+    .topics-chips .topic-chip {
+        flex-shrink: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.4rem 0.75rem;
+        background: var(--bg-glass);
+        border: 1px solid var(--border-hi);
+        border-radius: 999px;
+        color: var(--text);
+        font-family: var(--font);
+        font-size: 0.78rem;
+        white-space: nowrap;
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s;
+    }
+    .topics-chips .topic-chip:hover,
+    .topics-chips .topic-chip:active {
+        background: rgba(64,136,199,0.12);
+        border-color: rgba(64,136,199,0.3);
+    }
+    .topics-chips .topic-chip-emoji {
+        font-size: 0.9rem;
+        line-height: 1;
+    }
+    .topics-chips .topic-chip-loading {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.4rem 0.75rem;
+        font-size: 0.72rem;
+        color: var(--text-dim);
+        white-space: nowrap;
+    }
+}
+
 .hero-actions-wrap { position: relative; }
 
 .hero-actions {

@@ -52,6 +52,18 @@
         <div id="topics-chips" class="topics-chips" hidden></div>
         <div class="hero-actions-wrap">
         <div class="hero-actions">
+            <button class="hero-action-card" data-action="metricas">
+                <div class="hero-action-icon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+                </div>
+                <span class="hero-action-label">Métricas de Agenda</span>
+            </button>
+            <button class="hero-action-card" data-action="semana">
+                <div class="hero-action-icon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/></svg>
+                </div>
+                <span class="hero-action-label">Resumen de la Semana</span>
+            </button>
             <button class="hero-action-card" data-action="reportes">
                 <div class="hero-action-icon">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="12" y1="3" x2="12" y2="21"/><path d="M3 9h18"/></svg>
@@ -64,23 +76,11 @@
                 </div>
                 <span class="hero-action-label">Resumen de Temas</span>
             </button>
-            <button class="hero-action-card" data-action="semana">
-                <div class="hero-action-icon">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/></svg>
-                </div>
-                <span class="hero-action-label">Resumen de la Semana</span>
-            </button>
             <button class="hero-action-card" data-action="importante">
                 <div class="hero-action-icon">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
                 </div>
                 <span class="hero-action-label">La noticia más importante del Día</span>
-            </button>
-            <button class="hero-action-card" data-action="metricas">
-                <div class="hero-action-icon">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
-                </div>
-                <span class="hero-action-label">Métricas de Agenda</span>
             </button>
         </div>
         </div>
@@ -196,6 +196,28 @@
             <div class="metric-card-body" id="metric-exclusivity"></div>
         </div>
     </div>
+</section>
+
+<!-- ── Main content: Resumen Semanal ──────────────────────────────────── -->
+<section class="main-content weekly-view" id="view-semana" hidden>
+    <div class="weekly-header">
+        <button id="btn-back-home-weekly" class="btn-back" title="Volver a noticias">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><polyline points="12 19 5 12 12 5"/></svg>
+            Volver a noticias
+        </button>
+        <h2 class="weekly-title">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+            Resumen de la Semana
+        </h2>
+        <p class="weekly-subtitle" id="weekly-date-range"></p>
+        <div id="weekly-ai-attribution" class="weekly-ai-attribution" hidden></div>
+    </div>
+    <div id="weekly-loading" class="weekly-loading-area" hidden>
+        <div class="spinner"></div>
+    </div>
+    <div id="weekly-error" class="weekly-error" hidden></div>
+    <div id="weekly-content"></div>
+    <div id="weekly-footer" class="weekly-footer" hidden></div>
 </section>
 
 <!-- ── Comparison Modal ───────────────────────────────────────────────── -->

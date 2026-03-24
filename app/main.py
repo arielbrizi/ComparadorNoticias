@@ -12,6 +12,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -21,7 +25,7 @@ from app.article_grouper import group_articles
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
-from app.gemini_search import gemini_search, gemini_topics
+from app.gemini_search import gemini_search, gemini_topics, gemini_weekly_summary
 from app.metrics_store import init_db, query_metrics, save_group_metrics
 from app.models import Article, ArticleGroup, FeedStatus
 from app.news_store import (
@@ -288,6 +292,34 @@ async def trending_topics():
     async with _lock:
         grps = list(_groups)
     return await gemini_topics(grps)
+
+
+def _current_week_bounds() -> tuple[str, str]:
+    now = datetime.now(ART)
+    days_since_monday = now.weekday()
+    monday = now - timedelta(days=days_since_monday)
+    week_start = monday.strftime("%Y-%m-%d")
+    week_end = now.strftime("%Y-%m-%d")
+    return week_start, week_end
+
+
+@app.get("/api/weekly-range")
+async def weekly_range():
+    """Rango de fechas de la semana en curso (lunes a hoy, ART) sin llamar a la IA."""
+    week_start, week_end = _current_week_bounds()
+    return {"week_start": week_start, "week_end": week_end}
+
+
+@app.get("/api/weekly-summary")
+async def weekly_summary():
+    """Resumen semanal editorial generado por IA (lunes actual hasta hoy)."""
+    week_start, week_end = _current_week_bounds()
+
+    _articles_db, groups = load_groups_from_db(desde=week_start, hasta=week_end)
+    # Limitar contexto para que Gemini responda a tiempo
+    if len(groups) > 200:
+        groups = groups[:200]
+    return await gemini_weekly_summary(groups, week_start, week_end)
 
 
 @app.post("/api/refresh")

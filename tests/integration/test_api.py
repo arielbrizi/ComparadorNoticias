@@ -178,3 +178,22 @@ class TestApiMetricas:
         data = resp.json()
         assert "total_groups" in data
         assert "first_publisher_ranking" in data
+
+
+class TestApiWeeklySummary:
+    async def test_returns_structure_without_api_key(self, client):
+        resp = await client.get("/api/weekly-summary")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "themes" in data
+        assert "ai_available" in data
+        assert data["ai_available"] is False
+
+    async def test_weekly_range_returns_dates(self, client):
+        resp = await client.get("/api/weekly-range")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "week_start" in data
+        assert "week_end" in data
+        assert len(data["week_start"]) == 10
+        assert len(data["week_end"]) == 10

@@ -1611,6 +1611,284 @@ a:hover { text-decoration: underline; }
     opacity: 1;
 }
 
+/* ── Weekly Summary ──────────────────────────────────────────────── */
+
+.weekly-view { padding: 1.5rem; }
+
+.weekly-header {
+    max-width: 900px;
+    margin: 0 auto 2rem;
+    text-align: center;
+}
+
+.weekly-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 2rem;
+    font-weight: 800;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    margin-bottom: 0.4rem;
+}
+.weekly-title svg { stroke: var(--accent); opacity: 0.7; }
+
+.weekly-subtitle {
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    font-style: italic;
+}
+
+.weekly-ai-attribution {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.85rem;
+    padding: 0.55rem 1rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    color: var(--text-secondary);
+    background: linear-gradient(135deg, rgba(64, 136, 199, 0.12) 0%, rgba(100, 80, 200, 0.08) 100%);
+    border: 1px solid rgba(64, 136, 199, 0.22);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+    transition: background 0.4s, border-color 0.4s;
+}
+.weekly-ai-attribution svg {
+    flex-shrink: 0;
+    stroke: var(--accent);
+    opacity: 0.85;
+}
+.weekly-ai-attribution .weekly-ai-sep {
+    opacity: 0.45;
+    font-weight: 400;
+}
+.weekly-ai-attribution .weekly-ai-dates {
+    color: var(--text-dim);
+    font-weight: 400;
+}
+
+/* Loading state — animated pulse dot + text */
+.weekly-ai-loading {
+    border-color: rgba(64, 136, 199, 0.4);
+}
+.ai-pulse-dot-sm {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: ai-pulse-sm 1.4s ease-in-out infinite;
+    flex-shrink: 0;
+}
+@keyframes ai-pulse-sm {
+    0%, 100% { opacity: 0.35; transform: scale(0.85); }
+    50%      { opacity: 1;    transform: scale(1.15); }
+}
+
+/* Done state — brief green "Listo" flash */
+.weekly-ai-done {
+    border-color: rgba(52, 199, 89, 0.4);
+    background: linear-gradient(135deg, rgba(52, 199, 89, 0.12) 0%, rgba(64, 136, 199, 0.08) 100%);
+}
+.weekly-ai-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-weight: 600;
+    color: #34c759;
+    margin-left: 0.1rem;
+    opacity: 1;
+    transition: opacity 0.6s ease;
+}
+.weekly-ai-check::before {
+    content: "✓";
+    font-size: 0.9em;
+}
+.weekly-ai-check-hide {
+    opacity: 0;
+}
+
+/* After "Listo" fades, revert to normal badge colors */
+.weekly-ai-done:has(.weekly-ai-check-hide) {
+    border-color: rgba(64, 136, 199, 0.22);
+    background: linear-gradient(135deg, rgba(64, 136, 199, 0.12) 0%, rgba(100, 80, 200, 0.08) 100%);
+}
+
+/* Loading area (just spinner, no text) */
+.weekly-loading-area {
+    display: flex;
+    justify-content: center;
+    padding: 3rem 0;
+}
+.weekly-loading-area[hidden] {
+    display: none;
+}
+
+.weekly-error {
+    max-width: 600px;
+    margin: 2rem auto;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.95rem;
+}
+
+.weekly-hero {
+    max-width: 900px;
+    margin: 0 auto 2rem;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-hi);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.weekly-hero-image {
+    width: 100%;
+    height: 380px;
+    object-fit: cover;
+    display: block;
+}
+.weekly-hero-image-placeholder {
+    width: 100%;
+    height: 200px;
+    background: linear-gradient(135deg, rgba(64,136,199,0.08) 0%, rgba(100,80,200,0.06) 100%);
+}
+
+.weekly-hero-body {
+    padding: 1.5rem 2rem 2rem;
+}
+
+.weekly-theme-emoji {
+    font-size: 1.1rem;
+}
+.weekly-theme-emoji-lg {
+    font-size: 1.6rem;
+    display: block;
+    margin-bottom: 0.3rem;
+}
+
+.weekly-hero-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.6rem;
+    font-weight: 800;
+    color: var(--text);
+    line-height: 1.25;
+    margin-bottom: 0.8rem;
+}
+
+.weekly-hero-summary {
+    font-family: 'Libre Baskerville', serif;
+    font-size: 1rem;
+    line-height: 1.7;
+    color: var(--text-secondary);
+    margin-bottom: 1rem;
+}
+
+.weekly-theme-sources {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.weekly-source-badge {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    background: rgba(64,136,199,0.12);
+    border: 1px solid rgba(64,136,199,0.2);
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+.weekly-themes-grid {
+    max-width: 900px;
+    margin: 0 auto 2rem;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.25rem;
+}
+
+.weekly-theme-card {
+    background: var(--bg-raised);
+    border: 1px solid var(--border-hi);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.weekly-theme-card:hover {
+    border-color: rgba(64,136,199,0.3);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+}
+
+.weekly-card-image {
+    width: 100%;
+    height: 180px;
+    object-fit: cover;
+    display: block;
+}
+.weekly-card-image-placeholder {
+    width: 100%;
+    height: 100px;
+    background: linear-gradient(135deg, rgba(64,136,199,0.06) 0%, rgba(100,80,200,0.04) 100%);
+}
+
+.weekly-card-body {
+    padding: 1rem 1.25rem 1.25rem;
+}
+
+.weekly-card-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.3;
+    margin: 0.3rem 0 0.6rem;
+}
+
+.weekly-card-summary {
+    font-family: 'Libre Baskerville', serif;
+    font-size: 0.85rem;
+    line-height: 1.65;
+    color: var(--text-secondary);
+    margin-bottom: 0.8rem;
+}
+
+.weekly-footer {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 1rem 0;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+}
+
+@media (max-width: 768px) {
+    .weekly-themes-grid { grid-template-columns: 1fr; }
+    .weekly-hero-image { height: 240px; }
+    .weekly-hero-body { padding: 1.2rem 1.25rem 1.5rem; }
+    .weekly-hero-title { font-size: 1.3rem; }
+    .weekly-hero-summary { font-size: 0.92rem; }
+    .weekly-title { font-size: 1.5rem; }
+}
+
+@media (max-width: 480px) {
+    .weekly-view { padding: 1rem 0.75rem; }
+    .weekly-hero-image { height: 180px; }
+    .weekly-hero-body { padding: 1rem; }
+    .weekly-hero-title { font-size: 1.15rem; }
+    .weekly-hero-summary { font-size: 0.88rem; }
+    .weekly-card-image { height: 140px; }
+    .weekly-card-title { font-size: 0.95rem; }
+    .weekly-card-summary { font-size: 0.82rem; }
+    .weekly-title { font-size: 1.25rem; }
+}
+
 /* ── AI Search ─────────────────────────────────────────────────────── */
 
 /* Status indicator inside the search bar */

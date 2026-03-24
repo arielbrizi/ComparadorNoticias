@@ -167,6 +167,10 @@ function setupViewNav() {
     if (backBtn) {
         backBtn.addEventListener("click", () => switchView("noticias"));
     }
+    const backBtnWeekly = $("#btn-back-home-weekly");
+    if (backBtnWeekly) {
+        backBtnWeekly.addEventListener("click", () => switchView("noticias"));
+    }
 }
 
 let _metricsFiltersReady = false;
@@ -174,11 +178,15 @@ let _metricsFiltersReady = false;
 function switchView(view) {
     const noticias = $("#view-noticias");
     const metricas = $("#view-metricas");
+    const semana = $("#view-semana");
 
     state.currentView = view;
 
+    noticias.hidden = true;
+    metricas.hidden = true;
+    if (semana) semana.hidden = true;
+
     if (view === "metricas") {
-        noticias.hidden = true;
         metricas.hidden = false;
         if (!_metricsFiltersReady) {
             setupMetricsFilters();
@@ -189,8 +197,11 @@ function switchView(view) {
             loadMetrics(desde, hasta);
         }
         window.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (view === "semana") {
+        if (semana) semana.hidden = false;
+        loadWeeklySummary();
+        window.scrollTo({ top: 0, behavior: "smooth" });
     } else {
-        metricas.hidden = true;
         noticias.hidden = false;
     }
 }
@@ -531,6 +542,8 @@ function setupHeroSearch() {
             const action = card.dataset.action;
             if (action === "metricas") {
                 switchView("metricas");
+            } else if (action === "semana") {
+                switchView("semana");
             } else {
                 showToast(actionLabels[action] || "Próximamente");
             }
@@ -1122,6 +1135,175 @@ async function openComparison(group) {
 function closeModal() {
     $("#compare-modal").hidden = true;
     document.body.style.overflow = "";
+}
+
+// ── Weekly Summary ────────────────────────────────────────────────────────
+
+let _weeklyData = null;
+
+const _sparkleIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 3l1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/></svg>`;
+
+function _weeklyDateRange(ws, we) {
+    if (!ws || !we) return "";
+    const a = new Date(ws + "T12:00:00");
+    const b = new Date(we + "T12:00:00");
+    return `${a.toLocaleDateString("es-AR", { day: "numeric", month: "short" })} – ${b.toLocaleDateString("es-AR", { day: "numeric", month: "short", year: "numeric" })}`;
+}
+
+function _setWeeklyHeader(ws, we) {
+    const el = $("#weekly-date-range");
+    if (!el || !ws || !we) return;
+    const fmt = (iso) => {
+        const d = new Date(iso + "T12:00:00");
+        return d.toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long" });
+    };
+    const s = fmt(ws), e = fmt(we);
+    el.textContent = `${s.charAt(0).toUpperCase() + s.slice(1)} — ${e.charAt(0).toUpperCase() + e.slice(1)}, ${new Date(we + "T12:00:00").getFullYear()}`;
+}
+
+function _setAttr(state, ws, we) {
+    const attr = $("#weekly-ai-attribution");
+    if (!attr) return;
+    const range = _weeklyDateRange(ws, we);
+    const sep = range ? `<span class="weekly-ai-sep">·</span><span class="weekly-ai-dates">${range}</span>` : "";
+
+    if (state === "loading") {
+        attr.className = "weekly-ai-attribution weekly-ai-loading";
+        attr.innerHTML = `<div class="ai-pulse-dot-sm"></div><span>Generando con IA</span>${sep}`;
+        attr.hidden = false;
+    } else if (state === "done") {
+        attr.className = "weekly-ai-attribution weekly-ai-done";
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${sep}`;
+        attr.hidden = false;
+        setTimeout(() => {
+            const check = attr.querySelector(".weekly-ai-check");
+            if (check) check.classList.add("weekly-ai-check-hide");
+        }, 2500);
+    } else {
+        attr.className = "weekly-ai-attribution";
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${sep}`;
+        attr.hidden = false;
+    }
+}
+
+async function loadWeeklySummary() {
+    if (_weeklyData) {
+        renderWeeklySummary(_weeklyData);
+        return;
+    }
+
+    const loading = $("#weekly-loading");
+    const error = $("#weekly-error");
+    const content = $("#weekly-content");
+    const footer = $("#weekly-footer");
+
+    if (error) error.hidden = true;
+    if (content) content.innerHTML = "";
+    if (footer) { footer.hidden = true; footer.innerHTML = ""; }
+
+    let ws = null, we = null;
+    try {
+        const r = await fetch(`${API}/api/weekly-range`);
+        if (r.ok) { const d = await r.json(); ws = d.week_start; we = d.week_end; _setWeeklyHeader(ws, we); }
+    } catch (_) { /* no bloquear */ }
+
+    _setAttr("loading", ws, we);
+    if (loading) loading.hidden = false;
+
+    let timer;
+    try {
+        const ctrl = new AbortController();
+        timer = setTimeout(() => ctrl.abort(), 180000);
+        const resp = await fetch(`${API}/api/weekly-summary`, { signal: ctrl.signal });
+        clearTimeout(timer); timer = null;
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        if (loading) loading.hidden = true;
+
+        if (data.ai_available && data.themes?.length) {
+            _weeklyData = data;
+            renderWeeklySummary(data);
+        } else if (data.ai_available) {
+            _setAttr("static", data.week_start || ws, data.week_end || we);
+            if (error) { error.innerHTML = `<p>No hay suficientes noticias esta semana para generar un resumen.</p>`; error.hidden = false; }
+        } else {
+            _setAttr("static", data.week_start || ws, data.week_end || we);
+            if (error) { error.innerHTML = `<p>La IA no está disponible en este momento. Intentá de nuevo más tarde.</p>`; error.hidden = false; }
+        }
+    } catch (err) {
+        if (loading) loading.hidden = true;
+        const msg = err.name === "AbortError"
+            ? "La generación tardó demasiado. Intentá de nuevo."
+            : "Error al generar el resumen. Intentá de nuevo más tarde.";
+        if (error) { error.innerHTML = `<p>${msg}</p>`; error.hidden = false; }
+        _setAttr("static", ws, we);
+        console.error("Weekly summary failed:", err);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+function renderWeeklySummary(data) {
+    const loading = $("#weekly-loading");
+    const content = $("#weekly-content");
+    const footer = $("#weekly-footer");
+    if (loading) loading.hidden = true;
+
+    _setWeeklyHeader(data.week_start, data.week_end);
+    _setAttr("done", data.week_start, data.week_end);
+
+    const themes = (data.themes || []).filter(t => t && typeof t === "object");
+    if (!themes.length) {
+        content.innerHTML = `<div class="empty-state"><h3>Sin temas esta semana</h3></div>`;
+        return;
+    }
+
+    const hero = themes[0];
+    const rest = themes.slice(1);
+
+    const heroHtml = `
+        <article class="weekly-hero">
+            ${hero.image
+                ? `<img class="weekly-hero-image" src="${escHtml(hero.image)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+                : `<div class="weekly-hero-image-placeholder"></div>`
+            }
+            <div class="weekly-hero-body">
+                <span class="weekly-theme-emoji weekly-theme-emoji-lg">${hero.emoji || ""}</span>
+                <h3 class="weekly-hero-title">${escHtml(hero.label)}</h3>
+                <p class="weekly-hero-summary">${escHtml(hero.summary)}</p>
+                <div class="weekly-theme-sources">
+                    ${(hero.sources || []).map(s => `<span class="weekly-source-badge">${escHtml(s)}</span>`).join("")}
+                </div>
+            </div>
+        </article>`;
+
+    const cardsHtml = rest.map(theme => `
+        <article class="weekly-theme-card">
+            ${theme.image
+                ? `<img class="weekly-card-image" src="${escHtml(theme.image)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=\\'weekly-card-image-placeholder\\'></div>'">`
+                : `<div class="weekly-card-image-placeholder"></div>`
+            }
+            <div class="weekly-card-body">
+                <span class="weekly-theme-emoji">${theme.emoji || ""}</span>
+                <h4 class="weekly-card-title">${escHtml(theme.label)}</h4>
+                <p class="weekly-card-summary">${escHtml(theme.summary)}</p>
+                <div class="weekly-theme-sources">
+                    ${(theme.sources || []).map(s => `<span class="weekly-source-badge">${escHtml(s)}</span>`).join("")}
+                </div>
+            </div>
+        </article>
+    `).join("");
+
+    content.innerHTML = heroHtml + `<div class="weekly-themes-grid">${cardsHtml}</div>`;
+
+    const allSources = new Set();
+    themes.forEach(t => (t.sources || []).forEach(s => allSources.add(s)));
+    if (footer && allSources.size) {
+        footer.innerHTML = `Fuentes analizadas: ${[...allSources].sort().join(" · ")}`;
+        footer.hidden = false;
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

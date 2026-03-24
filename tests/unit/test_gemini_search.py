@@ -11,6 +11,7 @@ from app.gemini_search import (
     _parse_retry_seconds,
     gemini_search,
     gemini_topics,
+    gemini_weekly_summary,
 )
 
 
@@ -116,3 +117,54 @@ class TestGeminiTopics:
         result = await gemini_topics(sample_groups)
         assert result["ai_available"] is False
         assert result["topics"] == []
+
+
+class TestGeminiWeeklySummary:
+    async def test_returns_unavailable_without_api_key(self, sample_groups, monkeypatch):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr("app.gemini_search._client", None)
+        result = await gemini_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
+        assert result["ai_available"] is False
+        assert result["themes"] == []
+
+    async def test_returns_empty_for_no_groups(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        monkeypatch.setattr("app.gemini_search._client", MagicMock())
+        result = await gemini_weekly_summary([], "2026-03-17", "2026-03-23")
+        assert result["ai_available"] is True
+        assert result["themes"] == []
+        assert result["week_start"] == "2026-03-17"
+        assert result["week_end"] == "2026-03-23"
+
+    async def test_cache_hit(self, sample_groups, monkeypatch):
+        import time
+        monkeypatch.setattr("app.gemini_search._weekly_cache", {
+            "data": {
+                "themes": [{"label": "Test", "emoji": "🧪", "summary": "Test", "group_ids": [], "image": "", "sources": []}],
+                "ai_available": True,
+                "week_start": "2026-03-17",
+                "week_end": "2026-03-23",
+            },
+            "ts": time.time(),
+            "week_key": "2026-03-17_2026-03-23",
+        })
+        result = await gemini_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
+        assert result["cached"] is True
+        assert len(result["themes"]) == 1
+
+    async def test_cache_miss_different_week(self, sample_groups, monkeypatch):
+        import time
+        monkeypatch.setattr("app.gemini_search._weekly_cache", {
+            "data": {
+                "themes": [{"label": "Old", "emoji": "📅", "summary": "Old", "group_ids": [], "image": "", "sources": []}],
+                "ai_available": True,
+                "week_start": "2026-03-10",
+                "week_end": "2026-03-16",
+            },
+            "ts": time.time(),
+            "week_key": "2026-03-10_2026-03-16",
+        })
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr("app.gemini_search._client", None)
+        result = await gemini_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
+        assert result["ai_available"] is False

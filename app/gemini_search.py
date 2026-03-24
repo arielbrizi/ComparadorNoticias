@@ -241,3 +241,115 @@ async def gemini_topics(groups: list[ArticleGroup]) -> dict:
     except Exception as exc:
         logger.error("Gemini topics failed: %s", exc)
         return {"topics": [], "ai_available": False}
+
+
+# ── Weekly summary ────────────────────────────────────────────────────
+
+_weekly_cache: dict = {"data": None, "ts": 0, "week_key": ""}
+WEEKLY_TTL = 3600  # 1 hour
+WEEKLY_TIMEOUT = 120
+
+WEEKLY_PROMPT = """Sos el editor jefe de un diario argentino preparando el resumen semanal.
+Analizá todas las noticias de la semana y extraé los temas más importantes.
+
+Noticias de la semana ({week_start} a {week_end}):
+{context}
+
+Respondé ÚNICAMENTE con JSON válido (sin markdown, sin bloques de código):
+{{
+  "themes": [
+    {{
+      "label": "Título editorial del tema (3-8 palabras)",
+      "emoji": "emoji representativo",
+      "summary": "Resumen editorial de 3-5 oraciones en español argentino, neutro y profesional. Basate en los títulos y resúmenes disponibles.",
+      "group_ids": ["id1", "id2", "id3"]
+    }},
+    ...
+  ]
+}}
+
+Reglas:
+- Elegí entre 5 y 10 temas según la densidad informativa de la semana.
+- Ordenalos por importancia/cobertura (más fuentes y artículos = más importante).
+- Cada label debe ser un título editorial conciso (ej: "Acuerdo Mercosur-UE sacude la industria").
+- Cada summary debe ser informativo, neutral, en español argentino, y basarse SOLO en las noticias disponibles.
+- Incluí en group_ids TODOS los grupos relevantes a cada tema.
+- Elegí emojis representativos pero profesionales.
+- Devolvé SOLO el JSON."""
+
+
+async def gemini_weekly_summary(
+    groups: list[ArticleGroup],
+    week_start: str,
+    week_end: str,
+) -> dict:
+    """Generate an editorial weekly summary from the week's news groups."""
+    week_key = f"{week_start}_{week_end}"
+    now = time.time()
+    if (
+        _weekly_cache["data"]
+        and _weekly_cache["week_key"] == week_key
+        and (now - _weekly_cache["ts"]) < WEEKLY_TTL
+    ):
+        return {**_weekly_cache["data"], "cached": True}
+
+    client = _get_client()
+    if not client:
+        return {"themes": [], "ai_available": False}
+
+    if not groups:
+        return {"themes": [], "ai_available": True, "week_start": week_start, "week_end": week_end}
+
+    context = _build_context(groups, max_groups=200)
+    prompt = WEEKLY_PROMPT.format(
+        week_start=week_start,
+        week_end=week_end,
+        context=context,
+    )
+
+    try:
+        saved_timeout = GEMINI_TIMEOUT
+        import app.gemini_search as _self
+        _self.GEMINI_TIMEOUT = WEEKLY_TIMEOUT
+        try:
+            raw = await _call_gemini(client, prompt)
+        finally:
+            _self.GEMINI_TIMEOUT = saved_timeout
+
+        text = _clean_json_response(raw)
+        result = json.loads(text)
+        themes = result.get("themes", [])[:10]
+
+        groups_by_id = {g.group_id: g for g in groups}
+        for theme in themes:
+            gids = theme.get("group_ids", [])
+            image = ""
+            sources = set()
+            for gid in gids:
+                g = groups_by_id.get(gid)
+                if g:
+                    if not image and g.representative_image:
+                        image = g.representative_image
+                    for a in g.articles:
+                        sources.add(a.source)
+            theme["image"] = image
+            theme["sources"] = sorted(sources)
+
+        payload = {
+            "themes": themes,
+            "ai_available": True,
+            "week_start": week_start,
+            "week_end": week_end,
+        }
+        _weekly_cache["data"] = payload
+        _weekly_cache["ts"] = now
+        _weekly_cache["week_key"] = week_key
+        logger.info("Weekly summary generated (%d themes)", len(themes))
+        return payload
+
+    except json.JSONDecodeError as exc:
+        logger.error("Gemini weekly returned invalid JSON: %s — raw: %s", exc, text[:300])
+        return {"themes": [], "ai_available": False, "error": "Invalid AI response"}
+    except Exception as exc:
+        logger.error("Gemini weekly summary failed: %s", exc)
+        return {"themes": [], "ai_available": False, "error": str(exc)}

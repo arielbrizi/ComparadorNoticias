@@ -41,11 +41,11 @@ SOURCES = {
         "color": "#e76f51",
         "logo": "",
         "feeds": {
-            "portada": "https://www.pagina12.com.ar/rss/portada",
-            "politica": "https://www.pagina12.com.ar/rss/secciones/el-pais/notas",
-            "economia": "https://www.pagina12.com.ar/rss/secciones/economia/notas",
-            "sociedad": "https://www.pagina12.com.ar/rss/secciones/sociedad/notas",
-            "deportes": "https://www.pagina12.com.ar/rss/secciones/deportes/notas",
+            "portada": "https://www.pagina12.com.ar/arc/outboundfeeds/rss/portada",
+            "politica": "https://www.pagina12.com.ar/arc/outboundfeeds/rss/secciones/el-pais/notas",
+            "economia": "https://www.pagina12.com.ar/arc/outboundfeeds/rss/secciones/economia/notas",
+            "sociedad": "https://www.pagina12.com.ar/arc/outboundfeeds/rss/secciones/sociedad/notas",
+            "deportes": "https://www.pagina12.com.ar/arc/outboundfeeds/rss/secciones/deportes/notas",
         },
     },
     "Ámbito Financiero": {

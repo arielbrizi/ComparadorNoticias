@@ -485,10 +485,20 @@ let _aiSearchController = null;
 let _topicsCache = null;
 let _topicsLoading = false;
 let _topicsCacheTs = 0;
+let _topicsLoadingSince = 0;
 const _topicsTTL = 55 * 60 * 1000; // 55 min (slightly less than server's 1h TTL)
+const _topicsLoadingTimeout = 20_000;
 
 function _isTopicsCacheValid() {
     return _topicsCache && (Date.now() - _topicsCacheTs) < _topicsTTL;
+}
+
+function _resetStaleLoading() {
+    if (_topicsLoading && _topicsLoadingSince &&
+        (Date.now() - _topicsLoadingSince) > _topicsLoadingTimeout) {
+        _topicsLoading = false;
+        _topicsLoadingSince = 0;
+    }
 }
 
 const _isTouchDevice = matchMedia("(pointer: coarse)").matches;
@@ -582,12 +592,31 @@ function setupHeroSearch() {
             prefetchTopics();
         }
     }, 10 * 60 * 1000); // check every 10 min
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible") return;
+        _resetStaleLoading();
+        if (!_isTopicsCacheValid() && !_topicsLoading) {
+            prefetchTopics();
+        }
+    });
+
+    window.addEventListener("pageshow", (e) => {
+        if (!e.persisted) return; // only bfcache restorations
+        _topicsLoading = false;
+        _topicsLoadingSince = 0;
+        _topicsCache = null;
+        _topicsCacheTs = 0;
+        prefetchTopics();
+    });
 }
 
 async function prefetchTopics() {
+    _resetStaleLoading();
     if (_topicsLoading) return;
     if (_isTopicsCacheValid()) return;
     _topicsLoading = true;
+    _topicsLoadingSince = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
     try {
@@ -602,6 +631,7 @@ async function prefetchTopics() {
     } finally {
         clearTimeout(timer);
         _topicsLoading = false;
+        _topicsLoadingSince = 0;
         if (_isTouchDevice) {
             renderTopicChips();
         } else {
@@ -616,6 +646,7 @@ async function prefetchTopics() {
 function showSuggestions() {
     const box = $("#search-suggestions");
     if (!box) return;
+    _resetStaleLoading();
 
     if (_isTopicsCacheValid() && _topicsCache?.length) {
         box.innerHTML =
@@ -657,6 +688,7 @@ function hideSuggestions() {
 function renderTopicChips() {
     const container = $("#topics-chips");
     if (!container) return;
+    _resetStaleLoading();
 
     if (_isTopicsCacheValid() && _topicsCache?.length) {
         container.innerHTML = _topicsCache.map(t =>
@@ -680,7 +712,9 @@ function renderTopicChips() {
         container.innerHTML = `<span class="topic-chip-loading"><div class="ai-pulse-dot"></div> Cargando temas…</span>`;
         container.hidden = false;
     } else {
-        container.hidden = true;
+        container.innerHTML = `<span class="topic-chip-loading"><div class="ai-pulse-dot"></div> Cargando temas…</span>`;
+        container.hidden = false;
+        prefetchTopics();
     }
 }
 

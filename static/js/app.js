@@ -165,7 +165,7 @@ function populateFooterSources(sources) {
 function setupViewNav() {
     ["btn-back-home", "btn-back-home-weekly", "btn-back-home-topstory", "btn-back-home-nube"].forEach(id => {
         const btn = $(`#${id}`);
-        if (btn) btn.addEventListener("click", () => switchView("noticias"));
+        if (btn) btn.addEventListener("click", () => history.back());
     });
     const btnTemas = $("#btn-back-temas");
     if (btnTemas) btnTemas.addEventListener("click", () => {
@@ -173,14 +173,27 @@ function setupViewNav() {
             _temasSubview = "topics";
             loadTemasView();
         } else {
-            switchView("noticias");
+            history.back();
         }
+    });
+
+    window.addEventListener("popstate", (e) => {
+        const view = (e.state && e.state.view) || "noticias";
+        _switchViewInternal(view);
+    });
+
+    history.replaceState({ view: "noticias" }, "");
+
+    const brandHome = $("#brand-home");
+    if (brandHome) brandHome.addEventListener("click", (e) => {
+        e.preventDefault();
+        switchView("noticias");
     });
 }
 
 let _metricsFiltersReady = false;
 
-function switchView(view) {
+function _switchViewInternal(view) {
     const noticias = $("#view-noticias");
     const metricas = $("#view-metricas");
     const semana = $("#view-semana");
@@ -228,6 +241,13 @@ function switchView(view) {
     } else {
         noticias.hidden = false;
     }
+}
+
+function switchView(view) {
+    if (state.currentView !== view) {
+        history.pushState({ view }, "", `#${view}`);
+    }
+    _switchViewInternal(view);
 }
 
 // ── Metrics ───────────────────────────────────────────────────────────────

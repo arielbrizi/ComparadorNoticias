@@ -59,6 +59,8 @@ a:hover { text-decoration: underline; }
     justify-content: space-between;
 }
 
+a.brand { text-decoration: none; color: inherit; cursor: pointer; }
+
 .logo {
     font-size: 2.2rem;
     color: var(--text);

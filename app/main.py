@@ -26,6 +26,7 @@ from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
 from app.ai_search import ai_news_search, ai_topics, ai_top_story, ai_weekly_summary
+from app.wordcloud import build_wordcloud
 from app.metrics_store import init_db, query_metrics, save_group_metrics
 from app.models import Article, ArticleGroup, FeedStatus
 from app.news_store import (
@@ -61,6 +62,8 @@ _articles: list[Article] = []
 _groups: list[ArticleGroup] = []
 _statuses: list[FeedStatus] = []
 _last_update: datetime | None = None
+_wordcloud_cache: list = []
+_wordcloud_updated: datetime | None = None
 _lock = asyncio.Lock()
 
 
@@ -96,6 +99,18 @@ async def refresh_news():
         ok,
         len(statuses),
     )
+    await refresh_wordcloud()
+
+
+async def refresh_wordcloud():
+    global _wordcloud_cache, _wordcloud_updated
+    async with _lock:
+        arts = list(_articles)
+    words = build_wordcloud(arts)
+    async with _lock:
+        _wordcloud_cache = words
+        _wordcloud_updated = datetime.now(timezone.utc)
+    logger.info("Word cloud actualizada: %d términos", len(words))
 
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
@@ -128,6 +143,7 @@ async def lifespan(_app: FastAPI):
 
     asyncio.create_task(refresh_news())
     scheduler.add_job(refresh_news, "interval", minutes=10)
+    scheduler.add_job(refresh_wordcloud, "interval", hours=2)
     scheduler.add_job(purge_old_news, "cron", hour=7, minute=0)
     scheduler.start()
     yield
@@ -364,6 +380,18 @@ async def top_story():
 async def manual_refresh():
     await refresh_news()
     return {"status": "ok", "total_articles": len(_articles)}
+
+
+@app.get("/api/wordcloud")
+async def get_wordcloud():
+    """Términos más frecuentes en títulos de las últimas 24 horas."""
+    async with _lock:
+        words = list(_wordcloud_cache)
+        updated = _wordcloud_updated
+    return {
+        "words": words,
+        "updated_at": updated.isoformat() if updated else None,
+    }
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

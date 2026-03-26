@@ -163,7 +163,7 @@ function populateFooterSources(sources) {
 
 // ── View navigation ───────────────────────────────────────────────────────
 function setupViewNav() {
-    ["btn-back-home", "btn-back-home-weekly", "btn-back-home-topstory"].forEach(id => {
+    ["btn-back-home", "btn-back-home-weekly", "btn-back-home-topstory", "btn-back-home-nube"].forEach(id => {
         const btn = $(`#${id}`);
         if (btn) btn.addEventListener("click", () => switchView("noticias"));
     });
@@ -186,6 +186,7 @@ function switchView(view) {
     const semana = $("#view-semana");
     const importante = $("#view-importante");
     const temas = $("#view-temas");
+    const nube = $("#view-nube");
 
     state.currentView = view;
 
@@ -194,6 +195,7 @@ function switchView(view) {
     if (semana) semana.hidden = true;
     if (importante) importante.hidden = true;
     if (temas) temas.hidden = true;
+    if (nube) nube.hidden = true;
 
     if (view === "metricas") {
         metricas.hidden = false;
@@ -218,6 +220,10 @@ function switchView(view) {
         if (temas) temas.hidden = false;
         _temasSubview = "topics";
         loadTemasView();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (view === "nube") {
+        if (nube) nube.hidden = false;
+        loadWordCloud();
         window.scrollTo({ top: 0, behavior: "smooth" });
     } else {
         noticias.hidden = false;
@@ -576,6 +582,8 @@ function setupHeroSearch() {
                 switchView("importante");
             } else if (action === "temas") {
                 switchView("temas");
+            } else if (action === "nube") {
+                switchView("nube");
             } else {
                 showToast(actionLabels[action] || "Próximamente");
             }
@@ -859,6 +867,71 @@ function renderAIStatus() {
         el.className = "ai-status";
         el.removeAttribute("title");
         el.innerHTML = "";
+    }
+}
+
+// ── Word Cloud ────────────────────────────────────────────────────────────
+
+const _wcColors = ["#e63946","#1a73e8","#2d6a4f","#e76f51","#f4a261","#7209b7","#3a86a8"];
+let _wcLoaded = false;
+
+async function loadWordCloud() {
+    const loading = $("#wordcloud-loading");
+    const error = $("#wordcloud-error");
+    const container = $("#wordcloud-container");
+    const canvas = $("#wordcloud-canvas");
+
+    if (_wcLoaded) return;
+
+    loading.hidden = false;
+    error.hidden = true;
+    container.style.display = "none";
+
+    try {
+        const res = await fetch(`${API}/api/wordcloud`);
+        const data = await res.json();
+        if (!data.words || data.words.length === 0) {
+            error.hidden = false;
+            error.textContent = "No hay suficientes noticias para generar la nube de palabras.";
+            loading.hidden = true;
+            return;
+        }
+
+        container.style.display = "";
+        loading.hidden = true;
+
+        const rect = container.getBoundingClientRect();
+        const w = Math.floor(rect.width) || 800;
+        const h = Math.min(Math.floor(w * 0.56), 520);
+        canvas.width = w * 2;
+        canvas.height = h * 2;
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
+
+        const maxCount = data.words[0][1];
+        const scale = Math.max(1, (w * 2) / 800);
+
+        WordCloud(canvas, {
+            list: data.words,
+            weightFactor: (size) => Math.max(10, (size / maxCount) * 60 * scale),
+            fontFamily: "Inter, system-ui, sans-serif",
+            fontWeight: 600,
+            color: (_word, _weight, _fontSize, _distance, theta) => {
+                return _wcColors[Math.abs(Math.floor(theta * 100)) % _wcColors.length];
+            },
+            rotateRatio: 0.3,
+            rotationSteps: 2,
+            backgroundColor: "transparent",
+            gridSize: Math.round(8 * scale),
+            shrinkToFit: true,
+            drawOutOfBound: false,
+        });
+
+        _wcLoaded = true;
+    } catch (e) {
+        loading.hidden = true;
+        error.hidden = false;
+        error.textContent = "Error al cargar la nube de palabras.";
     }
 }
 

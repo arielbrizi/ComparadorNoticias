@@ -12,8 +12,10 @@ from datetime import timedelta
 
 from rapidfuzz import fuzz
 
-from app.config import SIMILARITY_THRESHOLD
+from app.config import CATEGORIES, SIMILARITY_THRESHOLD
 from app.models import Article, ArticleGroup
+
+_CATEGORY_PRIORITY = {cat: i for i, cat in enumerate(CATEGORIES)}
 
 _STOPWORDS = {
     "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "al",
@@ -151,9 +153,22 @@ def group_articles(articles: list[Article]) -> list[ArticleGroup]:
             )
         )
 
+    _CAT_BOOST = {"portada": 1, "politica": 0.5}
+    _HIGHLIGHT_KEYWORDS = {"seleccion", "selección", "mundial", "copa america",
+                           "copa américa", "eliminatorias", "messi", "scaloni"}
+
+    def _sort_score(g: ArticleGroup) -> float:
+        boost = _CAT_BOOST.get(g.category, 0)
+        if not boost and g.category == "deportes":
+            title_lower = g.representative_title.lower()
+            if any(kw in title_lower for kw in _HIGHLIGHT_KEYWORDS):
+                boost = 1
+        return g.source_count + boost
+
     result.sort(
         key=lambda g: (
-            -g.source_count,
+            -_sort_score(g),
+            _CATEGORY_PRIORITY.get(g.category, 99),
             -(g.published.timestamp() if g.published else 0),
         )
     )

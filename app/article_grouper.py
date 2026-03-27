@@ -153,9 +153,15 @@ def group_articles(articles: list[Article]) -> list[ArticleGroup]:
             )
         )
 
-    _CAT_BOOST = {"portada": 1, "politica": 0.5}
+    _CAT_BOOST = {"politica": 0.5}
     _HIGHLIGHT_KEYWORDS = {"seleccion", "selección", "mundial", "copa america",
                            "copa américa", "eliminatorias", "messi", "scaloni"}
+
+    def _sort_tier(g: ArticleGroup) -> int:
+        """Tier 0 = portada with 3+ sources (always first), tier 1 = rest."""
+        if g.category == "portada" and g.source_count >= 3:
+            return 0
+        return 1
 
     def _sort_score(g: ArticleGroup) -> float:
         boost = _CAT_BOOST.get(g.category, 0)
@@ -167,6 +173,7 @@ def group_articles(articles: list[Article]) -> list[ArticleGroup]:
 
     result.sort(
         key=lambda g: (
+            _sort_tier(g),
             -_sort_score(g),
             _CATEGORY_PRIORITY.get(g.category, 99),
             -(g.published.timestamp() if g.published else 0),

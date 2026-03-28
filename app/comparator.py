@@ -11,6 +11,7 @@ import unicodedata
 
 from rapidfuzz import fuzz
 
+from app.config import SOURCES
 from app.models import Article
 
 
@@ -109,9 +110,11 @@ def compare_group_articles(articles: list[Article]) -> dict:
             if d.lower() not in other_data_text
         ]
 
+        source_logo = SOURCES.get(art.source, {}).get("logo", "")
         sources_data.append({
             "source": art.source,
             "source_color": art.source_color,
+            "source_logo": source_logo,
             "title": art.title,
             "summary": art.summary or "",
             "link": art.link,

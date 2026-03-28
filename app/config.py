@@ -6,7 +6,7 @@ Cada fuente tiene feeds RSS organizados por categoría.
 SOURCES = {
     "Infobae": {
         "color": "#e63946",
-        "logo": "",
+        "logo": "https://www.google.com/s2/favicons?domain=infobae.com&sz=64",
         "exclude_link_re": r"/(?:mexico|colombia|espana|peru|centroamerica|venezuela)/",
         "feeds": {
             "portada": "https://www.infobae.com/arc/outboundfeeds/rss/",
@@ -18,7 +18,7 @@ SOURCES = {
     },
     "Clarín": {
         "color": "#1a73e8",
-        "logo": "",
+        "logo": "https://www.google.com/s2/favicons?domain=clarin.com&sz=64",
         "feeds": {
             "portada": "https://www.clarin.com/rss/lo-ultimo/",
             "politica": "https://www.clarin.com/rss/politica/",
@@ -29,7 +29,7 @@ SOURCES = {
     },
     "La Nación": {
         "color": "#2d6a4f",
-        "logo": "",
+        "logo": "https://www.google.com/s2/favicons?domain=lanacion.com.ar&sz=64",
         "feeds": {
             "portada": "https://www.lanacion.com.ar/arc/outboundfeeds/rss/",
             "politica": "https://www.lanacion.com.ar/arc/outboundfeeds/rss/category/politica/",
@@ -40,7 +40,7 @@ SOURCES = {
     },
     "Página 12": {
         "color": "#e76f51",
-        "logo": "",
+        "logo": "https://www.google.com/s2/favicons?domain=pagina12.com.ar&sz=64",
         "feeds": {
             "portada": "https://www.pagina12.com.ar/arc/outboundfeeds/rss/portada",
             "politica": "https://www.pagina12.com.ar/arc/outboundfeeds/rss/secciones/el-pais/notas",
@@ -51,7 +51,7 @@ SOURCES = {
     },
     "Ámbito Financiero": {
         "color": "#f4a261",
-        "logo": "",
+        "logo": "https://www.google.com/s2/favicons?domain=ambito.com&sz=64",
         "feeds": {
             "portada": "https://www.ambito.com/rss/pages/home.xml",
             "politica": "https://www.ambito.com/rss/pages/politica.xml",
@@ -62,7 +62,7 @@ SOURCES = {
     },
     "Perfil": {
         "color": "#7209b7",
-        "logo": "",
+        "logo": "https://www.google.com/s2/favicons?domain=perfil.com&sz=64",
         "feeds": {
             "portada": "https://www.perfil.com/feed",
             "politica": "https://www.perfil.com/feed/politica",
@@ -73,7 +73,7 @@ SOURCES = {
     },
     "Buenos Aires Times": {
         "color": "#3a86a8",
-        "logo": "",
+        "logo": "https://www.google.com/s2/favicons?domain=batimes.com.ar&sz=64",
         "feeds": {
             "portada": "https://www.batimes.com.ar/feed",
         },

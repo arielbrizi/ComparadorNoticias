@@ -249,7 +249,7 @@ async def comparar(group_id: str):
 @app.get("/api/fuentes")
 async def get_fuentes():
     return {
-        name: {"color": cfg["color"], "categories": list(cfg["feeds"].keys())}
+        name: {"color": cfg["color"], "logo": cfg.get("logo", ""), "categories": list(cfg["feeds"].keys())}
         for name, cfg in SOURCES.items()
     }
 

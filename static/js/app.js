@@ -1180,10 +1180,13 @@ async function openComparison(group) {
             const toneLabel = { alarmista: "Tono alarmista", positivo: "Tono positivo", informativo: "Tono informativo", neutral: "Tono neutral" }[d.tone] || d.tone;
             const focusLabel = { político: "Enfoque político", económico: "Enfoque económico", policial: "Enfoque policial", deportivo: "Enfoque deportivo", general: "Enfoque general" }[d.focus] || d.focus;
             const toneClass = { alarmista: "tone-alarm", positivo: "tone-positive", informativo: "tone-info", neutral: "tone-neutral" }[d.tone] || "tone-neutral";
+            const framingLogo = srcData.source_logo
+                ? `<img class="source-logo-sm" src="${escHtml(srcData.source_logo)}" alt="">`
+                : `<span class="compare-source-dot" style="background:${escHtml(srcData.source_color || '#888')}"></span>`;
             return `
             <div class="framing-card">
                 <div class="framing-source">
-                    <span class="compare-source-dot" style="background:${escHtml(srcData.source_color || '#888')}"></span>
+                    ${framingLogo}
                     ${escHtml(d.source)}
                 </div>
                 <div class="framing-title">"${escHtml(d.title)}"</div>
@@ -1212,12 +1215,19 @@ async function openComparison(group) {
                 hour: "2-digit", minute: "2-digit"
               })
             : "";
+        const colLogo = s.source_logo
+            ? `<img class="source-logo-sm" src="${escHtml(s.source_logo)}" alt="">`
+            : `<span class="compare-source-dot" style="background:${escHtml(s.source_color)}"></span>`;
+        const artImg = s.image
+            ? `<div class="compare-thumb-wrap"><img class="compare-thumb" src="${escHtml(s.image)}" alt="" loading="lazy"></div>`
+            : "";
         return `
         <div class="compare-column">
             <div class="compare-source-name">
-                <span class="compare-source-dot" style="background:${escHtml(s.source_color)}"></span>
+                ${colLogo}
                 ${escHtml(s.source)}
             </div>
+            ${artImg}
             <div class="compare-title">${escHtml(s.title)}</div>
             <div class="compare-summary">${escHtml(s.summary || "Sin resumen disponible desde el feed RSS.")}</div>
             ${pubDate ? `<div style="font-size:.75rem;color:var(--text-dim);margin-bottom:.75rem">${pubDate}</div>` : ""}

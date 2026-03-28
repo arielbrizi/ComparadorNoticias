@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from app.article_grouper import sort_groups
 from app.db import get_conn, query, execute, is_postgres
 from app.models import Article, ArticleGroup
 
@@ -288,12 +289,7 @@ def load_groups_from_db(
             articles=sorted(members, key=lambda a: a.source),
         ))
 
-    all_groups.sort(
-        key=lambda g: (
-            -g.source_count,
-            -(g.published.timestamp() if g.published else 0),
-        )
-    )
+    sort_groups(all_groups)
 
     logger.info(
         "News store: loaded %d articles, %d groups from DB",
@@ -405,10 +401,7 @@ def text_search_groups(
             articles=sorted(members, key=lambda a: a.source),
         ))
 
-    result.sort(key=lambda g: (
-        -g.source_count,
-        -(g.published.timestamp() if g.published else 0),
-    ))
+    sort_groups(result)
     return result[:limit]
 
 

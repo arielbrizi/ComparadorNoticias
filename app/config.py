@@ -7,6 +7,7 @@ SOURCES = {
     "Infobae": {
         "color": "#e63946",
         "logo": "",
+        "exclude_link_re": r"/(?:mexico|colombia|espana|peru|centroamerica|venezuela)/",
         "feeds": {
             "portada": "https://www.infobae.com/arc/outboundfeeds/rss/",
             "politica": "https://www.infobae.com/arc/outboundfeeds/rss/category/politica/",

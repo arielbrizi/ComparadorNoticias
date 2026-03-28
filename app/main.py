@@ -21,7 +21,7 @@ from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.article_grouper import group_articles
+from app.article_grouper import group_articles, is_event_expired
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
@@ -193,6 +193,9 @@ async def get_grupos(
 ):
     async with _lock:
         grps = list(_groups)
+
+    now_utc = datetime.now(timezone.utc)
+    grps = [g for g in grps if not is_event_expired(g, now_utc)]
 
     if categoria:
         grps = [g for g in grps if g.category == categoria]

@@ -99,10 +99,14 @@ def _parse_feed_entries(
     source_name: str,
     source_color: str,
     category: str,
+    exclude_link_re: str = "",
 ) -> list[Article]:
     articles: list[Article] = []
+    _exclude = re.compile(exclude_link_re, re.IGNORECASE) if exclude_link_re else None
     for entry in feed_data.entries[:MAX_ARTICLES_PER_FEED]:
         link = entry.get("link", "")
+        if _exclude and link and _exclude.search(link):
+            continue
         title = entry.get("title", "").strip()
         if not title:
             continue
@@ -137,6 +141,7 @@ async def fetch_single_feed(
     source_color: str,
     category: str,
     feed_url: str,
+    exclude_link_re: str = "",
 ) -> tuple[list[Article], FeedStatus]:
     status = FeedStatus(
         source=source_name,
@@ -150,7 +155,10 @@ async def fetch_single_feed(
         feed_data = feedparser.parse(resp.text)
         if feed_data.bozo and not feed_data.entries:
             raise ValueError(f"Feed inválido: {feed_data.bozo_exception}")
-        articles = _parse_feed_entries(feed_data, source_name, source_color, category)
+        articles = _parse_feed_entries(
+            feed_data, source_name, source_color, category,
+            exclude_link_re=exclude_link_re,
+        )
         status.article_count = len(articles)
         return articles, status
     except Exception as exc:
@@ -219,11 +227,15 @@ async def fetch_all_feeds(
         tasks = []
         for source_name, source_cfg in SOURCES.items():
             color = source_cfg.get("color", "#888")
+            exclude_re = source_cfg.get("exclude_link_re", "")
             for cat, url in source_cfg["feeds"].items():
                 if categories and cat not in categories:
                     continue
                 tasks.append(
-                    fetch_single_feed(client, source_name, color, cat, url)
+                    fetch_single_feed(
+                        client, source_name, color, cat, url,
+                        exclude_link_re=exclude_re,
+                    )
                 )
 
         results = await asyncio.gather(*tasks, return_exceptions=True)

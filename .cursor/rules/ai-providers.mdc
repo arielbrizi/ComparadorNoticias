@@ -1,0 +1,37 @@
+---
+description: Constraints and limits for AI providers (Gemini, Groq) used in search and topic features
+globs: app/ai_search.py, app/main.py
+alwaysApply: false
+---
+
+# AI Provider Constraints
+
+This project uses **Gemini** (primary) and **Groq/Llama** (fallback). They have very different limits.
+
+## Groq limits
+
+- `GROQ_MAX_PROMPT_CHARS = 10000` — total prompt must fit in ~10k characters
+- When building context for Groq, ALWAYS use `_build_context(groups, max_chars=...)` to avoid mid-line truncation
+- Never send a raw large prompt to Groq; calculate the overhead of the prompt template and fit the context within the remaining budget
+- Groq uses `response_format={"type": "json_object"}` — prompts must ask for JSON
+
+## Gemini limits
+
+- Gemini handles large contexts well (100k+ tokens)
+- It's safe to send 150+ groups to Gemini without truncation
+- Gemini does NOT enforce JSON output format — rely on prompt instructions
+
+## When changing search or topic prompts
+
+1. Check that `max_groups` and `max_chars` are appropriate for BOTH providers
+2. If increasing context size, verify Groq still receives a well-formed prompt (not truncated mid-line)
+3. Use `_call_ai_search()` for search (builds separate prompts per provider) instead of generic `_call_ai()`
+4. Test with `py -m pytest tests/unit/test_ai_search.py -q` after changes
+
+## Context budget calculation pattern
+
+```python
+prompt_overhead = len(TEMPLATE.format(query=query, context=""))
+groq_budget = GROQ_MAX_PROMPT_CHARS - prompt_overhead - 100  # safety margin
+groq_context = _build_context(groups, max_groups=150, max_chars=max(groq_budget, 2000))
+```

@@ -15,6 +15,7 @@ let state = {
     dateFilter: "hoy",
     currentView: "noticias",
     metricsData: null,
+    user: null,
     aiSearch: {
         loading: false,
         loadingHistory: false,
@@ -33,6 +34,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupFilters();
     setupModal();
     setupHeroSearch();
+    setupAuth();
+    initAuth();
+    track("page_view", { view: "noticias", initial: true });
     await loadData();
 });
 
@@ -201,6 +205,7 @@ function _switchViewInternal(view) {
     const temas = $("#view-temas");
     const nube = $("#view-nube");
 
+    if (view !== state.currentView) track("page_view", { view });
     state.currentView = view;
 
     noticias.hidden = true;
@@ -472,17 +477,20 @@ function setupFilters() {
             $$("#category-filters .filter-btn").forEach(b => b.classList.remove("active"));
             btn.classList.add("active");
             state.category = btn.dataset.category;
+            track("filter_change", { filter: "category", value: state.category });
             renderGroups();
         });
     });
 
     $("#toggle-multi").addEventListener("change", (e) => {
         state.multiOnly = e.target.checked;
+        track("filter_change", { filter: "multi_only", value: state.multiOnly });
         renderGroups();
     });
 
     $("#source-filter").addEventListener("change", (e) => {
         state.sourceFilter = e.target.value;
+        track("filter_change", { filter: "source", value: state.sourceFilter });
         renderGroups();
     });
 
@@ -604,6 +612,8 @@ function setupHeroSearch() {
                 switchView("temas");
             } else if (action === "nube") {
                 switchView("nube");
+            } else if (action === "admin") {
+                window.location.href = "/admin";
             } else {
                 showToast(actionLabels[action] || "Próximamente");
             }
@@ -747,6 +757,7 @@ function renderTopicChips() {
 }
 
 async function performAISearch(query) {
+    track("ai_search", { query });
     if (_aiSearchController) _aiSearchController.abort();
     _aiSearchController = new AbortController();
     const signal = _aiSearchController.signal;
@@ -1143,6 +1154,7 @@ function setupModalSwipe() {
 }
 
 async function openComparison(group) {
+    track("group_click", { group_id: group.group_id, title: group.representative_title, source_count: group.source_count });
     const body = $("#compare-body");
 
     body.innerHTML = `<div class="loading-state" style="padding:3rem"><div class="spinner"></div><p>Analizando cobertura…</p></div>`;
@@ -1756,6 +1768,173 @@ async function loadTemaDetail(label) {
     }
 
     window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+// ── Tracking ──────────────────────────────────────────────────────────────
+
+const _trackQueue = [];
+const _sessionId = sessionStorage.getItem("vs_sid") || crypto.randomUUID();
+sessionStorage.setItem("vs_sid", _sessionId);
+
+function track(type, data = {}) {
+    _trackQueue.push({ type, data, ts: new Date().toISOString() });
+}
+
+function flushTrack() {
+    if (!_trackQueue.length) return;
+    const batch = _trackQueue.splice(0);
+    const payload = JSON.stringify({ session_id: _sessionId, events: batch });
+    if (navigator.sendBeacon) {
+        navigator.sendBeacon(`${API}/api/track`, new Blob([payload], { type: "application/json" }));
+    } else {
+        fetch(`${API}/api/track`, { method: "POST", body: payload, headers: { "Content-Type": "application/json" }, keepalive: true }).catch(() => {});
+    }
+}
+
+setInterval(flushTrack, 10000);
+window.addEventListener("beforeunload", flushTrack);
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushTrack();
+});
+
+// ── Auth ──────────────────────────────────────────────────────────────────
+
+async function initAuth() {
+    try {
+        const resp = await fetch(`${API}/auth/me`);
+        const data = await resp.json();
+        state.user = data.user || null;
+    } catch {
+        state.user = null;
+    }
+    renderAuthUI();
+}
+
+function setupAuth() {
+    const btnLogin = $("#btn-login");
+    const loginModal = $("#login-modal");
+    const loginClose = $("#login-modal-close");
+    const menuToggle = $("#user-menu-toggle");
+    const dropdown = $("#user-dropdown");
+    const btnLogout = $("#btn-logout");
+    const magicForm = $("#magic-link-form");
+
+    if (btnLogin) btnLogin.addEventListener("click", () => openLoginModal());
+    if (loginClose) loginClose.addEventListener("click", () => closeLoginModal());
+    if (loginModal) loginModal.addEventListener("click", (e) => {
+        if (e.target === loginModal) closeLoginModal();
+    });
+
+    if (menuToggle) menuToggle.addEventListener("click", () => {
+        dropdown.hidden = !dropdown.hidden;
+    });
+
+    document.addEventListener("click", (e) => {
+        if (dropdown && !dropdown.hidden && !e.target.closest(".user-menu")) {
+            dropdown.hidden = true;
+        }
+    });
+
+    if (btnLogout) btnLogout.addEventListener("click", async () => {
+        await fetch(`${API}/auth/logout`, { method: "POST" });
+        state.user = null;
+        renderAuthUI();
+        dropdown.hidden = true;
+    });
+
+    if (magicForm) magicForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const emailInput = $("#magic-email");
+        const btn = $("#magic-link-btn");
+        const statusEl = $("#magic-link-status");
+        const email = emailInput.value.trim();
+        if (!email) return;
+
+        btn.disabled = true;
+        btn.textContent = "Enviando...";
+        statusEl.hidden = true;
+
+        try {
+            const resp = await fetch(`${API}/auth/magic/request`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email }),
+            });
+            const data = await resp.json();
+            if (resp.ok) {
+                statusEl.className = "magic-link-status success";
+                statusEl.textContent = "Revisá tu email — te enviamos un link para iniciar sesión.";
+            } else {
+                statusEl.className = "magic-link-status error";
+                statusEl.textContent = data.detail || "Error al enviar el link.";
+            }
+        } catch {
+            statusEl.className = "magic-link-status error";
+            statusEl.textContent = "Error de conexión. Intentá de nuevo.";
+        }
+        statusEl.hidden = false;
+        btn.disabled = false;
+        btn.textContent = "Enviar link de acceso";
+    });
+
+    const params = new URLSearchParams(location.search);
+    if (params.has("auth_error")) {
+        const err = params.get("auth_error");
+        const msgs = {
+            google: "Error al iniciar sesión con Google.",
+            token: "Error al obtener el token de Google.",
+            exchange: "Error de comunicación con Google.",
+            no_email: "No se pudo obtener el email.",
+            expired: "El link de acceso expiró. Pedí uno nuevo.",
+            invalid: "Link de acceso inválido.",
+            no_token: "Link de acceso inválido.",
+        };
+        showToast(msgs[err] || "Error de autenticación.");
+        history.replaceState(null, "", location.pathname + location.hash);
+    }
+}
+
+function renderAuthUI() {
+    const btnLogin = $("#btn-login");
+    const userMenu = $("#user-menu");
+    const adminCard = $("#hero-admin-card");
+    const adminLink = $("#btn-admin-link");
+
+    if (state.user) {
+        if (btnLogin) btnLogin.hidden = true;
+        if (userMenu) {
+            userMenu.hidden = false;
+            const avatar = $("#user-avatar");
+            const nameEl = $("#user-name");
+            if (avatar) avatar.src = state.user.picture || "";
+            if (nameEl) nameEl.textContent = state.user.name || state.user.email.split("@")[0];
+        }
+        if (adminCard) adminCard.hidden = state.user.role !== "admin";
+        if (adminLink) adminLink.hidden = state.user.role !== "admin";
+    } else {
+        if (btnLogin) btnLogin.hidden = false;
+        if (userMenu) userMenu.hidden = true;
+        if (adminCard) adminCard.hidden = true;
+        if (adminLink) adminLink.hidden = true;
+    }
+}
+
+function openLoginModal() {
+    const modal = $("#login-modal");
+    if (modal) {
+        modal.hidden = false;
+        document.body.style.overflow = "hidden";
+    }
+}
+
+function closeLoginModal() {
+    const modal = $("#login-modal");
+    if (modal) {
+        modal.hidden = true;
+        document.body.style.overflow = "";
+    }
+    const statusEl = $("#magic-link-status");
+    if (statusEl) statusEl.hidden = true;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

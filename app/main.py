@@ -17,11 +17,12 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Depends, FastAPI, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.article_grouper import group_articles, is_event_expired
+from app.auth import get_current_user, require_admin, router as auth_router
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
@@ -36,6 +37,20 @@ from app.news_store import (
     save_articles_and_groups,
     text_search_groups,
 )
+from app.tracking_store import (
+    init_tracking_table,
+    log_events,
+    purge_old_events,
+    query_daily_activity,
+    query_engagement,
+    query_feature_usage,
+    query_hourly_distribution,
+    query_popular_searches,
+    query_sections_visited,
+    query_top_content,
+    query_usage_stats,
+)
+from app.user_store import count_users, init_users_table, list_users
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = str(BASE_DIR / "static")
@@ -129,6 +144,14 @@ async def lifespan(_app: FastAPI):
         init_news_tables()
     except Exception as exc:
         logger.error("init_news_tables failed: %s", exc)
+    try:
+        init_users_table()
+    except Exception as exc:
+        logger.error("init_users_table failed: %s", exc)
+    try:
+        init_tracking_table()
+    except Exception as exc:
+        logger.error("init_tracking_table failed: %s", exc)
 
     try:
         today = datetime.now(ART).strftime("%Y-%m-%d")
@@ -145,6 +168,7 @@ async def lifespan(_app: FastAPI):
     scheduler.add_job(refresh_news, "interval", minutes=10)
     scheduler.add_job(refresh_wordcloud, "interval", hours=2)
     scheduler.add_job(purge_old_news, "cron", hour=7, minute=0)
+    scheduler.add_job(purge_old_events, "cron", hour=6, minute=30)
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
@@ -158,6 +182,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+app.include_router(auth_router)
 
 
 # ── API routes ───────────────────────────────────────────────────────────────
@@ -397,11 +423,113 @@ async def get_wordcloud():
     }
 
 
-# ── Health check ──────────────────────────────────────────────────────────────
+# ── Tracking ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/track")
+async def track_events(request: Request, user: dict | None = Depends(get_current_user)):
+    """Receive a batch of usage events from the frontend."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    session_id = body.get("session_id", "")
+    events = body.get("events", [])
+    if not session_id or not events or not isinstance(events, list):
+        return JSONResponse({"error": "session_id and events required"}, status_code=400)
+
+    user_id = user["id"] if user else None
+    ip = request.client.host if request.client else ""
+    ua = request.headers.get("user-agent", "")[:500]
+
+    try:
+        count = log_events(events, user_id=user_id, session_id=session_id, ip_address=ip, user_agent=ua)
+    except Exception as exc:
+        logger.error("Failed to log tracking events: %s", exc)
+        return JSONResponse({"error": "Failed to log events"}, status_code=500)
+
+    return {"ok": True, "logged": count}
+
+
+# ── Admin API ────────────────────────────────────────────────────────────────
+
+@app.get("/api/admin/dashboard")
+async def admin_dashboard(
+    desde: str | None = Query(None),
+    hasta: str | None = Query(None),
+    _admin: dict = Depends(require_admin),
+):
+    """Aggregated admin dashboard stats."""
+    stats = query_usage_stats(desde=desde, hasta=hasta)
+    features = query_feature_usage(desde=desde, hasta=hasta)
+    engagement = query_engagement(desde=desde, hasta=hasta)
+    sections = query_sections_visited(desde=desde, hasta=hasta)
+    return {
+        "total_users": count_users(),
+        "usage": stats,
+        "features": features,
+        "engagement": engagement,
+        "sections": sections,
+    }
+
+
+@app.get("/api/admin/users")
+async def admin_users(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    _admin: dict = Depends(require_admin),
+):
+    return {"users": list_users(limit=limit, offset=offset), "total": count_users()}
+
+
+@app.get("/api/admin/popular-searches")
+async def admin_popular_searches(
+    limit: int = Query(20, ge=1, le=100),
+    _admin: dict = Depends(require_admin),
+):
+    return {"searches": query_popular_searches(limit=limit)}
+
+
+@app.get("/api/admin/top-content")
+async def admin_top_content(
+    limit: int = Query(20, ge=1, le=100),
+    _admin: dict = Depends(require_admin),
+):
+    return {"content": query_top_content(limit=limit)}
+
+
+@app.get("/api/admin/daily-activity")
+async def admin_daily_activity(
+    desde: str | None = Query(None),
+    hasta: str | None = Query(None),
+    _admin: dict = Depends(require_admin),
+):
+    return {"days": query_daily_activity(desde=desde, hasta=hasta)}
+
+
+@app.get("/api/admin/hourly")
+async def admin_hourly(
+    desde: str | None = Query(None),
+    hasta: str | None = Query(None),
+    _admin: dict = Depends(require_admin),
+):
+    return {"hours": query_hourly_distribution(desde=desde, hasta=hasta)}
+
+
+# ── Health check ─────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
     return JSONResponse({"status": "ok"})
+
+
+# ── Admin page ───────────────────────────────────────────────────────────────
+
+@app.get("/admin")
+async def admin_page(user: dict | None = Depends(get_current_user)):
+    if not user or user.get("role") != "admin":
+        return RedirectResponse("/")
+    return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
 
 
 # ── Static files ─────────────────────────────────────────────────────────────

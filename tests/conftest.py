@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
+from jose import jwt
 
+from app.config import JWT_ALGORITHM, JWT_SECRET
 from app.models import Article, ArticleGroup
 
 
@@ -121,3 +123,13 @@ def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr("app.db._use_pg", False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     return db_path
+
+
+@pytest.fixture
+def make_jwt():
+    """Factory fixture to create signed JWT tokens for testing."""
+    def _factory(user_id="test-user", email="test@test.com", role="user"):
+        expire = datetime.now(timezone.utc) + timedelta(hours=1)
+        payload = {"sub": user_id, "email": email, "role": role, "exp": expire}
+        return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return _factory

@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0e1117">
+    <title>Admin — Vs News</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css?v=20">
+    <style>
+        .admin-wrap { max-width: 1060px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+        .admin-header { margin-bottom: 1.5rem; }
+        .admin-header h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 0.3rem; display: flex; align-items: center; gap: 0.5rem; }
+        .admin-header p { color: var(--text-dim); font-size: 0.85rem; margin: 0; }
+        .admin-back { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.82rem; color: var(--accent); text-decoration: none; margin-bottom: 0.8rem; }
+        .admin-back:hover { text-decoration: underline; }
+
+        .admin-date-filters { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
+        .admin-date-btn {
+            padding: 0.35rem 0.8rem; font-size: 0.78rem; font-weight: 500; border-radius: 6px;
+            border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .admin-date-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .admin-date-btn:hover:not(.active) { background: rgba(255,255,255,0.06); }
+
+        /* KPI cards */
+        .admin-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; }
+        .admin-kpi {
+            background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 1rem; text-align: center;
+        }
+        .admin-kpi-value { font-size: 1.8rem; font-weight: 700; color: var(--accent); line-height: 1.1; }
+        .admin-kpi-label { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.25rem; text-transform: uppercase; letter-spacing: 0.03em; }
+        .admin-kpi-sub { font-size: 0.7rem; color: var(--text-dim); margin-top: 0.15rem; }
+
+        /* Engagement strip */
+        .admin-engagement { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; }
+        .admin-eng-card {
+            background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 0.9rem 1rem; display: flex; align-items: center; gap: 0.8rem;
+        }
+        .admin-eng-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .admin-eng-icon svg { width: 18px; height: 18px; }
+        .admin-eng-data { flex: 1; min-width: 0; }
+        .admin-eng-value { font-size: 1.15rem; font-weight: 700; color: var(--text); }
+        .admin-eng-label { font-size: 0.7rem; color: var(--text-dim); }
+
+        /* Two-column grid */
+        .admin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; margin-bottom: 1.5rem; }
+        @media (max-width: 700px) { .admin-grid { grid-template-columns: 1fr; } }
+
+        .admin-section { margin-bottom: 1.5rem; }
+        .admin-card {
+            background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 1.2rem; height: 100%;
+        }
+        .admin-card h3 {
+            font-size: 0.9rem; font-weight: 600; margin: 0 0 0.8rem;
+            display: flex; align-items: center; gap: 0.4rem; color: var(--text);
+        }
+        .admin-card h3 svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+        /* Bar chart */
+        .admin-bar-list { display: flex; flex-direction: column; gap: 0.45rem; }
+        .admin-bar-row { display: flex; align-items: center; gap: 0.5rem; }
+        .admin-bar-label { min-width: 110px; font-size: 0.78rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .admin-bar-track { flex: 1; height: 22px; background: rgba(255,255,255,0.04); border-radius: 4px; overflow: hidden; }
+        .admin-bar-fill {
+            height: 100%; border-radius: 4px; display: flex; align-items: center;
+            padding: 0 0.4rem; font-size: 0.68rem; font-weight: 600; color: #fff; min-width: 24px;
+            transition: width 0.4s ease;
+        }
+        .admin-bar-fill.blue { background: var(--accent); }
+        .admin-bar-fill.teal { background: #0d9488; }
+        .admin-bar-fill.purple { background: #7c3aed; }
+        .admin-bar-fill.orange { background: #ea580c; }
+        .admin-bar-fill.pink { background: #db2777; }
+
+        /* Hourly chart */
+        .admin-hourly { display: flex; align-items: flex-end; gap: 2px; height: 80px; padding-top: 0.3rem; }
+        .admin-hour-bar {
+            flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px;
+            transition: height 0.3s ease; position: relative;
+        }
+        .admin-hour-bar:hover { opacity: 0.8; }
+        .admin-hour-labels { display: flex; gap: 2px; margin-top: 0.2rem; }
+        .admin-hour-labels span { flex: 1; text-align: center; font-size: 0.55rem; color: var(--text-dim); }
+
+        /* Table */
+        .admin-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        .admin-table th {
+            text-align: left; padding: 0.55rem 0.6rem; border-bottom: 1px solid var(--border);
+            font-weight: 600; color: var(--text-dim); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em;
+        }
+        .admin-table td { padding: 0.5rem 0.6rem; border-bottom: 1px solid rgba(255,255,255,0.04); }
+        .admin-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+        .admin-loading { text-align: center; padding: 1.5rem; color: var(--text-dim); }
+        .admin-empty { text-align: center; padding: 1rem; color: var(--text-dim); font-size: 0.82rem; }
+        .admin-badge {
+            font-size: 0.68rem; padding: 0.12rem 0.45rem; border-radius: 4px; font-weight: 500;
+        }
+        .admin-badge-admin { background: rgba(64,136,199,0.15); color: var(--accent); }
+        .admin-badge-user { background: rgba(255,255,255,0.04); color: var(--text-dim); }
+
+        .admin-kpi-desc { font-size: 0.62rem; color: var(--text-dim); margin-top: 0.15rem; line-height: 1.3; opacity: 0.7; }
+        .admin-eng-desc { font-size: 0.6rem; color: var(--text-dim); line-height: 1.2; opacity: 0.7; }
+        .admin-card-desc { font-size: 0.75rem; color: var(--text-dim); margin: -0.4rem 0 0.7rem; line-height: 1.3; }
+    </style>
+</head>
+<body>
+<div class="admin-wrap">
+    <a href="/" class="admin-back">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5"/><polyline points="12 19 5 12 12 5"/></svg>
+        Volver a Vs News
+    </a>
+    <div class="admin-header">
+        <h1>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+            Panel Admin
+        </h1>
+        <p>Métricas de uso de Vs News</p>
+    </div>
+
+    <!-- Date range filter -->
+    <div class="admin-date-filters" id="admin-date-filters">
+        <button class="admin-date-btn" data-range="hoy">Hoy</button>
+        <button class="admin-date-btn active" data-range="7d">7 días</button>
+        <button class="admin-date-btn" data-range="30d">30 días</button>
+        <button class="admin-date-btn" data-range="todo">Todo</button>
+    </div>
+
+    <!-- KPI cards -->
+    <div class="admin-kpis" id="admin-kpis">
+        <div class="admin-kpi"><div id="kpi-users" class="admin-kpi-value">-</div><div class="admin-kpi-label">Usuarios</div><div id="kpi-users-sub" class="admin-kpi-sub"></div><div class="admin-kpi-desc">Cuentas registradas en la plataforma</div></div>
+        <div class="admin-kpi"><div id="kpi-sessions" class="admin-kpi-value">-</div><div class="admin-kpi-label">Sesiones</div><div class="admin-kpi-desc">Visitas únicas al sitio (por navegador)</div></div>
+        <div class="admin-kpi"><div id="kpi-pageviews" class="admin-kpi-value">-</div><div class="admin-kpi-label">Vistas de página</div><div class="admin-kpi-desc">Navegaciones entre secciones del sitio</div></div>
+        <div class="admin-kpi"><div id="kpi-events" class="admin-kpi-value">-</div><div class="admin-kpi-label">Eventos totales</div><div class="admin-kpi-desc">Todas las interacciones registradas</div></div>
+    </div>
+
+    <!-- Engagement metrics -->
+    <div class="admin-engagement" id="admin-engagement">
+        <div class="admin-eng-card">
+            <div class="admin-eng-icon" style="background:rgba(64,136,199,0.12)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#4088c7" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </div>
+            <div class="admin-eng-data"><div id="eng-duration" class="admin-eng-value">-</div><div class="admin-eng-label">Duración promedio</div><div class="admin-eng-desc">Tiempo entre primer y último evento de cada sesión</div></div>
+        </div>
+        <div class="admin-eng-card">
+            <div class="admin-eng-icon" style="background:rgba(13,148,136,0.12)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#0d9488" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            </div>
+            <div class="admin-eng-data"><div id="eng-pages" class="admin-eng-value">-</div><div class="admin-eng-label">Páginas / sesión</div><div class="admin-eng-desc">Secciones promedio visitadas por sesión</div></div>
+        </div>
+        <div class="admin-eng-card">
+            <div class="admin-eng-icon" style="background:rgba(234,88,12,0.12)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#ea580c" stroke-width="2"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><circle cx="12" cy="17" r=".5"/><circle cx="12" cy="12" r="10"/></svg>
+            </div>
+            <div class="admin-eng-data"><div id="eng-bounce" class="admin-eng-value">-</div><div class="admin-eng-label">Tasa de rebote</div><div class="admin-eng-desc">% de sesiones que solo vieron una página</div></div>
+        </div>
+        <div class="admin-eng-card">
+            <div class="admin-eng-icon" style="background:rgba(124,58,237,0.12)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            </div>
+            <div class="admin-eng-data"><div id="eng-events-session" class="admin-eng-value">-</div><div class="admin-eng-label">Eventos / sesión</div><div class="admin-eng-desc">Interacciones promedio por cada visita</div></div>
+        </div>
+    </div>
+
+    <!-- Two-column grid: Sections + Features -->
+    <div class="admin-grid">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9h18"/><path d="M9 21V9"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+                Secciones visitadas
+            </h3>
+            <p class="admin-card-desc">Cada vez que un usuario navega a una sección (Noticias, Métricas, Temas, etc.) se cuenta una vista.</p>
+            <div id="sections-chart" class="admin-bar-list"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+                Uso de features
+            </h3>
+            <p class="admin-card-desc">Acciones concretas de los usuarios: leer una noticia, buscar con IA, cambiar filtros, etc.</p>
+            <div id="features-chart" class="admin-bar-list"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
+    <!-- Two-column grid: Top content + Searches -->
+    <div class="admin-grid">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+                Noticias más leídas
+            </h3>
+            <p class="admin-card-desc">Grupos de noticias que los usuarios abrieron para ver la comparación entre medios.</p>
+            <div id="top-content" class="admin-bar-list"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                Búsquedas populares
+            </h3>
+            <p class="admin-card-desc">Términos más buscados por los usuarios usando la búsqueda inteligente con IA.</p>
+            <div id="searches-list" class="admin-bar-list"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
+    <!-- Hourly distribution -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Distribución horaria
+            </h3>
+            <p class="admin-card-desc">En qué horas del día (hora Argentina) se concentra la actividad de los usuarios.</p>
+            <div id="hourly-chart"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
+    <!-- Daily activity -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                Actividad diaria
+            </h3>
+            <p class="admin-card-desc">Resumen día a día de sesiones, usuarios únicos, vistas de página y eventos totales.</p>
+            <div id="daily-table-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
+    <!-- Users -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                Usuarios registrados
+            </h3>
+            <p class="admin-card-desc">Usuarios que se autenticaron con Google o magic link. Incluye rol y última actividad.</p>
+            <div id="users-table-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+</div>
+
+<script src="/static/js/admin.js?v=2"></script>
+</body>
+</html>

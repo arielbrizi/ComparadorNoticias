@@ -3,6 +3,20 @@ Configuración de fuentes de noticias argentinas.
 Cada fuente tiene feeds RSS organizados por categoría.
 """
 
+import os
+
+# ── Auth & Admin ─────────────────────────────────────────────────────────────
+
+ADMIN_EMAILS = [e.strip() for e in os.environ.get("ADMIN_EMAILS", "arielbrizi@gmail.com").split(",")]
+JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-change-me")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = 72
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
+MAGIC_LINK_MAX_AGE = 15 * 60  # 15 minutes
+
 SOURCES = {
     "Infobae": {
         "color": "#e63946",

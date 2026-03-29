@@ -19,9 +19,13 @@ async def client(tmp_path, monkeypatch):
 
     from app.metrics_store import init_db
     from app.news_store import init_news_tables
+    from app.tracking_store import init_tracking_table
+    from app.user_store import init_users_table
 
     init_db()
     init_news_tables()
+    init_users_table()
+    init_tracking_table()
 
     from app import main
 

@@ -126,7 +126,8 @@ def compare_group_articles(articles: list[Article]) -> dict:
         })
 
     titles = [a.title for a in articles]
-    headline_analysis = _analyze_headlines(titles, [a.source for a in articles])
+    summaries = [a.summary or "" for a in articles]
+    headline_analysis = _analyze_headlines(titles, summaries, [a.source for a in articles])
 
     has_exclusive = any(
         s["exclusive_content"] or s["exclusive_data"]
@@ -141,17 +142,19 @@ def compare_group_articles(articles: list[Article]) -> dict:
     }
 
 
-def _analyze_headlines(titles: list[str], sources: list[str]) -> dict:
-    """Analyze how each source frames the same story via their headline."""
+def _analyze_headlines(
+    titles: list[str], summaries: list[str], sources: list[str],
+) -> dict:
+    """Analyze how each source frames the same story via their headline + body."""
     if len(titles) < 2:
         return {"different_framing": False, "details": []}
 
     unique_titles = len(set(titles))
     framing_details = []
 
-    for title, source in zip(titles, sources):
-        tone = _detect_tone(title)
-        focus = _detect_focus(title)
+    for title, summary, source in zip(titles, summaries, sources):
+        tone = _detect_tone(title, summary)
+        focus = _detect_focus(title, summary)
         framing_details.append({
             "source": source,
             "title": title,
@@ -165,39 +168,98 @@ def _analyze_headlines(titles: list[str], sources: list[str]) -> dict:
     }
 
 
-def _detect_tone(title: str) -> str:
+def _stem_match(text: str, stems: list[str]) -> int:
+    """Count how many stems appear in *text* (substring match on roots)."""
+    return sum(1 for s in stems if s in text)
+
+
+def _detect_tone(title: str, summary: str = "") -> str:
     title_lower = title.lower()
+    summary_lower = summary.lower()
 
-    alarm_words = [
-        "crisis", "colapso", "caen", "derrumbe", "alerta", "peligro",
-        "grave", "emergencia", "desplome", "peor", "dramático",
+    alarm_stems = [
+        "crisis", "colaps", "derrumb", "alert", "peligr",
+        "grave", "emergencia", "desplom", "dramátic", "dramatic",
+        "tragedia", "catástro", "catastro", "escándal", "escandal",
+        "denuncia", "tensión", "tension", "amenaz", "preocup",
+        "alarm", "miedo", "caída", "caida", "fracas",
+        "incendio", "víctima", "victima", "muert", "destrucci",
+        "en contra", "anuló", "anulo", "rechaz", "conden",
     ]
-    positive_words = [
-        "sube", "crece", "récord", "logro", "avanza", "mejor",
-        "superávit", "éxito", "celebra",
+    positive_stems = [
+        "sube", "crece", "récord", "record", "logr", "avanz", "mejor",
+        "superávit", "superavit", "éxito", "exito", "celebr",
+        "acuerd", "aprobó", "aprobo", "conquist", "triunf",
+        "ganó", "gano", " gana", "victori", "recuper", "optimism",
+        "históric", "historic", "esperanz", "favorab", "a favor",
+        "respald", "benefici", "positiv",
     ]
-    neutral_words = [
-        "cómo", "cuánto", "qué es", "paso a paso", "en vivo",
+    informative_stems = [
+        "cómo", "cuánto", "cuanto", "qué es", "paso a paso", "en vivo",
+        "según", "segun", "explic", "detall", "análisis", "analisis",
+        "informe", "datos", "estudio", "investig",
     ]
 
-    if any(w in title_lower for w in alarm_words):
+    alarm_score = 0
+    positive_score = 0
+    info_score = 0
+
+    alarm_score += _stem_match(title_lower, alarm_stems) * 2
+    alarm_score += _stem_match(summary_lower, alarm_stems)
+    positive_score += _stem_match(title_lower, positive_stems) * 2
+    positive_score += _stem_match(summary_lower, positive_stems)
+    info_score += _stem_match(title_lower, informative_stems) * 2
+    info_score += _stem_match(summary_lower, informative_stems)
+
+    best = max(alarm_score, positive_score, info_score)
+    if best == 0:
+        return "neutral"
+    if alarm_score == best:
         return "alarmista"
-    if any(w in title_lower for w in positive_words):
+    if positive_score == best:
         return "positivo"
-    if any(w in title_lower for w in neutral_words):
-        return "informativo"
-    return "neutral"
+    return "informativo"
 
 
-def _detect_focus(title: str) -> str:
+def _detect_focus(title: str, summary: str = "") -> str:
     title_lower = title.lower()
+    summary_lower = summary.lower()
 
-    if any(w in title_lower for w in ["milei", "gobierno", "diputado", "senado", "oficialismo", "oposición"]):
-        return "político"
-    if any(w in title_lower for w in ["dólar", "mercado", "bonos", "acciones", "riesgo país", "inflación", "precio"]):
-        return "económico"
-    if any(w in title_lower for w in ["muerto", "víctima", "accidente", "violencia", "inseguridad"]):
-        return "policial"
-    if any(w in title_lower for w in ["gol", "torneo", "partido", "selección", "copa"]):
-        return "deportivo"
-    return "general"
+    categories = {
+        "político": [
+            "milei", "gobierno", "diputad", "senad", "oficialism",
+            "oposición", "oposicion", "congreso", "presidente", "ministr",
+            "decreto", "ley ", "eleccion", "legislad", "gobernador",
+            "política", "politica", "kirchner", "peronism",
+            "libertad avanza", "justicia",
+        ],
+        "económico": [
+            "dólar", "dolar", "mercado", "bonos", "accion",
+            "riesgo país", "riesgo pais", "inflación", "inflacion",
+            "precio", "economía", "economia", "banco central", "deuda",
+            "importaci", "exportaci", "salario", "presupuest",
+            "recaudaci", "pbi", "pib", "tarifa", "impuesto",
+        ],
+        "policial": [
+            "muert", "víctima", "victima", "accidente", "violenci",
+            "insegurid", "crimen", "homicid", "robo", "asalt",
+            "detención", "detencion", "policía", "policia", "fiscal",
+            "preso", "imputad", "causa penal",
+        ],
+        "deportivo": [
+            "gol ", "torneo", "partido", "selección", "seleccion",
+            "copa ", "fútbol", "futbol", "racing", "boca juniors",
+            "river", "campeón", "campeon", "eliminatori",
+            "messi", "colapinto", "fórmula 1", "formula 1",
+            "liga ", "entrenador", "deport",
+        ],
+    }
+
+    scores: dict[str, int] = {}
+    for cat, stems in categories.items():
+        scores[cat] = _stem_match(title_lower, stems) * 2 + _stem_match(summary_lower, stems)
+
+    best_cat = max(scores, key=scores.get)  # type: ignore[arg-type]
+    if scores[best_cat] == 0:
+        return "general"
+    return best_cat

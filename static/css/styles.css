@@ -1291,6 +1291,9 @@ a.brand { text-decoration: none; color: inherit; cursor: pointer; }
     opacity: 0.6;
 }
 .footer-sources { margin-top: 0.5rem; font-size: 0.7rem; }
+.footer-legal { margin-top: 0.75rem; font-size: 0.7rem; }
+.footer-legal a { color: var(--text-dim); text-decoration: none; transition: color .2s; }
+.footer-legal a:hover { color: var(--accent); }
 
 /* ── Responsive ───────────────────────────────────────────────────────── */
 

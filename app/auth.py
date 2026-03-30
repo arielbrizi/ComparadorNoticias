@@ -189,7 +189,7 @@ async def magic_request(request: Request):
             resend.api_key = RESEND_API_KEY
             resend.Emails.send(
                 {
-                    "from": "Vs News <noreply@vsnews.app>",
+                    "from": "Vs News <noreply@vsnews.io>",
                     "to": [email],
                     "subject": "Tu link de acceso a Vs News",
                     "html": (

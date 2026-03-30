@@ -532,6 +532,16 @@ async def admin_page(user: dict | None = Depends(get_current_user)):
     return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
 
 
+@app.get("/privacy")
+async def privacy_page():
+    return FileResponse(os.path.join(STATIC_DIR, "privacy.html"))
+
+
+@app.get("/terms")
+async def terms_page():
+    return FileResponse(os.path.join(STATIC_DIR, "terms.html"))
+
+
 # ── Static files ─────────────────────────────────────────────────────────────
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

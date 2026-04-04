@@ -412,12 +412,14 @@ class TestAnonymousHourly:
 
 
 class TestAnonymousTopVisitors:
-    def test_returns_masked_ips(self):
+    def test_returns_full_ips(self):
         _seed_mixed_traffic()
         visitors = query_anonymous_top_visitors()
         assert len(visitors) == 2
+        ips = [v["ip"] for v in visitors]
+        assert "192.168.1.100" in ips
+        assert "192.168.1.200" in ips
         for v in visitors:
-            assert v["ip_masked"].endswith(".*")
             assert v["sessions"] >= 1
             assert v["events"] >= 1
 

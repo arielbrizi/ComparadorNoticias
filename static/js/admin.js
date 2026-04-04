@@ -414,7 +414,7 @@ function renderAnonVisitors(visitors) {
     }
     const rows = visitors.slice(0, 20).map(v => `
         <tr>
-            <td><code style="font-size:0.78rem">${escHtml(v.ip_masked)}</code></td>
+            <td><code style="font-size:0.78rem">${escHtml(v.ip)}</code></td>
             <td>${v.sessions}</td>
             <td>${v.events}</td>
             <td>${formatDatetime(v.last_seen)}</td>
@@ -423,7 +423,7 @@ function renderAnonVisitors(visitors) {
 
     container.innerHTML = `
         <table class="admin-table">
-            <thead><tr><th>IP (enmascarada)</th><th>Sesiones</th><th>Eventos</th><th>Última actividad</th></tr></thead>
+            <thead><tr><th>IP</th><th>Sesiones</th><th>Eventos</th><th>Última actividad</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
 }

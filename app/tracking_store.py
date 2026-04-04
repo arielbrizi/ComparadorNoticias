@@ -696,24 +696,15 @@ def query_anonymous_top_visitors(
             params + [limit],
         ).fetchall()
 
-    results = []
-    for r in rows:
-        ip = r["ip_address"] or ""
-        if "." in ip:
-            parts = ip.rsplit(".", 1)
-            masked = f"{parts[0]}.*"
-        elif ":" in ip:
-            parts = ip.rsplit(":", 1)
-            masked = f"{parts[0]}:*"
-        else:
-            masked = ip
-        results.append({
-            "ip_masked": masked,
+    return [
+        {
+            "ip": r["ip_address"] or "",
             "sessions": r["sessions"],
             "events": r["events"],
             "last_seen": r["last_seen"],
-        })
-    return results
+        }
+        for r in rows
+    ]
 
 
 def purge_proxy_ip_events() -> int:

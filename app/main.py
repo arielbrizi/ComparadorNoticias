@@ -450,7 +450,14 @@ async def track_events(request: Request, user: dict | None = Depends(get_current
 
     user_id = user["id"] if user else None
     forwarded = request.headers.get("x-forwarded-for", "")
-    ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "")
+    real_ip = request.headers.get("x-real-ip", "")
+    client_host = request.client.host if request.client else ""
+    ip = (
+        forwarded.split(",")[0].strip() if forwarded
+        else real_ip.strip() if real_ip
+        else client_host
+    )
+    logger.debug("Track IP resolution: xff=%r  xri=%r  client=%r  → %r", forwarded, real_ip, client_host, ip)
     ua = request.headers.get("user-agent", "")[:500]
 
     try:
@@ -544,6 +551,18 @@ async def admin_anonymous(
         "daily": query_anonymous_daily(desde=desde, hasta=hasta),
         "hourly": query_anonymous_hourly(desde=desde, hasta=hasta),
         "top_visitors": query_anonymous_top_visitors(desde=desde, hasta=hasta),
+    }
+
+
+@app.get("/api/admin/debug-headers")
+async def admin_debug_headers(request: Request, _admin: dict = Depends(require_admin)):
+    """Show request headers for debugging IP resolution behind proxies."""
+    return {
+        "client_host": request.client.host if request.client else None,
+        "x-forwarded-for": request.headers.get("x-forwarded-for"),
+        "x-real-ip": request.headers.get("x-real-ip"),
+        "forwarded": request.headers.get("forwarded"),
+        "all_headers": dict(request.headers),
     }
 
 

@@ -6,6 +6,15 @@ from app.tracking_store import (
     init_tracking_table,
     log_events,
     purge_old_events,
+    query_anonymous_daily,
+    query_anonymous_engagement,
+    query_anonymous_features,
+    query_anonymous_hourly,
+    query_anonymous_overview,
+    query_anonymous_searches,
+    query_anonymous_sections,
+    query_anonymous_top_content,
+    query_anonymous_top_visitors,
     query_daily_activity,
     query_engagement,
     query_feature_usage,
@@ -235,3 +244,188 @@ class TestPurge:
 
         stats = query_usage_stats()
         assert stats["total_events"] >= 1
+
+
+# ── Anonymous query tests ────────────────────────────────────────────────
+
+
+def _seed_mixed_traffic():
+    """Insert events from both logged-in and anonymous users with distinct IPs."""
+    log_events(
+        [
+            {"type": "page_view", "data": {"view": "noticias"}, "ts": "2026-03-28T10:00:00"},
+            {"type": "group_click", "data": {"group_id": "g1", "title": "Dólar"}, "ts": "2026-03-28T10:05:00"},
+            {"type": "ai_search", "data": {"query": "inflación"}, "ts": "2026-03-28T10:10:00"},
+        ],
+        user_id="u1",
+        session_id="s-auth",
+        ip_address="10.0.0.1",
+    )
+    log_events(
+        [
+            {"type": "page_view", "data": {"view": "noticias"}, "ts": "2026-03-28T11:00:00"},
+            {"type": "page_view", "data": {"view": "metricas"}, "ts": "2026-03-28T11:05:00"},
+            {"type": "group_click", "data": {"group_id": "g2", "title": "Elecciones"}, "ts": "2026-03-28T11:10:00"},
+        ],
+        session_id="s-anon1",
+        ip_address="192.168.1.100",
+    )
+    log_events(
+        [
+            {"type": "page_view", "data": {"view": "noticias"}, "ts": "2026-03-28T12:00:00"},
+            {"type": "ai_search", "data": {"query": "dólar"}, "ts": "2026-03-28T12:05:00"},
+        ],
+        session_id="s-anon2",
+        ip_address="192.168.1.200",
+    )
+
+
+class TestAnonymousOverview:
+    def test_counts_only_anonymous(self):
+        _seed_mixed_traffic()
+        ov = query_anonymous_overview()
+        assert ov["unique_visitors"] == 2
+        assert ov["unique_sessions"] == 2
+        assert ov["total_events"] == 5
+        assert ov["page_views"] == 3
+
+    def test_ratio_calculation(self):
+        _seed_mixed_traffic()
+        ov = query_anonymous_overview()
+        assert 0 < ov["anon_ratio"] < 100
+
+    def test_empty_db(self):
+        ov = query_anonymous_overview()
+        assert ov["unique_visitors"] == 0
+        assert ov["anon_ratio"] == 0
+
+    def test_date_filter(self):
+        log_events(
+            _make_events(["page_view"], ts="2026-01-15T12:00:00"),
+            session_id="s-old",
+            ip_address="10.0.0.5",
+        )
+        log_events(
+            _make_events(["page_view"], ts="2026-03-28T12:00:00"),
+            session_id="s-new",
+            ip_address="10.0.0.6",
+        )
+        ov = query_anonymous_overview(desde="2026-03-01", hasta="2026-03-31")
+        assert ov["unique_visitors"] == 1
+        assert ov["unique_sessions"] == 1
+
+
+class TestAnonymousEngagement:
+    def test_returns_engagement_for_anon_only(self):
+        _seed_mixed_traffic()
+        eng = query_anonymous_engagement()
+        assert eng["total_sessions"] == 2
+        assert eng["avg_pages_per_session"] > 0
+        assert 0 <= eng["bounce_rate"] <= 100
+
+    def test_bounce_rate_single_page(self):
+        log_events(
+            [{"type": "page_view", "data": {"view": "noticias"}, "ts": "2026-03-28T12:00:00"}],
+            session_id="s-bounce",
+            ip_address="10.0.0.5",
+        )
+        eng = query_anonymous_engagement()
+        assert eng["bounce_rate"] == 100.0
+
+    def test_empty_returns_zeros(self):
+        eng = query_anonymous_engagement()
+        assert eng["total_sessions"] == 0
+        assert eng["bounce_rate"] == 0
+
+
+class TestAnonymousSections:
+    def test_returns_sections_for_anon(self):
+        _seed_mixed_traffic()
+        sections = query_anonymous_sections()
+        names = [s["section"] for s in sections]
+        assert "noticias" in names
+        assert "metricas" in names
+        noticias = next(s for s in sections if s["section"] == "noticias")
+        assert noticias["count"] == 2
+
+
+class TestAnonymousFeatures:
+    def test_excludes_page_view(self):
+        _seed_mixed_traffic()
+        features = query_anonymous_features()
+        types = [f["feature"] for f in features]
+        assert "page_view" not in types
+        assert "group_click" in features[0]["feature"] or "ai_search" in features[0]["feature"]
+
+
+class TestAnonymousTopContent:
+    def test_returns_top_groups(self):
+        _seed_mixed_traffic()
+        content = query_anonymous_top_content()
+        assert len(content) == 1
+        assert content[0]["title"] == "Elecciones"
+
+    def test_date_filter(self):
+        _seed_mixed_traffic()
+        content = query_anonymous_top_content(desde="2026-04-01", hasta="2026-04-30")
+        assert len(content) == 0
+
+
+class TestAnonymousSearches:
+    def test_returns_anon_searches(self):
+        _seed_mixed_traffic()
+        searches = query_anonymous_searches()
+        assert len(searches) == 1
+        assert searches[0]["query"] == "dólar"
+
+
+class TestAnonymousDaily:
+    def test_returns_daily_with_visitor_count(self):
+        _seed_mixed_traffic()
+        days = query_anonymous_daily()
+        assert len(days) >= 1
+        day_28 = next(d for d in days if d["day"] == "2026-03-28")
+        assert day_28["visitors"] == 2
+        assert day_28["sessions"] == 2
+        assert day_28["page_views"] == 3
+
+    def test_date_filter(self):
+        _seed_mixed_traffic()
+        days = query_anonymous_daily(desde="2026-04-01", hasta="2026-04-30")
+        assert len(days) == 0
+
+
+class TestAnonymousHourly:
+    def test_returns_hourly_for_anon(self):
+        _seed_mixed_traffic()
+        hours = query_anonymous_hourly(utc_offset=0)
+        assert len(hours) >= 2
+        hour_11 = next((h for h in hours if h["hour"] == 11), None)
+        assert hour_11 is not None
+        assert hour_11["events"] == 3
+
+    def test_with_offset(self):
+        _seed_mixed_traffic()
+        hours = query_anonymous_hourly(utc_offset=-3)
+        hour_8 = next((h for h in hours if h["hour"] == 8), None)
+        assert hour_8 is not None
+
+
+class TestAnonymousTopVisitors:
+    def test_returns_masked_ips(self):
+        _seed_mixed_traffic()
+        visitors = query_anonymous_top_visitors()
+        assert len(visitors) == 2
+        for v in visitors:
+            assert v["ip_masked"].endswith(".*")
+            assert v["sessions"] >= 1
+            assert v["events"] >= 1
+
+    def test_sorted_by_events_desc(self):
+        _seed_mixed_traffic()
+        visitors = query_anonymous_top_visitors()
+        assert visitors[0]["events"] >= visitors[1]["events"]
+
+    def test_empty_db(self):
+        visitors = query_anonymous_top_visitors()
+        assert visitors == []

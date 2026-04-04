@@ -373,6 +373,349 @@ def query_hourly_distribution(
     )
 
 
+# ── Anonymous visitor queries ─────────────────────────────────────────────
+
+def _anon_where(desde: str | None, hasta: str | None) -> tuple[str, list[str]]:
+    """WHERE clause that always includes user_id IS NULL."""
+    parts: list[str] = ["user_id IS NULL"]
+    params: list[str] = []
+    if desde:
+        parts.append("created_at >= ?")
+        params.append(f"{desde}T00:00:00")
+    if hasta:
+        parts.append("created_at < ?")
+        params.append(f"{hasta}T23:59:59")
+    return " WHERE " + " AND ".join(parts), params
+
+
+def query_anonymous_overview(
+    desde: str | None = None, hasta: str | None = None,
+) -> dict:
+    """KPIs for anonymous visitors, using ip_address as unique-visitor proxy."""
+    where_sql, params = _anon_where(desde, hasta)
+
+    with get_conn() as conn:
+        total = query(
+            conn,
+            f"SELECT COUNT(*) as cnt FROM usage_events{where_sql}",
+            params,
+        ).fetchone()
+
+        pvs = query(
+            conn,
+            f"SELECT COUNT(*) as cnt FROM usage_events{where_sql} AND event_type = 'page_view'",
+            params,
+        ).fetchone()
+
+        unique_ips = query(
+            conn,
+            f"SELECT COUNT(DISTINCT ip_address) as cnt FROM usage_events{where_sql}"
+            " AND ip_address IS NOT NULL AND ip_address != ''",
+            params,
+        ).fetchone()
+
+        unique_sessions = query(
+            conn,
+            f"SELECT COUNT(DISTINCT session_id) as cnt FROM usage_events{where_sql}",
+            params,
+        ).fetchone()
+
+        # Total traffic for ratio calculation
+        all_where, all_params = _where_clause(desde, hasta)
+        total_all = query(
+            conn,
+            f"SELECT COUNT(*) as cnt FROM usage_events{all_where}",
+            all_params,
+        ).fetchone()
+
+    total_events = total["cnt"] if total else 0
+    all_events = total_all["cnt"] if total_all else 0
+
+    return {
+        "total_events": total_events,
+        "page_views": pvs["cnt"] if pvs else 0,
+        "unique_visitors": unique_ips["cnt"] if unique_ips else 0,
+        "unique_sessions": unique_sessions["cnt"] if unique_sessions else 0,
+        "anon_ratio": round((total_events / all_events * 100), 1) if all_events else 0,
+    }
+
+
+def query_anonymous_engagement(
+    desde: str | None = None, hasta: str | None = None,
+) -> dict:
+    """Session-level engagement only for anonymous visitors."""
+    where_sql, params = _anon_where(desde, hasta)
+
+    with get_conn() as conn:
+        session_stats = query(
+            conn,
+            f"""SELECT session_id,
+                       COUNT(*) as events,
+                       MIN(created_at) as first_ts,
+                       MAX(created_at) as last_ts,
+                       SUM(CASE WHEN event_type = 'page_view' THEN 1 ELSE 0 END) as pvs
+                FROM usage_events{where_sql}
+                GROUP BY session_id""",
+            params,
+        ).fetchall()
+
+    if not session_stats:
+        return {
+            "avg_events_per_session": 0,
+            "avg_pages_per_session": 0,
+            "bounce_rate": 0,
+            "avg_duration_seconds": 0,
+            "total_sessions": 0,
+        }
+
+    total_sessions = len(session_stats)
+    total_events = sum(r["events"] for r in session_stats)
+    total_pvs = sum(r["pvs"] for r in session_stats)
+    bounces = sum(1 for r in session_stats if r["pvs"] <= 1)
+
+    durations = []
+    for r in session_stats:
+        try:
+            t0 = r["first_ts"].replace("T", " ").replace("Z", "")[:19]
+            t1 = r["last_ts"].replace("T", " ").replace("Z", "")[:19]
+            fmt = "%Y-%m-%d %H:%M:%S"
+            d0 = datetime.strptime(t0, fmt)
+            d1 = datetime.strptime(t1, fmt)
+            durations.append((d1 - d0).total_seconds())
+        except Exception:
+            pass
+
+    avg_dur = sum(durations) / len(durations) if durations else 0
+
+    return {
+        "avg_events_per_session": round(total_events / total_sessions, 1),
+        "avg_pages_per_session": round(total_pvs / total_sessions, 1),
+        "bounce_rate": round((bounces / total_sessions) * 100, 1),
+        "avg_duration_seconds": round(avg_dur),
+        "total_sessions": total_sessions,
+    }
+
+
+def query_anonymous_sections(
+    desde: str | None = None, hasta: str | None = None,
+) -> list[dict]:
+    """Sections visited by anonymous users (from page_view event_data.view)."""
+    where_sql, params = _anon_where(desde, hasta)
+
+    with get_conn() as conn:
+        rows = query(
+            conn,
+            f"SELECT event_data FROM usage_events{where_sql}"
+            " AND event_type = 'page_view' AND event_data IS NOT NULL",
+            params,
+        ).fetchall()
+
+    counts: dict[str, int] = {}
+    for r in rows:
+        try:
+            data = json.loads(r["event_data"])
+            view = data.get("view", "desconocido")
+        except (json.JSONDecodeError, TypeError):
+            view = "desconocido"
+        counts[view] = counts.get(view, 0) + 1
+
+    return sorted(
+        [{"section": k, "count": v} for k, v in counts.items()],
+        key=lambda x: x["count"],
+        reverse=True,
+    )
+
+
+def query_anonymous_features(
+    desde: str | None = None, hasta: str | None = None,
+) -> list[dict]:
+    """Feature usage ranking for anonymous visitors (excludes page_view)."""
+    where_sql, params = _anon_where(desde, hasta)
+
+    with get_conn() as conn:
+        rows = query(
+            conn,
+            f"""SELECT event_type, COUNT(*) as cnt
+                FROM usage_events{where_sql} AND event_type != 'page_view'
+                GROUP BY event_type ORDER BY cnt DESC""",
+            params,
+        ).fetchall()
+
+    return [{"feature": r["event_type"], "count": r["cnt"]} for r in rows]
+
+
+def query_anonymous_top_content(
+    limit: int = 20,
+    desde: str | None = None,
+    hasta: str | None = None,
+) -> list[dict]:
+    """Most-clicked news groups by anonymous visitors."""
+    where_sql, params = _anon_where(desde, hasta)
+
+    with get_conn() as conn:
+        rows = query(
+            conn,
+            f"""SELECT event_data, COUNT(*) as cnt
+                FROM usage_events{where_sql}
+                AND event_type = 'group_click' AND event_data IS NOT NULL
+                GROUP BY event_data ORDER BY cnt DESC LIMIT ?""",
+            params + [limit],
+        ).fetchall()
+
+    results = []
+    for r in rows:
+        try:
+            data = json.loads(r["event_data"])
+            title = data.get("title", data.get("group_id", "?"))
+            group_id = data.get("group_id", "")
+        except (json.JSONDecodeError, TypeError):
+            title = "?"
+            group_id = ""
+        results.append({"title": title, "group_id": group_id, "count": r["cnt"]})
+    return results
+
+
+def query_anonymous_searches(
+    limit: int = 20,
+    desde: str | None = None,
+    hasta: str | None = None,
+) -> list[dict]:
+    """Top AI search queries by anonymous visitors."""
+    where_sql, params = _anon_where(desde, hasta)
+
+    with get_conn() as conn:
+        rows = query(
+            conn,
+            f"""SELECT event_data, COUNT(*) as cnt
+                FROM usage_events{where_sql}
+                AND event_type = 'ai_search' AND event_data IS NOT NULL
+                GROUP BY event_data ORDER BY cnt DESC LIMIT ?""",
+            params + [limit],
+        ).fetchall()
+
+    results = []
+    for r in rows:
+        try:
+            data = json.loads(r["event_data"])
+            q = data.get("query", r["event_data"])
+        except (json.JSONDecodeError, TypeError):
+            q = r["event_data"]
+        results.append({"query": q, "count": r["cnt"]})
+    return results
+
+
+def query_anonymous_daily(
+    desde: str | None = None, hasta: str | None = None,
+) -> list[dict]:
+    """Daily anonymous activity: unique IPs, sessions, page views, events."""
+    where_sql, params = _anon_where(desde, hasta)
+    de = _date_expr()
+
+    with get_conn() as conn:
+        rows = query(
+            conn,
+            f"""SELECT {de} as day,
+                       COUNT(DISTINCT ip_address) as visitors,
+                       COUNT(DISTINCT session_id) as sessions,
+                       SUM(CASE WHEN event_type = 'page_view' THEN 1 ELSE 0 END) as page_views,
+                       COUNT(*) as events
+                FROM usage_events{where_sql}
+                GROUP BY {de}
+                ORDER BY day DESC LIMIT 90""",
+            params,
+        ).fetchall()
+
+    return [
+        {
+            "day": r["day"],
+            "visitors": r["visitors"],
+            "sessions": r["sessions"],
+            "page_views": r["page_views"],
+            "events": r["events"],
+        }
+        for r in rows
+    ]
+
+
+def query_anonymous_hourly(
+    desde: str | None = None,
+    hasta: str | None = None,
+    utc_offset: int = -3,
+) -> list[dict]:
+    """Hourly distribution for anonymous visitors."""
+    where_sql, params = _anon_where(desde, hasta)
+
+    if is_postgres():
+        hour_expr = "CAST(SUBSTRING(created_at FROM 12 FOR 2) AS INTEGER)"
+    else:
+        hour_expr = "CAST(SUBSTR(created_at, 12, 2) AS INTEGER)"
+
+    with get_conn() as conn:
+        rows = query(
+            conn,
+            f"""SELECT {hour_expr} as hour, COUNT(*) as events
+                FROM usage_events{where_sql}
+                GROUP BY {hour_expr}
+                ORDER BY hour""",
+            params,
+        ).fetchall()
+
+    shifted: dict[int, int] = {}
+    for r in rows:
+        local_hour = (r["hour"] + utc_offset) % 24
+        shifted[local_hour] = shifted.get(local_hour, 0) + r["events"]
+
+    return sorted(
+        [{"hour": h, "events": c} for h, c in shifted.items()],
+        key=lambda x: x["hour"],
+    )
+
+
+def query_anonymous_top_visitors(
+    limit: int = 20,
+    desde: str | None = None,
+    hasta: str | None = None,
+) -> list[dict]:
+    """Top anonymous visitors by IP — sessions, events, and last seen.
+
+    IPs are masked (last octet replaced) for privacy in the UI.
+    """
+    where_sql, params = _anon_where(desde, hasta)
+
+    with get_conn() as conn:
+        rows = query(
+            conn,
+            f"""SELECT ip_address,
+                       COUNT(DISTINCT session_id) as sessions,
+                       COUNT(*) as events,
+                       MAX(created_at) as last_seen
+                FROM usage_events{where_sql}
+                AND ip_address IS NOT NULL AND ip_address != ''
+                GROUP BY ip_address
+                ORDER BY events DESC LIMIT ?""",
+            params + [limit],
+        ).fetchall()
+
+    results = []
+    for r in rows:
+        ip = r["ip_address"] or ""
+        if "." in ip:
+            parts = ip.rsplit(".", 1)
+            masked = f"{parts[0]}.*"
+        elif ":" in ip:
+            parts = ip.rsplit(":", 1)
+            masked = f"{parts[0]}:*"
+        else:
+            masked = ip
+        results.append({
+            "ip_masked": masked,
+            "sessions": r["sessions"],
+            "events": r["events"],
+            "last_seen": r["last_seen"],
+        })
+    return results
+
+
 def purge_old_events(days: int = 90) -> int:
     """Delete tracking events older than `days`. Returns deleted count."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")

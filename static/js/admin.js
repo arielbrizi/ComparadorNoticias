@@ -23,6 +23,7 @@ const _featureLabels = {
 const _barColors = ["blue", "teal", "purple", "orange", "pink"];
 
 let _dateRange = "7d";
+let _activeTab = "general";
 
 document.addEventListener("DOMContentLoaded", async () => {
     const resp = await fetch("/auth/me");
@@ -32,9 +33,23 @@ document.addEventListener("DOMContentLoaded", async () => {
         return;
     }
 
+    setupTabs();
     setupDateFilters();
     loadAll();
 });
+
+function setupTabs() {
+    $$("#admin-tabs .admin-tab").forEach(tab => {
+        tab.addEventListener("click", () => {
+            $$("#admin-tabs .admin-tab").forEach(t => t.classList.remove("active"));
+            tab.classList.add("active");
+            _activeTab = tab.dataset.tab;
+            $$(".admin-tab-panel").forEach(p => p.classList.remove("active"));
+            $(`#panel-${_activeTab}`).classList.add("active");
+            loadAll();
+        });
+    });
+}
 
 function setupDateFilters() {
     $$("#admin-date-filters .admin-date-btn").forEach(btn => {
@@ -78,12 +93,16 @@ function qs(desde, hasta) {
 
 function loadAll() {
     const { desde, hasta } = computeRange(_dateRange);
-    loadDashboard(desde, hasta);
-    loadTopContent();
-    loadSearches();
-    loadHourly(desde, hasta);
-    loadDaily(desde, hasta);
-    loadUsers();
+    if (_activeTab === "general") {
+        loadDashboard(desde, hasta);
+        loadTopContent();
+        loadSearches();
+        loadHourly(desde, hasta);
+        loadDaily(desde, hasta);
+        loadUsers();
+    } else {
+        loadAnonymousDashboard(desde, hasta);
+    }
 }
 
 // ── Dashboard (KPIs + engagement + sections + features) ─────────────────
@@ -272,6 +291,141 @@ async function loadUsers() {
     } catch (err) {
         console.error("Users load failed:", err);
     }
+}
+
+// ── Anonymous dashboard ─────────────────────────────────────────────────
+
+async function loadAnonymousDashboard(desde, hasta) {
+    try {
+        const resp = await fetch(`/api/admin/anonymous${qs(desde, hasta)}`);
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        const d = await resp.json();
+
+        const o = d.overview;
+        const e = d.engagement;
+
+        // KPIs
+        $("#anon-kpi-visitors").textContent = o.unique_visitors;
+        $("#anon-kpi-sessions").textContent = o.unique_sessions;
+        $("#anon-kpi-pageviews").textContent = o.page_views;
+        $("#anon-kpi-events").textContent = o.total_events;
+
+        // Ratio + engagement
+        const ratio = o.anon_ratio;
+        $("#anon-eng-ratio").textContent = `${ratio}%`;
+        const ratioEl = $("#anon-eng-ratio");
+        ratioEl.className = "admin-eng-value";
+
+        $("#anon-eng-duration").textContent = formatDuration(e.avg_duration_seconds);
+        $("#anon-eng-pages").textContent = e.avg_pages_per_session;
+        $("#anon-eng-bounce").textContent = `${e.bounce_rate}%`;
+
+        // Sections
+        renderBarChart("anon-sections-chart", (d.sections || []).map(s => ({
+            label: _sectionLabels[s.section] || s.section,
+            count: s.count,
+        })), "teal");
+
+        // Features
+        renderBarChart("anon-features-chart", (d.features || []).map(f => ({
+            label: _featureLabels[f.feature] || f.feature,
+            count: f.count,
+        })), "blue");
+
+        // Top content
+        renderBarChart("anon-top-content", (d.top_content || []).map(c => ({
+            label: c.title,
+            count: c.count,
+        })), "purple");
+
+        // Searches
+        renderBarChart("anon-searches-list", (d.searches || []).map(s => ({
+            label: `"${s.query}"`,
+            count: s.count,
+        })), "orange");
+
+        // Hourly
+        renderAnonHourly(d.hourly || []);
+
+        // Daily
+        renderAnonDaily(d.daily || []);
+
+        // Top visitors
+        renderAnonVisitors(d.top_visitors || []);
+    } catch (err) {
+        console.error("Anonymous dashboard load failed:", err);
+    }
+}
+
+function renderAnonHourly(hours) {
+    const container = $("#anon-hourly-chart");
+    if (!hours.length) {
+        container.innerHTML = `<div class="admin-empty">No hay datos horarios aún</div>`;
+        return;
+    }
+    const byHour = new Array(24).fill(0);
+    hours.forEach(h => { byHour[h.hour] = h.events; });
+    const max = Math.max(...byHour, 1);
+
+    const bars = byHour.map((v, i) => {
+        const pct = (v / max) * 100;
+        const title = `${String(i).padStart(2, "0")}:00 — ${v} eventos`;
+        return `<div class="admin-hour-bar" style="height:${Math.max(pct, 2)}%" title="${title}"></div>`;
+    }).join("");
+
+    const labels = [0, 3, 6, 9, 12, 15, 18, 21].map(h =>
+        `<span style="position:absolute;left:${(h / 24) * 100}%">${String(h).padStart(2, "0")}</span>`
+    ).join("");
+
+    container.innerHTML = `
+        <div class="admin-hourly">${bars}</div>
+        <div style="position:relative;height:14px;margin-top:2px;font-size:0.6rem;color:var(--text-dim)">${labels}</div>
+    `;
+}
+
+function renderAnonDaily(days) {
+    const container = $("#anon-daily-table-wrap");
+    if (!days.length) {
+        container.innerHTML = `<div class="admin-empty">No hay datos de actividad diaria aún</div>`;
+        return;
+    }
+    const rows = days.slice(0, 30).map(d => `
+        <tr>
+            <td>${escHtml(formatDay(d.day))}</td>
+            <td>${d.visitors}</td>
+            <td>${d.sessions}</td>
+            <td>${d.page_views}</td>
+            <td>${d.events}</td>
+        </tr>
+    `).join("");
+
+    container.innerHTML = `
+        <table class="admin-table">
+            <thead><tr><th>Día</th><th>Visitantes (IP)</th><th>Sesiones</th><th>Vistas</th><th>Eventos</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+}
+
+function renderAnonVisitors(visitors) {
+    const container = $("#anon-visitors-table-wrap");
+    if (!visitors.length) {
+        container.innerHTML = `<div class="admin-empty">No hay datos de visitantes aún</div>`;
+        return;
+    }
+    const rows = visitors.slice(0, 20).map(v => `
+        <tr>
+            <td><code style="font-size:0.78rem">${escHtml(v.ip_masked)}</code></td>
+            <td>${v.sessions}</td>
+            <td>${v.events}</td>
+            <td>${formatDatetime(v.last_seen)}</td>
+        </tr>
+    `).join("");
+
+    container.innerHTML = `
+        <table class="admin-table">
+            <thead><tr><th>IP (enmascarada)</th><th>Sesiones</th><th>Eventos</th><th>Última actividad</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
 }
 
 // ── Shared rendering ────────────────────────────────────────────────────

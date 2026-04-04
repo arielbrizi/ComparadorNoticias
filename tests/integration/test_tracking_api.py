@@ -9,7 +9,7 @@ from jose import jwt
 
 from app.config import JWT_ALGORITHM, JWT_SECRET
 from app.models import Article, ArticleGroup
-from app.tracking_store import init_tracking_table, query_usage_stats
+from app.tracking_store import init_tracking_table, log_events, query_usage_stats
 from app.user_store import init_users_table, upsert_user
 
 
@@ -124,3 +124,69 @@ class TestTrackEndpoint:
             headers={"content-type": "application/json"},
         )
         assert resp.status_code == 400
+
+
+class TestAnonymousEndpoint:
+    async def test_requires_admin(self, client):
+        resp = await client.get("/api/admin/anonymous")
+        assert resp.status_code == 403
+
+    async def test_returns_full_anonymous_data(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+
+        log_events(
+            [
+                {"type": "page_view", "data": {"view": "noticias"}, "ts": "2026-03-28T12:00:00"},
+                {"type": "group_click", "data": {"group_id": "g1", "title": "Test"}, "ts": "2026-03-28T12:05:00"},
+            ],
+            session_id="s-anon",
+            ip_address="192.168.1.50",
+        )
+        log_events(
+            [{"type": "page_view", "data": {"view": "noticias"}, "ts": "2026-03-28T13:00:00"}],
+            user_id=admin["id"],
+            session_id="s-auth",
+            ip_address="10.0.0.1",
+        )
+
+        token = _make_token(user_id=admin["id"], email=admin["email"], role="admin")
+        resp = await client.get(
+            "/api/admin/anonymous",
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert "overview" in data
+        assert "engagement" in data
+        assert "sections" in data
+        assert "features" in data
+        assert "top_content" in data
+        assert "searches" in data
+        assert "daily" in data
+        assert "hourly" in data
+        assert "top_visitors" in data
+
+        assert data["overview"]["unique_visitors"] == 1
+        assert data["overview"]["unique_sessions"] == 1
+        assert data["overview"]["total_events"] == 2
+
+    async def test_date_filter(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+
+        log_events(
+            [{"type": "page_view", "data": {"view": "noticias"}, "ts": "2026-03-28T12:00:00"}],
+            session_id="s-anon",
+            ip_address="192.168.1.50",
+        )
+
+        token = _make_token(user_id=admin["id"], email=admin["email"], role="admin")
+        resp = await client.get(
+            "/api/admin/anonymous?desde=2026-04-01&hasta=2026-04-30",
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["overview"]["total_events"] == 0

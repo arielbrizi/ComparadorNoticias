@@ -41,6 +41,15 @@ from app.tracking_store import (
     init_tracking_table,
     log_events,
     purge_old_events,
+    query_anonymous_daily,
+    query_anonymous_engagement,
+    query_anonymous_features,
+    query_anonymous_hourly,
+    query_anonymous_overview,
+    query_anonymous_searches,
+    query_anonymous_sections,
+    query_anonymous_top_content,
+    query_anonymous_top_visitors,
     query_daily_activity,
     query_engagement,
     query_feature_usage,
@@ -514,6 +523,26 @@ async def admin_hourly(
     _admin: dict = Depends(require_admin),
 ):
     return {"hours": query_hourly_distribution(desde=desde, hasta=hasta)}
+
+
+@app.get("/api/admin/anonymous")
+async def admin_anonymous(
+    desde: str | None = Query(None),
+    hasta: str | None = Query(None),
+    _admin: dict = Depends(require_admin),
+):
+    """Full anonymous visitors dashboard in a single call."""
+    return {
+        "overview": query_anonymous_overview(desde=desde, hasta=hasta),
+        "engagement": query_anonymous_engagement(desde=desde, hasta=hasta),
+        "sections": query_anonymous_sections(desde=desde, hasta=hasta),
+        "features": query_anonymous_features(desde=desde, hasta=hasta),
+        "top_content": query_anonymous_top_content(desde=desde, hasta=hasta),
+        "searches": query_anonymous_searches(desde=desde, hasta=hasta),
+        "daily": query_anonymous_daily(desde=desde, hasta=hasta),
+        "hourly": query_anonymous_hourly(desde=desde, hasta=hasta),
+        "top_visitors": query_anonymous_top_visitors(desde=desde, hasta=hasta),
+    }
 
 
 # ── Health check ─────────────────────────────────────────────────────────────

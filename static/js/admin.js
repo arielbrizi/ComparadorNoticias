@@ -473,7 +473,9 @@ function formatDay(iso) {
 function formatDatetime(iso) {
     if (!iso) return "-";
     try {
-        const d = new Date(iso + "Z");
+        const raw = iso.includes("T") && !iso.includes("Z") && !iso.includes("+") ? iso + "Z" : iso;
+        const d = new Date(raw);
+        if (isNaN(d.getTime())) return iso;
         return d.toLocaleString("es-AR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
     } catch {
         return iso;

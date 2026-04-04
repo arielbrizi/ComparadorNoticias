@@ -716,6 +716,20 @@ def query_anonymous_top_visitors(
     return results
 
 
+def purge_proxy_ip_events() -> int:
+    """Delete anonymous events whose ip_address is a Railway CGNAT proxy (100.64.x.x)."""
+    with get_conn() as conn:
+        cur = execute(
+            conn,
+            "DELETE FROM usage_events WHERE user_id IS NULL AND ip_address LIKE ?",
+            ("100.64.%",),
+        )
+        deleted = cur.rowcount
+    if deleted:
+        logger.info("Tracking: purged %d anonymous events with proxy IPs", deleted)
+    return deleted
+
+
 def purge_old_events(days: int = 90) -> int:
     """Delete tracking events older than `days`. Returns deleted count."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")

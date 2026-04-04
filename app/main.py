@@ -41,6 +41,7 @@ from app.tracking_store import (
     init_tracking_table,
     log_events,
     purge_old_events,
+    purge_proxy_ip_events,
     query_anonymous_daily,
     query_anonymous_engagement,
     query_anonymous_features,
@@ -448,7 +449,8 @@ async def track_events(request: Request, user: dict | None = Depends(get_current
         return JSONResponse({"error": "session_id and events required"}, status_code=400)
 
     user_id = user["id"] if user else None
-    ip = request.client.host if request.client else ""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "")
     ua = request.headers.get("user-agent", "")[:500]
 
     try:
@@ -543,6 +545,13 @@ async def admin_anonymous(
         "hourly": query_anonymous_hourly(desde=desde, hasta=hasta),
         "top_visitors": query_anonymous_top_visitors(desde=desde, hasta=hasta),
     }
+
+
+@app.post("/api/admin/purge-proxy-events")
+async def admin_purge_proxy_events(_admin: dict = Depends(require_admin)):
+    """Delete anonymous tracking events that have Railway proxy IPs (100.64.x.x)."""
+    deleted = purge_proxy_ip_events()
+    return {"deleted": deleted}
 
 
 # ── Health check ─────────────────────────────────────────────────────────────

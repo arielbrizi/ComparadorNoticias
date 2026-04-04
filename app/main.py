@@ -435,6 +435,23 @@ async def get_wordcloud():
 
 # ── Tracking ─────────────────────────────────────────────────────────────────
 
+_IP_HEADERS = (
+    "cf-connecting-ip",
+    "x-forwarded-for",
+    "x-real-ip",
+    "forwarded",
+)
+
+
+def _resolve_client_ip(request: Request) -> str:
+    for header in _IP_HEADERS:
+        value = request.headers.get(header, "")
+        if value:
+            ip = value.split(",")[0].strip()
+            if ip and not ip.startswith("100.64."):
+                return ip
+    return request.client.host if request.client else ""
+
 @app.post("/api/track")
 async def track_events(request: Request, user: dict | None = Depends(get_current_user)):
     """Receive a batch of usage events from the frontend."""
@@ -449,15 +466,7 @@ async def track_events(request: Request, user: dict | None = Depends(get_current
         return JSONResponse({"error": "session_id and events required"}, status_code=400)
 
     user_id = user["id"] if user else None
-    forwarded = request.headers.get("x-forwarded-for", "")
-    real_ip = request.headers.get("x-real-ip", "")
-    client_host = request.client.host if request.client else ""
-    ip = (
-        forwarded.split(",")[0].strip() if forwarded
-        else real_ip.strip() if real_ip
-        else client_host
-    )
-    logger.debug("Track IP resolution: xff=%r  xri=%r  client=%r  → %r", forwarded, real_ip, client_host, ip)
+    ip = _resolve_client_ip(request)
     ua = request.headers.get("user-agent", "")[:500]
 
     try:

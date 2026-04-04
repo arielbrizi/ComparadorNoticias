@@ -408,6 +408,7 @@ function renderAnonDaily(days) {
 
 function renderAnonVisitors(visitors) {
     const container = $("#anon-visitors-table-wrap");
+    visitors = visitors.filter(v => v.ip && v.ip.trim());
     if (!visitors.length) {
         container.innerHTML = `<div class="admin-empty">No hay datos de visitantes aún</div>`;
         return;

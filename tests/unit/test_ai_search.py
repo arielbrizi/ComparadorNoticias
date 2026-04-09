@@ -10,6 +10,7 @@ from app.ai_search import (
     _call_gemini,
     _call_groq,
     _clean_json_response,
+    _prefetch_topic_searches,
     ai_top_story,
     _parse_retry_seconds,
     ai_news_search,
@@ -204,6 +205,55 @@ class TestAiTopics:
         assert result["ai_available"] is False
         assert result["topics"] == []
 
+    async def test_cached_response_includes_search_cached(self, sample_groups, monkeypatch):
+        import time
+        topics = [
+            {"label": "Dólar", "emoji": "💵"},
+            {"label": "Inflación", "emoji": "📈"},
+            {"label": "Deporte", "emoji": "⚽"},
+        ]
+        monkeypatch.setattr("app.ai_search._topics_cache", {
+            "topics": topics, "ts": time.time(), "ai_provider": "Test",
+        })
+        monkeypatch.setattr("app.ai_search._search_cache", {
+            "dólar": {"summary": "ok", "has_results": True},
+            "inflación": {"summary": "ok", "has_results": True},
+        })
+
+        result = await ai_topics(sample_groups)
+
+        assert result["cached"] is True
+        assert set(result["search_cached"]) == {"Dólar", "Inflación"}
+        assert "Deporte" not in result["search_cached"]
+
+    async def test_fresh_response_has_empty_search_cached(self, sample_groups, monkeypatch):
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0})
+        monkeypatch.setattr("app.ai_search._search_cache", {})
+
+        topics_json = '{"topics":[{"label":"Dólar","emoji":"💵"}]}'
+        _setup_ai_mock(monkeypatch, topics_json)
+
+        created_tasks = []
+        import asyncio as _asyncio
+        original_create_task = _asyncio.create_task
+        def _spy(coro):
+            task = original_create_task(coro)
+            created_tasks.append(task)
+            return task
+        monkeypatch.setattr("app.ai_search.asyncio.create_task", _spy)
+
+        result = await ai_topics(sample_groups)
+
+        assert result["search_cached"] == []
+        assert result["cached"] is False
+
+        for task in created_tasks:
+            task.cancel()
+            try:
+                await task
+            except _asyncio.CancelledError:
+                pass
+
 
 class TestAiWeeklySummary:
     async def test_returns_unavailable_without_api_key(self, sample_groups, monkeypatch):
@@ -307,3 +357,129 @@ class TestAiTopStory:
         _no_ai(monkeypatch)
         result = await ai_top_story(sample_groups, "2026-03-24")
         assert result["ai_available"] is False
+
+
+def _setup_ai_mock(monkeypatch, search_response=None):
+    """Configure a fake Gemini that returns a valid search JSON."""
+    monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setattr("app.ai_search._groq_client", None)
+
+    if search_response is None:
+        search_response = '{"summary":"Resumen","relevant_group_ids":["abc1234567"],"has_results":true}'
+
+    mock_response = MagicMock()
+    mock_response.text = search_response
+
+    async def _fast(*a, **kw):
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = _fast
+    monkeypatch.setattr("app.ai_search._gemini_client", mock_client)
+    return mock_client
+
+
+class TestPrefetchTopicSearches:
+    async def test_prefetch_caches_all_topics(self, sample_groups, monkeypatch):
+        topics = [
+            {"label": "Dólar y mercados", "emoji": "💵"},
+            {"label": "Inflación marzo", "emoji": "📈"},
+            {"label": "Superclásico", "emoji": "⚽"},
+        ]
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": topics, "ts": 0})
+        monkeypatch.setattr("app.ai_search._search_cache", {})
+        monkeypatch.setattr("app.ai_search._PREFETCH_DELAY", 0)
+        _setup_ai_mock(monkeypatch)
+
+        import app.ai_search as mod
+        await _prefetch_topic_searches(topics, sample_groups)
+
+        assert "dólar y mercados" in mod._search_cache
+        assert "inflación marzo" in mod._search_cache
+        assert "superclásico" in mod._search_cache
+
+    async def test_prefetch_continues_on_failure(self, sample_groups, monkeypatch):
+        topics = [
+            {"label": "Tema OK 1", "emoji": "✅"},
+            {"label": "Tema FAIL", "emoji": "❌"},
+            {"label": "Tema OK 2", "emoji": "✅"},
+        ]
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": topics, "ts": 0})
+        monkeypatch.setattr("app.ai_search._search_cache", {})
+        monkeypatch.setattr("app.ai_search._PREFETCH_DELAY", 0)
+
+        call_count = 0
+        original_search = ai_news_search.__wrapped__ if hasattr(ai_news_search, "__wrapped__") else None
+
+        async def _mock_search(query, groups):
+            nonlocal call_count
+            call_count += 1
+            if query.strip().lower() == "tema fail":
+                raise RuntimeError("Simulated failure")
+            return {
+                "summary": "ok", "relevant_group_ids": [], "has_results": True,
+                "ai_available": True, "ai_provider": "Mock",
+            }
+
+        monkeypatch.setattr("app.ai_search.ai_news_search", _mock_search)
+
+        await _prefetch_topic_searches(topics, sample_groups)
+
+        assert call_count == 3
+
+    async def test_prefetch_skips_empty_labels(self, sample_groups, monkeypatch):
+        topics = [
+            {"label": "Tema real", "emoji": "✅"},
+            {"label": "", "emoji": "❓"},
+            {"emoji": "🚫"},
+        ]
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": topics, "ts": 0})
+        monkeypatch.setattr("app.ai_search._search_cache", {})
+        monkeypatch.setattr("app.ai_search._PREFETCH_DELAY", 0)
+
+        calls = []
+        async def _mock_search(query, groups):
+            calls.append(query)
+            return {
+                "summary": "ok", "relevant_group_ids": [], "has_results": True,
+                "ai_available": True, "ai_provider": "Mock",
+            }
+
+        monkeypatch.setattr("app.ai_search.ai_news_search", _mock_search)
+
+        await _prefetch_topic_searches(topics, sample_groups)
+
+        assert calls == ["Tema real"]
+
+    async def test_topics_launches_prefetch_task(self, sample_groups, monkeypatch):
+        import time
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0})
+        monkeypatch.setattr("app.ai_search._search_cache", {})
+
+        topics_json = '{"topics":[{"label":"Dólar","emoji":"💵"},{"label":"Inflación","emoji":"📈"}]}'
+        _setup_ai_mock(monkeypatch, topics_json)
+
+        created_tasks = []
+        original_create_task = asyncio.create_task
+
+        def _spy_create_task(coro):
+            task = original_create_task(coro)
+            created_tasks.append(task)
+            return task
+
+        monkeypatch.setattr("app.ai_search.asyncio.create_task", _spy_create_task)
+
+        result = await ai_topics(sample_groups)
+
+        assert result["ai_available"] is True
+        assert len(result["topics"]) == 2
+        assert len(created_tasks) == 1
+
+        for task in created_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass

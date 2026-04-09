@@ -520,6 +520,7 @@ let _topicsCache = null;
 let _topicsLoading = false;
 let _topicsCacheTs = 0;
 let _topicsLoadingSince = 0;
+let _topicsSearchCached = new Set();
 const _topicsTTL = 55 * 60 * 1000; // 55 min (slightly less than server's 1h TTL)
 const _topicsLoadingTimeout = 20_000;
 
@@ -627,6 +628,7 @@ function setupHeroSearch() {
         if (!_isTopicsCacheValid() && !_topicsLoading) {
             _topicsCache = null;
             _topicsCacheTs = 0;
+            _topicsSearchCached = new Set();
             prefetchTopics();
         }
     }, 10 * 60 * 1000); // check every 10 min
@@ -645,6 +647,7 @@ function setupHeroSearch() {
         _topicsLoadingSince = 0;
         _topicsCache = null;
         _topicsCacheTs = 0;
+        _topicsSearchCached = new Set();
         prefetchTopics();
     });
 }
@@ -663,6 +666,10 @@ async function prefetchTopics() {
         if (data.ai_available && data.topics?.length) {
             _topicsCache = data.topics;
             _topicsCacheTs = Date.now();
+            _topicsSearchCached = new Set(data.search_cached || []);
+            if (_topicsSearchCached.size < data.topics.length) {
+                _scheduleCachedRecheck();
+            }
         }
     } catch (err) {
         console.error("Failed to prefetch topics:", err);
@@ -681,6 +688,30 @@ async function prefetchTopics() {
     }
 }
 
+let _cachedRecheckTimer = null;
+function _scheduleCachedRecheck() {
+    if (_cachedRecheckTimer) return;
+    _cachedRecheckTimer = setTimeout(async () => {
+        _cachedRecheckTimer = null;
+        if (!_isTopicsCacheValid()) return;
+        try {
+            const resp = await fetch(`${API}/api/topics`);
+            const data = await resp.json();
+            if (data.search_cached?.length) {
+                _topicsSearchCached = new Set(data.search_cached);
+                if (_isTouchDevice) renderTopicChips();
+                else {
+                    const input = $("#hero-search-input");
+                    if (input && document.activeElement === input && !input.value.trim()) showSuggestions();
+                }
+                if (_topicsSearchCached.size < (_topicsCache?.length || 6)) {
+                    _scheduleCachedRecheck();
+                }
+            }
+        } catch { /* silent */ }
+    }, 15_000);
+}
+
 function showSuggestions() {
     const box = $("#search-suggestions");
     if (!box) return;
@@ -689,12 +720,14 @@ function showSuggestions() {
     if (_isTopicsCacheValid() && _topicsCache?.length) {
         box.innerHTML =
             `<div class="suggestions-header">Temas del día</div>` +
-            _topicsCache.map(t =>
-                `<button class="suggestion-item" data-query="${escHtml(t.label)}">`
-                + `<span class="suggestion-emoji">${t.emoji}</span>`
-                + `<span class="suggestion-label">${escHtml(t.label)}</span>`
-                + `</button>`
-            ).join("");
+            _topicsCache.map(t => {
+                const cached = _topicsSearchCached.has(t.label);
+                return `<button class="suggestion-item" data-query="${escHtml(t.label)}">`
+                    + `<span class="suggestion-emoji">${t.emoji}</span>`
+                    + `<span class="suggestion-label">${escHtml(t.label)}</span>`
+                    + (cached ? `<span class="suggestion-cached" title="Búsqueda lista">✓</span>` : "")
+                    + `</button>`;
+            }).join("");
         box.hidden = false;
 
         box.querySelectorAll(".suggestion-item").forEach(btn => {
@@ -729,12 +762,14 @@ function renderTopicChips() {
     _resetStaleLoading();
 
     if (_isTopicsCacheValid() && _topicsCache?.length) {
-        container.innerHTML = _topicsCache.map(t =>
-            `<button class="topic-chip" data-query="${escHtml(t.label)}">`
-            + `<span class="topic-chip-emoji">${t.emoji}</span>`
-            + `<span>${escHtml(t.label)}</span>`
-            + `</button>`
-        ).join("");
+        container.innerHTML = _topicsCache.map(t => {
+            const cached = _topicsSearchCached.has(t.label);
+            return `<button class="topic-chip" data-query="${escHtml(t.label)}">`
+                + `<span class="topic-chip-emoji">${t.emoji}</span>`
+                + `<span>${escHtml(t.label)}</span>`
+                + (cached ? `<span class="topic-chip-cached" title="Búsqueda lista">✓</span>` : "")
+                + `</button>`;
+        }).join("");
         container.hidden = false;
 
         container.querySelectorAll(".topic-chip").forEach(btn => {
@@ -1660,6 +1695,7 @@ async function loadTemasView() {
         if (data.ai_available && data.topics?.length) {
             _topicsCache = data.topics;
             _topicsCacheTs = Date.now();
+            _topicsSearchCached = new Set(data.search_cached || []);
             renderTemasCards(data.topics);
             _setTemasAttr("done", "", data.ai_provider);
         } else if (data.ai_available) {

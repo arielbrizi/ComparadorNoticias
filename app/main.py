@@ -138,6 +138,56 @@ async def refresh_wordcloud():
     logger.info("Word cloud actualizada: %d términos", len(words))
 
 
+async def _startup_prefetch():
+    """Wait for initial news load, then pre-warm top story and weekly caches."""
+    for _ in range(30):
+        async with _lock:
+            has_groups = bool(_groups)
+        if has_groups:
+            break
+        await asyncio.sleep(2)
+    await prefetch_top_story()
+    await prefetch_weekly_summary()
+
+
+async def prefetch_top_story():
+    """Pre-warm the top story cache so the first visitor gets an instant response."""
+    today = datetime.now(ART).strftime("%Y-%m-%d")
+    _articles_db, groups = load_groups_from_db(desde=today, hasta=today)
+    if not groups:
+        async with _lock:
+            groups = list(_groups)
+    if not groups:
+        return
+    try:
+        result = await ai_top_story(groups, today)
+        cached = result.get("cached", False)
+        logger.info("Top story prefetch done (cached=%s)", cached)
+    except Exception as exc:
+        logger.warning("Top story prefetch failed: %s", exc)
+
+
+async def prefetch_weekly_summary():
+    """Pre-warm the weekly summary cache so the first visitor gets an instant response."""
+    now = datetime.now(ART)
+    days_since_monday = now.weekday()
+    monday = now - timedelta(days=days_since_monday)
+    week_start = monday.strftime("%Y-%m-%d")
+    week_end = now.strftime("%Y-%m-%d")
+
+    _articles_db, groups = load_groups_from_db(desde=week_start, hasta=week_end)
+    if not groups:
+        return
+    if len(groups) > 200:
+        groups = groups[:200]
+    try:
+        result = await ai_weekly_summary(groups, week_start, week_end)
+        cached = result.get("cached", False)
+        logger.info("Weekly summary prefetch done (cached=%s)", cached)
+    except Exception as exc:
+        logger.warning("Weekly summary prefetch failed: %s", exc)
+
+
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 
 scheduler = AsyncIOScheduler()
@@ -175,8 +225,11 @@ async def lifespan(_app: FastAPI):
         logger.error("Failed to load news from DB on startup: %s", exc)
 
     asyncio.create_task(refresh_news())
+    asyncio.create_task(_startup_prefetch())
     scheduler.add_job(refresh_news, "interval", minutes=10)
     scheduler.add_job(refresh_wordcloud, "interval", hours=2)
+    scheduler.add_job(prefetch_top_story, "interval", hours=1)
+    scheduler.add_job(prefetch_weekly_summary, "cron", hour=9, minute=15)
     scheduler.add_job(purge_old_news, "cron", hour=7, minute=0)
     scheduler.add_job(purge_old_events, "cron", hour=6, minute=30)
     scheduler.start()

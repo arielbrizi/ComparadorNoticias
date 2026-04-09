@@ -346,8 +346,11 @@ async def ai_topics(groups: list[ArticleGroup]) -> dict:
     """Extract trending topics from current news groups."""
     now = time.time()
     if _topics_cache["topics"] and (now - _topics_cache["ts"]) < TOPICS_TTL:
+        cached_labels = [t["label"] for t in _topics_cache["topics"]
+                         if t.get("label", "").strip().lower() in _search_cache]
         return {"topics": _topics_cache["topics"], "ai_available": True, "cached": True,
-                "ai_provider": _topics_cache.get("ai_provider", "unknown")}
+                "ai_provider": _topics_cache.get("ai_provider", "unknown"),
+                "search_cached": cached_labels}
 
     if not _ai_available():
         return {"topics": [], "ai_available": False}
@@ -365,11 +368,33 @@ async def ai_topics(groups: list[ArticleGroup]) -> dict:
         _topics_cache["ai_provider"] = provider
         _search_cache.clear()
         logger.info("Topics regenerated via %s — search cache cleared (%d topics)", provider, len(topics))
-        return {"topics": topics, "ai_available": True, "cached": False, "ai_provider": provider}
+        asyncio.create_task(_prefetch_topic_searches(topics, groups))
+        return {"topics": topics, "ai_available": True, "cached": False, "ai_provider": provider,
+                "search_cached": []}
 
     except Exception as exc:
         logger.error("AI topics failed: %s", exc)
         return {"topics": [], "ai_available": False}
+
+
+_PREFETCH_DELAY = 2  # seconds between prefetch calls to avoid rate limits
+
+
+async def _prefetch_topic_searches(
+    topics: list[dict], groups: list[ArticleGroup],
+) -> None:
+    """Pre-warm _search_cache for each topic label after topic generation."""
+    for i, topic in enumerate(topics):
+        label = topic.get("label", "")
+        if not label:
+            continue
+        try:
+            await ai_news_search(label, groups)
+        except Exception as exc:
+            logger.warning("Prefetch failed for topic '%s': %s", label, exc)
+        if i < len(topics) - 1:
+            await asyncio.sleep(_PREFETCH_DELAY)
+    logger.info("Topic prefetch complete: %d/%d cached", len(_search_cache), len(topics))
 
 
 # ── Weekly summary ────────────────────────────────────────────────────

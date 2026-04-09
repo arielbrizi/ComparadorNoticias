@@ -406,17 +406,16 @@ async def ai_search(
             by_id[gid].model_dump(mode="json") for gid in ids if gid in by_id
         ]
 
-    if not ids or not result.get("matched_groups"):
-        db_groups = _db_text_search(q)
-        existing = {g["group_id"] for g in result.get("matched_groups", [])}
-        for g in db_groups:
-            if g.group_id not in existing:
-                result.setdefault("matched_groups", []).append(
-                    g.model_dump(mode="json")
-                )
-                result.setdefault("relevant_group_ids", []).append(g.group_id)
-        if result.get("matched_groups") and not result.get("has_results", False):
-            result["has_results"] = True
+    db_groups = _db_text_search(q)
+    existing = {g["group_id"] for g in result.get("matched_groups", [])}
+    for g in db_groups:
+        if g.group_id not in existing:
+            result.setdefault("matched_groups", []).append(
+                g.model_dump(mode="json")
+            )
+            result.setdefault("relevant_group_ids", []).append(g.group_id)
+    if result.get("matched_groups") and not result.get("has_results", False):
+        result["has_results"] = True
 
     return result
 

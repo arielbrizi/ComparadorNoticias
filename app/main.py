@@ -181,7 +181,7 @@ async def prefetch_weekly_summary():
     if len(groups) > 200:
         groups = groups[:200]
     try:
-        result = await ai_weekly_summary(groups, week_start, week_end)
+        result = await ai_weekly_summary(groups, week_start, week_end, force=True)
         cached = result.get("cached", False)
         logger.info("Weekly summary prefetch done (cached=%s)", cached)
     except Exception as exc:
@@ -230,6 +230,7 @@ async def lifespan(_app: FastAPI):
     scheduler.add_job(refresh_wordcloud, "interval", hours=2)
     scheduler.add_job(prefetch_top_story, "interval", hours=1)
     scheduler.add_job(prefetch_weekly_summary, "cron", hour=9, minute=15)
+    scheduler.add_job(prefetch_weekly_summary, "cron", hour=18, minute=0)
     scheduler.add_job(purge_old_news, "cron", hour=7, minute=0)
     scheduler.add_job(purge_old_events, "cron", hour=6, minute=30)
     scheduler.start()

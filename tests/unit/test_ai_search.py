@@ -336,7 +336,7 @@ class TestAiTopStory:
                 "date": "2026-03-24",
             },
             "ts": time.time(),
-            "cache_key": f"2026-03-24_{top.group_id}",
+            "cache_key": "2026-03-24",
         })
         result = await ai_top_story(sample_groups, "2026-03-24")
         assert result["cached"] is True
@@ -352,7 +352,7 @@ class TestAiTopStory:
                 "date": "2026-03-23",
             },
             "ts": time.time(),
-            "cache_key": f"2026-03-23_{top.group_id}",
+            "cache_key": "2026-03-23",
         })
         _no_ai(monkeypatch)
         result = await ai_top_story(sample_groups, "2026-03-24")

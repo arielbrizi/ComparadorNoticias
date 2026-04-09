@@ -400,7 +400,7 @@ async def _prefetch_topic_searches(
 # ── Weekly summary ────────────────────────────────────────────────────
 
 _weekly_cache: dict = {"data": None, "ts": 0, "week_key": ""}
-WEEKLY_TTL = 3600  # 1 hour
+WEEKLY_TTL = 86400  # 24 h — effectively never expires; prefetches force renewal
 WEEKLY_TIMEOUT = 120
 
 WEEKLY_PROMPT = """Sos el editor jefe de un diario argentino preparando el resumen semanal.
@@ -436,12 +436,15 @@ async def ai_weekly_summary(
     groups: list[ArticleGroup],
     week_start: str,
     week_end: str,
+    *,
+    force: bool = False,
 ) -> dict:
     """Generate an editorial weekly summary from the week's news groups."""
     week_key = f"{week_start}_{week_end}"
     now = time.time()
     if (
-        _weekly_cache["data"]
+        not force
+        and _weekly_cache["data"]
         and _weekly_cache["week_key"] == week_key
         and (now - _weekly_cache["ts"]) < WEEKLY_TTL
     ):
@@ -553,7 +556,7 @@ async def ai_top_story(
         return {"ai_available": True, "story": None, "date": today}
 
     top = groups[0]
-    cache_key = f"{today}_{top.group_id}"
+    cache_key = today
     now = time.time()
     if (
         _topstory_cache["data"]

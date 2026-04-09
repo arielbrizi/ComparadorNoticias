@@ -219,6 +219,11 @@ function _switchViewInternal(view) {
     if (nube) nube.hidden = true;
 
     if (view === "metricas") {
+        if (!state.user) {
+            localStorage.setItem("pending_view", "metricas");
+            openLoginModal();
+            return;
+        }
         metricas.hidden = false;
         if (!_metricsFiltersReady) {
             setupMetricsFilters();
@@ -316,7 +321,13 @@ async function loadMetrics(desde = null, hasta = null) {
     const qs = params.toString() ? `?${params}` : "";
 
     try {
-        const data = await fetch(`${API}/api/metricas${qs}`).then(r => r.json());
+        const resp = await fetch(`${API}/api/metricas${qs}`);
+        if (resp.status === 401) {
+            switchView("noticias");
+            openLoginModal();
+            return;
+        }
+        const data = await resp.json();
         state.metricsData = data;
         renderMetricsSummary(data);
         renderDateRangeInfo(data.date_range);
@@ -1872,6 +1883,14 @@ async function initAuth() {
         state.user = null;
     }
     renderAuthUI();
+
+    if (state.user) {
+        const pending = localStorage.getItem("pending_view");
+        if (pending) {
+            localStorage.removeItem("pending_view");
+            switchView(pending);
+        }
+    }
 }
 
 function setupAuth() {

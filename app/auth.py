@@ -83,6 +83,13 @@ async def get_current_user(request: Request) -> dict | None:
         return None
 
 
+async def require_login(user: dict | None = Depends(get_current_user)) -> dict:
+    """Raise 401 if the request has no valid session."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required")
+    return user
+
+
 async def require_admin(user: dict | None = Depends(get_current_user)) -> dict:
     """Dependency that requires an admin user. Raises 403 otherwise."""
     if not user or user.get("role") != "admin":

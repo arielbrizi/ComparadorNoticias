@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.article_grouper import group_articles, is_event_expired
-from app.auth import get_current_user, require_admin, router as auth_router
+from app.auth import get_current_user, require_admin, require_login, router as auth_router
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
@@ -380,6 +380,7 @@ async def get_status(
 async def get_metricas(
     desde: str | None = Query(None, description="Fecha inicio YYYY-MM-DD"),
     hasta: str | None = Query(None, description="Fecha fin YYYY-MM-DD"),
+    _user: dict = Depends(require_login),
 ):
     """Métricas de agenda con filtro por rango de fechas (historial en SQLite)."""
     return query_metrics(desde=desde, hasta=hasta)

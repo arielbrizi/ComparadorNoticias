@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from jose import jwt
 
+from app.config import JWT_ALGORITHM, JWT_SECRET
 from app.models import Article, ArticleGroup
+from app.user_store import upsert_user
 
 
 @pytest_asyncio.fixture
@@ -176,9 +179,21 @@ class TestApiStatus:
         assert data["last_update"] is not None
 
 
+def _make_token(user_id="u1", email="test@test.com", role="user"):
+    exp = datetime.now(timezone.utc) + timedelta(hours=1)
+    payload = {"sub": user_id, "email": email, "role": role, "exp": exp}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
 class TestApiMetricas:
-    async def test_returns_metrics(self, client):
+    async def test_requires_auth(self, client):
         resp = await client.get("/api/metricas")
+        assert resp.status_code == 401
+
+    async def test_returns_metrics_when_logged_in(self, client):
+        user = upsert_user("metricas@test.com", "Test", "")
+        token = _make_token(user_id=user["id"], email=user["email"])
+        resp = await client.get("/api/metricas", cookies={"vs_token": token})
         assert resp.status_code == 200
         data = resp.json()
         assert "total_groups" in data

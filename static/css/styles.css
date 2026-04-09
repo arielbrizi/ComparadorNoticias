@@ -1774,6 +1774,20 @@ a.brand { text-decoration: none; color: inherit; cursor: pointer; }
     font-size: 0.95rem;
 }
 
+.btn-retry {
+    display: inline-block;
+    margin-top: .75rem;
+    padding: .5rem 1.25rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: .9rem;
+    cursor: pointer;
+    transition: background .2s, border-color .2s;
+}
+.btn-retry:hover { background: var(--surface-hover, var(--surface)); border-color: var(--accent); }
+
 .weekly-hero {
     max-width: 900px;
     margin: 0 auto 2rem;

@@ -182,6 +182,9 @@ function setupViewNav() {
     });
 
     window.addEventListener("popstate", (e) => {
+        if (!e.state || !e.state.modal) {
+            _closeModalVisual();
+        }
         const view = (e.state && e.state.view) || "noticias";
         _switchViewInternal(view);
     });
@@ -997,7 +1000,7 @@ async function loadWordCloud() {
     } catch (e) {
         loading.hidden = true;
         error.hidden = false;
-        error.textContent = "Error al cargar la nube de palabras.";
+        error.innerHTML = `Error al cargar la nube de palabras.<br><button class="btn-retry" onclick="_wcLoaded=false;loadWordCloud()">Reintentar</button>`;
     }
 }
 
@@ -1195,6 +1198,7 @@ async function openComparison(group) {
     body.innerHTML = `<div class="loading-state" style="padding:3rem"><div class="spinner"></div><p>Analizando cobertura…</p></div>`;
     $("#compare-modal").hidden = false;
     document.body.style.overflow = "hidden";
+    history.pushState({ view: state.currentView, modal: true }, "");
 
     let data;
     try {
@@ -1300,9 +1304,16 @@ async function openComparison(group) {
     body.innerHTML = dragHandle + headerHtml + framingHtml + coverageHtml;
 }
 
-function closeModal() {
-    $("#compare-modal").hidden = true;
+function _closeModalVisual() {
+    const modal = $("#compare-modal");
+    if (modal.hidden) return;
+    modal.hidden = true;
     document.body.style.overflow = "";
+}
+
+function closeModal() {
+    if ($("#compare-modal").hidden) return;
+    history.back();
 }
 
 // ── Weekly Summary ────────────────────────────────────────────────────────
@@ -1404,9 +1415,9 @@ async function loadWeeklySummary() {
     } catch (err) {
         if (loading) loading.hidden = true;
         const msg = err.name === "AbortError"
-            ? "La generación tardó demasiado. Intentá de nuevo."
-            : "Error al generar el resumen. Intentá de nuevo más tarde.";
-        if (error) { error.innerHTML = `<p>${msg}</p>`; error.hidden = false; }
+            ? "La generación tardó demasiado."
+            : "Error al generar el resumen.";
+        if (error) { error.innerHTML = `<p>${msg}</p><button class="btn-retry" onclick="_weeklyData=null;loadWeeklySummary()">Reintentar</button>`; error.hidden = false; }
         _setAttr("static", ws, we);
         console.error("Weekly summary failed:", err);
     } finally {
@@ -1556,9 +1567,9 @@ async function loadTopStory() {
     } catch (err) {
         if (loading) loading.hidden = true;
         const msg = err.name === "AbortError"
-            ? "La generación tardó demasiado. Intentá de nuevo."
-            : "Error al generar el análisis. Intentá de nuevo más tarde.";
-        if (error) { error.innerHTML = `<p>${msg}</p>`; error.hidden = false; }
+            ? "La generación tardó demasiado."
+            : "Error al generar el análisis.";
+        if (error) { error.innerHTML = `<p>${msg}</p><button class="btn-retry" onclick="_topStoryData=null;loadTopStory()">Reintentar</button>`; error.hidden = false; }
         _setTopStoryAttr("static", "");
         console.error("Top story failed:", err);
     } finally {
@@ -1685,32 +1696,49 @@ async function loadTemasView() {
     if (loading) loading.hidden = false;
     _setTemasAttr("loading", "");
 
-    try {
-        const resp = await fetch(`${API}/api/topics`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
+    const maxAttempts = 2;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 45000);
+            const resp = await fetch(`${API}/api/topics`, { signal: ctrl.signal });
+            clearTimeout(timer);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
 
-        if (loading) loading.hidden = true;
+            if (loading) loading.hidden = true;
 
-        if (data.ai_available && data.topics?.length) {
-            _topicsCache = data.topics;
-            _topicsCacheTs = Date.now();
-            _topicsSearchCached = new Set(data.search_cached || []);
-            renderTemasCards(data.topics);
-            _setTemasAttr("done", "", data.ai_provider);
-        } else if (data.ai_available) {
-            _setTemasAttr("static", "");
-            if (error) { error.innerHTML = "<p>No hay suficientes noticias para extraer temas.</p>"; error.hidden = false; }
-        } else {
-            _setTemasAttr("static", "");
-            if (error) { error.innerHTML = "<p>La IA no está disponible en este momento.</p>"; error.hidden = false; }
+            if (data.ai_available && data.topics?.length) {
+                _topicsCache = data.topics;
+                _topicsCacheTs = Date.now();
+                _topicsSearchCached = new Set(data.search_cached || []);
+                renderTemasCards(data.topics);
+                _setTemasAttr("done", "", data.ai_provider);
+            } else if (data.ai_available) {
+                _setTemasAttr("static", "");
+                if (error) { error.innerHTML = "<p>No hay suficientes noticias para extraer temas.</p>"; error.hidden = false; }
+            } else {
+                _setTemasAttr("static", "");
+                if (error) { error.innerHTML = "<p>La IA no está disponible en este momento.</p>"; error.hidden = false; }
+            }
+            return;
+        } catch (err) {
+            lastErr = err;
+            if (attempt < maxAttempts) {
+                console.warn(`Temas attempt ${attempt} failed, retrying…`, err);
+                await new Promise(r => setTimeout(r, 2000));
+            }
         }
-    } catch (err) {
-        if (loading) loading.hidden = true;
-        _setTemasAttr("static", "");
-        if (error) { error.innerHTML = "<p>Error al cargar los temas. Intentá de nuevo.</p>"; error.hidden = false; }
-        console.error("Temas load failed:", err);
     }
+
+    if (loading) loading.hidden = true;
+    _setTemasAttr("static", "");
+    if (error) {
+        error.innerHTML = `<p>Error al cargar los temas.</p><button class="btn-retry" onclick="loadTemasView()">Reintentar</button>`;
+        error.hidden = false;
+    }
+    console.error("Temas load failed after retries:", lastErr);
 }
 
 function renderTemasCards(topics) {

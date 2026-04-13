@@ -439,11 +439,19 @@ function renderAnonVisitors(visitors) {
 // ── AI dashboard ────────────────────────────────────────────────────────
 
 const _eventLabels = {
-    search: "Búsqueda usuario",
-    search_prefetch: "Búsqueda prefetch",
+    search: "Búsqueda manual",
+    search_prefetch: "Búsqueda automática",
     topics: "Temas del día",
     weekly_summary: "Resumen semanal",
     top_story: "Noticia del día",
+};
+
+const _eventDescs = {
+    search: "Cuando un usuario busca un tema manualmente",
+    search_prefetch: "Búsqueda automática por cada tema para que cargue al instante",
+    topics: "Genera los 6 temas destacados a partir de las noticias",
+    weekly_summary: "Arma el resumen con lo más importante de la semana",
+    top_story: "Elige y redacta la noticia más importante del día",
 };
 
 const _providerLabels = {
@@ -532,8 +540,12 @@ function renderAIEventTable(events) {
         totCostIn += e.cost_input;
         totCostOut += e.cost_output;
         totCost += e.cost_total;
+        const desc = _eventDescs[e.event_type] || "";
         return `<tr>
-            <td>${escHtml(_eventLabels[e.event_type] || e.event_type)}</td>
+            <td title="${escHtml(desc)}">
+                <div>${escHtml(_eventLabels[e.event_type] || e.event_type)}</div>
+                <div class="admin-cell-desc">${escHtml(desc)}</div>
+            </td>
             <td><span class="admin-badge ${e.provider === "gemini" ? "admin-badge-admin" : "admin-badge-user"}">${escHtml(e.provider)}</span></td>
             <td>${e.calls}</td>
             <td>${fmtTokens(e.input_tokens)}</td>
@@ -608,10 +620,11 @@ function renderAIConfig(config, validProviders, validEventTypes) {
             `<option value="${p}" ${p === current ? "selected" : ""}>${escHtml(_providerLabels[p] || p)}</option>`
         ).join("");
 
+        const desc = _eventDescs[et] || "";
         return `
             <div class="admin-eng-card" style="flex-direction:column;align-items:stretch;gap:0.4rem">
                 <div style="font-size:0.82rem;font-weight:600;color:var(--text)">${escHtml(_eventLabels[et] || et)}</div>
-                <div style="font-size:0.68rem;color:var(--text-dim);margin-bottom:0.2rem">${escHtml(et)}</div>
+                <div style="font-size:0.68rem;color:var(--text-dim);margin-bottom:0.2rem">${escHtml(desc)}</div>
                 <select class="ai-config-select" data-event="${et}" style="
                     padding:0.4rem 0.6rem; font-size:0.78rem; border-radius:6px;
                     border:1px solid var(--border); background:var(--card-bg); color:var(--text);

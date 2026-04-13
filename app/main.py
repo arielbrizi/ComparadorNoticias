@@ -139,7 +139,7 @@ async def refresh_wordcloud():
 
 
 async def _startup_prefetch():
-    """Wait for initial news load, then pre-warm top story and weekly caches."""
+    """Wait for initial news load, then pre-warm top story, weekly, and topics caches."""
     for _ in range(30):
         async with _lock:
             has_groups = bool(_groups)
@@ -148,6 +148,7 @@ async def _startup_prefetch():
         await asyncio.sleep(2)
     await prefetch_top_story()
     await prefetch_weekly_summary()
+    await prefetch_topics()
 
 
 async def prefetch_top_story():
@@ -186,6 +187,24 @@ async def prefetch_weekly_summary():
         logger.info("Weekly summary prefetch done (cached=%s)", cached)
     except Exception as exc:
         logger.warning("Weekly summary prefetch failed: %s", exc)
+
+
+async def prefetch_topics():
+    """Pre-warm the topics cache and trigger background search prefetch."""
+    async with _lock:
+        grps = list(_groups)
+    if not grps:
+        return
+    try:
+        result = await ai_topics(grps)
+        cached = result.get("cached", False)
+        logger.info(
+            "Topics prefetch done (cached=%s, topics=%d)",
+            cached,
+            len(result.get("topics", [])),
+        )
+    except Exception as exc:
+        logger.warning("Topics prefetch failed: %s", exc)
 
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
@@ -229,6 +248,7 @@ async def lifespan(_app: FastAPI):
     scheduler.add_job(refresh_news, "interval", minutes=10)
     scheduler.add_job(refresh_wordcloud, "interval", hours=2)
     scheduler.add_job(prefetch_top_story, "interval", hours=1)
+    scheduler.add_job(prefetch_topics, "interval", hours=1)
     scheduler.add_job(prefetch_weekly_summary, "cron", hour=9, minute=15)
     scheduler.add_job(prefetch_weekly_summary, "cron", hour=18, minute=0)
     scheduler.add_job(purge_old_news, "cron", hour=7, minute=0)

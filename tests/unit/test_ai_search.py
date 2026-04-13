@@ -279,6 +279,7 @@ class TestAiWeeklySummary:
                 "ai_available": True,
                 "week_start": "2026-03-17",
                 "week_end": "2026-03-23",
+                "generated_at": "2026-03-23T09:15:00+00:00",
             },
             "ts": time.time(),
             "week_key": "2026-03-17_2026-03-23",
@@ -286,6 +287,24 @@ class TestAiWeeklySummary:
         result = await ai_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
         assert result["cached"] is True
         assert len(result["themes"]) == 1
+        assert result["generated_at"] == "2026-03-23T09:15:00+00:00"
+
+    async def test_cache_hit_backfills_generated_at(self, sample_groups, monkeypatch):
+        import time
+        cache_ts = time.time() - 100
+        monkeypatch.setattr("app.ai_search._weekly_cache", {
+            "data": {
+                "themes": [{"label": "Old", "emoji": "📅", "summary": "Old", "group_ids": [], "image": "", "sources": []}],
+                "ai_available": True,
+                "week_start": "2026-03-17",
+                "week_end": "2026-03-23",
+            },
+            "ts": cache_ts,
+            "week_key": "2026-03-17_2026-03-23",
+        })
+        result = await ai_weekly_summary(sample_groups, "2026-03-17", "2026-03-23")
+        assert result["cached"] is True
+        assert "generated_at" in result
 
     async def test_cache_miss_different_week(self, sample_groups, monkeypatch):
         import time
@@ -334,6 +353,7 @@ class TestAiTopStory:
                     "published": None, "group_id": top.group_id,
                 },
                 "date": "2026-03-24",
+                "generated_at": "2026-03-24T10:00:00+00:00",
             },
             "ts": time.time(),
             "cache_key": "2026-03-24",
@@ -341,6 +361,31 @@ class TestAiTopStory:
         result = await ai_top_story(sample_groups, "2026-03-24")
         assert result["cached"] is True
         assert result["story"]["title"] == "Test editorial"
+        assert result["generated_at"] == "2026-03-24T10:00:00+00:00"
+
+    async def test_cache_hit_backfills_generated_at(self, sample_groups, monkeypatch):
+        import time
+        cache_ts = time.time() - 100
+        top = sample_groups[0]
+        monkeypatch.setattr("app.ai_search._topstory_cache", {
+            "data": {
+                "ai_available": True,
+                "story": {
+                    "title": "Test editorial", "emoji": "🔥",
+                    "summary": "Resumen test", "key_points": ["Punto 1"],
+                    "original_title": top.representative_title,
+                    "image": "", "sources": ["Clarín"], "articles": [],
+                    "source_count": 2, "category": "portada",
+                    "published": None, "group_id": top.group_id,
+                },
+                "date": "2026-03-24",
+            },
+            "ts": cache_ts,
+            "cache_key": "2026-03-24",
+        })
+        result = await ai_top_story(sample_groups, "2026-03-24")
+        assert result["cached"] is True
+        assert "generated_at" in result
 
     async def test_cache_miss_different_day(self, sample_groups, monkeypatch):
         import time

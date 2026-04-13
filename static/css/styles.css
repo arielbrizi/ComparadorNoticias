@@ -1709,6 +1709,12 @@ a.brand { text-decoration: none; color: inherit; cursor: pointer; }
     font-weight: 400;
     font-style: italic;
 }
+.weekly-ai-attribution .ai-generated-at {
+    color: var(--text-dim);
+    font-weight: 400;
+    opacity: 0.7;
+    font-size: 0.85em;
+}
 
 /* Loading state — animated pulse dot + text */
 .weekly-ai-loading {

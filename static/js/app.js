@@ -1351,12 +1351,22 @@ function _setWeeklyHeader(ws, we) {
     el.textContent = `${s.charAt(0).toUpperCase() + s.slice(1)} — ${e.charAt(0).toUpperCase() + e.slice(1)}, ${new Date(we + "T12:00:00").getFullYear()}`;
 }
 
-function _setAttr(state, ws, we, provider) {
+function _formatGeneratedAt(isoStr) {
+    if (!isoStr) return "";
+    const d = new Date(isoStr);
+    if (isNaN(d)) return "";
+    return d.toLocaleDateString("es-AR", { day: "numeric", month: "short" })
+        + ", " + d.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
+}
+
+function _setAttr(state, ws, we, provider, generatedAt) {
     const attr = $("#weekly-ai-attribution");
     if (!attr) return;
     const range = _weeklyDateRange(ws, we);
     const sep = range ? `<span class="weekly-ai-sep">·</span><span class="weekly-ai-dates">${range}</span>` : "";
     const pw = provider ? `<span class="weekly-ai-sep">·</span><span class="ai-provider">Powered by ${escHtml(provider)}</span>` : "";
+    const genLabel = _formatGeneratedAt(generatedAt);
+    const gen = genLabel ? `<span class="weekly-ai-sep">·</span><span class="ai-generated-at" title="Fecha de generación">Generado: ${genLabel}</span>` : "";
 
     if (state === "loading") {
         attr.className = "weekly-ai-attribution weekly-ai-loading";
@@ -1364,7 +1374,7 @@ function _setAttr(state, ws, we, provider) {
         attr.hidden = false;
     } else if (state === "done") {
         attr.className = "weekly-ai-attribution weekly-ai-done";
-        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${pw}${sep}`;
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${pw}${sep}${gen}`;
         attr.hidden = false;
         setTimeout(() => {
             const check = attr.querySelector(".weekly-ai-check");
@@ -1372,7 +1382,7 @@ function _setAttr(state, ws, we, provider) {
         }, 2500);
     } else {
         attr.className = "weekly-ai-attribution";
-        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${pw}${sep}`;
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${pw}${sep}${gen}`;
         attr.hidden = false;
     }
 }
@@ -1443,7 +1453,7 @@ function renderWeeklySummary(data) {
     if (loading) loading.hidden = true;
 
     _setWeeklyHeader(data.week_start, data.week_end);
-    _setAttr("done", data.week_start, data.week_end, data.ai_provider);
+    _setAttr("done", data.week_start, data.week_end, data.ai_provider, data.generated_at);
 
     const themes = (data.themes || []).filter(t => t && typeof t === "object");
     if (!themes.length) {
@@ -1501,13 +1511,15 @@ function renderWeeklySummary(data) {
 
 let _topStoryData = null;
 
-function _setTopStoryAttr(attrState, dateStr, provider) {
+function _setTopStoryAttr(attrState, dateStr, provider, generatedAt) {
     const attr = $("#topstory-ai-attr");
     if (!attr) return;
     const datePart = dateStr
         ? `<span class="weekly-ai-sep">·</span><span class="weekly-ai-dates">${dateStr}</span>`
         : "";
     const pw = provider ? `<span class="weekly-ai-sep">·</span><span class="ai-provider">Powered by ${escHtml(provider)}</span>` : "";
+    const genLabel = _formatGeneratedAt(generatedAt);
+    const gen = genLabel ? `<span class="weekly-ai-sep">·</span><span class="ai-generated-at" title="Fecha de generación">Generado: ${genLabel}</span>` : "";
 
     if (attrState === "loading") {
         attr.className = "weekly-ai-attribution weekly-ai-loading";
@@ -1515,7 +1527,7 @@ function _setTopStoryAttr(attrState, dateStr, provider) {
         attr.hidden = false;
     } else if (attrState === "done") {
         attr.className = "weekly-ai-attribution weekly-ai-done";
-        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${pw}${datePart}`;
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${pw}${datePart}${gen}`;
         attr.hidden = false;
         setTimeout(() => {
             const check = attr.querySelector(".weekly-ai-check");
@@ -1523,7 +1535,7 @@ function _setTopStoryAttr(attrState, dateStr, provider) {
         }, 2500);
     } else {
         attr.className = "weekly-ai-attribution";
-        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${pw}${datePart}`;
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${pw}${datePart}${gen}`;
         attr.hidden = false;
     }
 }
@@ -1595,7 +1607,7 @@ function renderTopStory(data) {
 
     const s = data.story;
     const dateLabel = new Date().toLocaleDateString("es-AR", { day: "numeric", month: "short", year: "numeric" });
-    _setTopStoryAttr("done", dateLabel, data.ai_provider);
+    _setTopStoryAttr("done", dateLabel, data.ai_provider, data.generated_at);
 
     const heroImg = s.image
         ? `<img class="topstory-hero-image" src="${escHtml(s.image)}" alt="" loading="lazy" onerror="this.style.display='none'">`

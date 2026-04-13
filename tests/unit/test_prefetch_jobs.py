@@ -141,6 +141,50 @@ class TestPrefetchWeeklySummary:
         assert len(call_groups) <= 200
 
 
+class TestPrefetchTopics:
+    async def test_calls_ai_topics(self, monkeypatch):
+        from app import main
+
+        groups = _make_groups()
+        monkeypatch.setattr(main, "_groups", groups)
+        monkeypatch.setattr(main, "_lock", asyncio.Lock())
+
+        mock_result = {"ai_available": True, "topics": [{"label": "Test", "emoji": "🔥"}], "cached": False}
+        mock_ai = AsyncMock(return_value=mock_result)
+        monkeypatch.setattr("app.main.ai_topics", mock_ai)
+
+        await main.prefetch_topics()
+
+        mock_ai.assert_called_once()
+        call_groups = mock_ai.call_args[0][0]
+        assert len(call_groups) > 0
+
+    async def test_handles_failure_gracefully(self, monkeypatch):
+        from app import main
+
+        groups = _make_groups()
+        monkeypatch.setattr(main, "_groups", groups)
+        monkeypatch.setattr(main, "_lock", asyncio.Lock())
+
+        mock_ai = AsyncMock(side_effect=RuntimeError("AI down"))
+        monkeypatch.setattr("app.main.ai_topics", mock_ai)
+
+        await main.prefetch_topics()
+
+    async def test_skips_when_no_groups(self, monkeypatch):
+        from app import main
+
+        monkeypatch.setattr(main, "_groups", [])
+        monkeypatch.setattr(main, "_lock", asyncio.Lock())
+
+        mock_ai = AsyncMock()
+        monkeypatch.setattr("app.main.ai_topics", mock_ai)
+
+        await main.prefetch_topics()
+
+        mock_ai.assert_not_called()
+
+
 class TestStartupPrefetch:
     async def test_waits_for_groups_then_runs(self, monkeypatch):
         from app import main
@@ -154,11 +198,15 @@ class TestStartupPrefetch:
         async def _mock_weekly():
             call_order.append("weekly")
 
+        async def _mock_topics():
+            call_order.append("topics")
+
         monkeypatch.setattr(main, "_groups", groups)
         monkeypatch.setattr(main, "_lock", asyncio.Lock())
         monkeypatch.setattr("app.main.prefetch_top_story", _mock_top_story)
         monkeypatch.setattr("app.main.prefetch_weekly_summary", _mock_weekly)
+        monkeypatch.setattr("app.main.prefetch_topics", _mock_topics)
 
         await main._startup_prefetch()
 
-        assert call_order == ["top_story", "weekly"]
+        assert call_order == ["top_story", "weekly", "topics"]

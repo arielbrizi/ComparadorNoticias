@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 
 from google import genai
 from groq import AsyncGroq
@@ -448,7 +449,12 @@ async def ai_weekly_summary(
         and _weekly_cache["week_key"] == week_key
         and (now - _weekly_cache["ts"]) < WEEKLY_TTL
     ):
-        return {**_weekly_cache["data"], "cached": True}
+        result = {**_weekly_cache["data"], "cached": True}
+        if "generated_at" not in result:
+            result["generated_at"] = datetime.fromtimestamp(
+                _weekly_cache["ts"], tz=timezone.utc,
+            ).isoformat()
+        return result
 
     if not _ai_available():
         return {"themes": [], "ai_available": False}
@@ -490,6 +496,7 @@ async def ai_weekly_summary(
             "ai_provider": provider,
             "week_start": week_start,
             "week_end": week_end,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
         _weekly_cache["data"] = payload
         _weekly_cache["ts"] = now
@@ -563,7 +570,12 @@ async def ai_top_story(
         and _topstory_cache["cache_key"] == cache_key
         and (now - _topstory_cache["ts"]) < TOPSTORY_TTL
     ):
-        return {**_topstory_cache["data"], "cached": True}
+        result = {**_topstory_cache["data"], "cached": True}
+        if "generated_at" not in result:
+            result["generated_at"] = datetime.fromtimestamp(
+                _topstory_cache["ts"], tz=timezone.utc,
+            ).isoformat()
+        return result
 
     if not _ai_available():
         return {"ai_available": False, "story": None, "date": today}
@@ -609,7 +621,13 @@ async def ai_top_story(
             "group_id": top.group_id,
         }
 
-        payload = {"ai_available": True, "ai_provider": provider, "story": story, "date": today}
+        payload = {
+            "ai_available": True,
+            "ai_provider": provider,
+            "story": story,
+            "date": today,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
         _topstory_cache["data"] = payload
         _topstory_cache["ts"] = now
         _topstory_cache["cache_key"] = cache_key

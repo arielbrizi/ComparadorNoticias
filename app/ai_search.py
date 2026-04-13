@@ -403,6 +403,14 @@ _search_cache: dict[str, dict] = {}
 TOPICS_TTL = 3600  # 1 hour
 
 
+def invalidate_search_cache(query: str) -> None:
+    """Remove a specific query from the search cache (e.g. stale group IDs)."""
+    key = query.strip().lower()
+    if key in _search_cache:
+        del _search_cache[key]
+        logger.debug("Invalidated search cache for: %s", query)
+
+
 def _get_cached_topic_labels() -> set[str]:
     """Return the current cached topic labels in lowercase for matching."""
     return {t["label"].strip().lower() for t in _topics_cache["topics"] if "label" in t}

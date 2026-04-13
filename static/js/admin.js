@@ -79,6 +79,10 @@ function computeRange(range) {
             d.setDate(d.getDate() - 29);
             return { desde: fmt(d), hasta: today };
         }
+        case "mes": {
+            const d = new Date(now.getFullYear(), now.getMonth(), 1);
+            return { desde: fmt(d), hasta: today };
+        }
         default:
             return { desde: null, hasta: null };
     }
@@ -100,6 +104,9 @@ function loadAll() {
         loadHourly(desde, hasta);
         loadDaily(desde, hasta);
         loadUsers();
+    } else if (_activeTab === "ai") {
+        loadAIDashboard(desde, hasta);
+        loadAIConfig();
     } else {
         loadAnonymousDashboard(desde, hasta);
     }
@@ -427,6 +434,223 @@ function renderAnonVisitors(visitors) {
             <thead><tr><th>IP</th><th>Sesiones</th><th>Eventos</th><th>Última actividad</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
+}
+
+// ── AI dashboard ────────────────────────────────────────────────────────
+
+const _eventLabels = {
+    search: "Búsqueda usuario",
+    search_prefetch: "Búsqueda prefetch",
+    topics: "Temas del día",
+    weekly_summary: "Resumen semanal",
+    top_story: "Noticia del día",
+};
+
+const _providerLabels = {
+    gemini: "Gemini",
+    groq: "Groq",
+    gemini_fallback_groq: "Gemini (fallback Groq)",
+};
+
+function fmtUSD(v) {
+    if (v == null) return "$0.00";
+    return "$" + Number(v).toFixed(v < 0.01 ? 4 : 2);
+}
+
+function fmtTokens(n) {
+    if (!n) return "0";
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+    return String(n);
+}
+
+async function loadAIDashboard(desde, hasta) {
+    try {
+        const now = new Date();
+        const mesDesde = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+        const mesHasta = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+
+        const [resp, respMes] = await Promise.all([
+            fetch(`/api/admin/ai-cost${qs(desde, hasta)}`),
+            fetch(`/api/admin/ai-cost${qs(mesDesde, mesHasta)}`),
+        ]);
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        const data = await resp.json();
+        const dataMes = await respMes.json();
+
+        const s = data.summary;
+        const t = s.totals;
+
+        $("#ai-kpi-calls").textContent = t.calls;
+        $("#ai-kpi-cost").textContent = fmtUSD(t.cost_total);
+        $("#ai-kpi-tokens-in").textContent = fmtTokens(t.input_tokens);
+        $("#ai-kpi-tokens-out").textContent = fmtTokens(t.output_tokens);
+
+        const mesTotals = dataMes.summary.totals;
+        const costMes = mesTotals.cost_total || 0;
+        const daysWithData = mesTotals.distinct_days || 0;
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        const projected = daysWithData > 0 ? (costMes / daysWithData) * daysInMonth : 0;
+        $("#ai-kpi-projection").textContent = fmtUSD(projected);
+
+        const strip = $("#ai-providers-strip");
+        if (s.by_provider.length) {
+            strip.innerHTML = s.by_provider.map(p => `
+                <div class="admin-eng-card">
+                    <div class="admin-eng-icon" style="background:${p.provider === "gemini" ? "rgba(64,136,199,0.12)" : "rgba(13,148,136,0.12)"}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="${p.provider === "gemini" ? "#4088c7" : "#0d9488"}" stroke-width="2"><path d="M12 2a4 4 0 0 1 4 4v1a3 3 0 0 1 3 3v1a2 2 0 0 1-2 2h-1v3l-2-2h-4l-2 2v-3H7a2 2 0 0 1-2-2v-1a3 3 0 0 1 3-3V6a4 4 0 0 1 4-4z"/></svg>
+                    </div>
+                    <div class="admin-eng-data">
+                        <div class="admin-eng-value">${fmtUSD(p.cost_total)}</div>
+                        <div class="admin-eng-label">${escHtml(p.provider)} (${p.calls} calls)</div>
+                    </div>
+                </div>
+            `).join("");
+        } else {
+            strip.innerHTML = "";
+        }
+
+        renderAIEventTable(s.by_event);
+        renderAIDailyTable(data.daily || []);
+    } catch (err) {
+        console.error("AI dashboard load failed:", err);
+    }
+}
+
+function renderAIEventTable(events) {
+    const container = $("#ai-event-table-wrap");
+    if (!events || !events.length) {
+        container.innerHTML = `<div class="admin-empty">No hay llamadas IA registradas aún</div>`;
+        return;
+    }
+
+    let totCalls = 0, totIn = 0, totOut = 0, totCostIn = 0, totCostOut = 0, totCost = 0;
+    const rows = events.map(e => {
+        totCalls += e.calls;
+        totIn += e.input_tokens;
+        totOut += e.output_tokens;
+        totCostIn += e.cost_input;
+        totCostOut += e.cost_output;
+        totCost += e.cost_total;
+        return `<tr>
+            <td>${escHtml(_eventLabels[e.event_type] || e.event_type)}</td>
+            <td><span class="admin-badge ${e.provider === "gemini" ? "admin-badge-admin" : "admin-badge-user"}">${escHtml(e.provider)}</span></td>
+            <td>${e.calls}</td>
+            <td>${fmtTokens(e.input_tokens)}</td>
+            <td>${fmtTokens(e.output_tokens)}</td>
+            <td>${fmtUSD(e.cost_input)}</td>
+            <td>${fmtUSD(e.cost_output)}</td>
+            <td style="font-weight:600">${fmtUSD(e.cost_total)}</td>
+        </tr>`;
+    }).join("");
+
+    const footer = `<tr style="border-top:2px solid var(--border);font-weight:700">
+        <td colspan="2">TOTAL</td>
+        <td>${totCalls}</td>
+        <td>${fmtTokens(totIn)}</td>
+        <td>${fmtTokens(totOut)}</td>
+        <td>${fmtUSD(totCostIn)}</td>
+        <td>${fmtUSD(totCostOut)}</td>
+        <td>${fmtUSD(totCost)}</td>
+    </tr>`;
+
+    container.innerHTML = `
+        <table class="admin-table">
+            <thead><tr><th>Evento</th><th>Provider</th><th>Calls</th><th>Input tok</th><th>Output tok</th><th>Costo in</th><th>Costo out</th><th>Total</th></tr></thead>
+            <tbody>${rows}${footer}</tbody>
+        </table>`;
+}
+
+function renderAIDailyTable(days) {
+    const container = $("#ai-daily-table-wrap");
+    if (!days || !days.length) {
+        container.innerHTML = `<div class="admin-empty">No hay datos diarios aún</div>`;
+        return;
+    }
+    const rows = days.slice(0, 30).map(d => `
+        <tr>
+            <td>${escHtml(formatDay(d.day))}</td>
+            <td>${d.calls}</td>
+            <td>${fmtTokens(d.input_tokens)}</td>
+            <td>${fmtTokens(d.output_tokens)}</td>
+            <td style="font-weight:600">${fmtUSD(d.cost_total)}</td>
+        </tr>
+    `).join("");
+
+    container.innerHTML = `
+        <table class="admin-table">
+            <thead><tr><th>Día</th><th>Llamadas</th><th>Input tok</th><th>Output tok</th><th>Costo</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+}
+
+async function loadAIConfig() {
+    try {
+        const resp = await fetch("/api/admin/ai-config");
+        if (resp.status === 403) return;
+        const data = await resp.json();
+        renderAIConfig(data.config, data.valid_providers, data.valid_event_types);
+    } catch (err) {
+        console.error("AI config load failed:", err);
+    }
+}
+
+function renderAIConfig(config, validProviders, validEventTypes) {
+    const container = $("#ai-config-wrap");
+    if (!validEventTypes || !validEventTypes.length) {
+        container.innerHTML = `<div class="admin-empty">No hay configuración disponible</div>`;
+        return;
+    }
+
+    const cards = validEventTypes.map(et => {
+        const current = config[et] || "gemini_fallback_groq";
+        const options = validProviders.map(p =>
+            `<option value="${p}" ${p === current ? "selected" : ""}>${escHtml(_providerLabels[p] || p)}</option>`
+        ).join("");
+
+        return `
+            <div class="admin-eng-card" style="flex-direction:column;align-items:stretch;gap:0.4rem">
+                <div style="font-size:0.82rem;font-weight:600;color:var(--text)">${escHtml(_eventLabels[et] || et)}</div>
+                <div style="font-size:0.68rem;color:var(--text-dim);margin-bottom:0.2rem">${escHtml(et)}</div>
+                <select class="ai-config-select" data-event="${et}" style="
+                    padding:0.4rem 0.6rem; font-size:0.78rem; border-radius:6px;
+                    border:1px solid var(--border); background:var(--card-bg); color:var(--text);
+                    cursor:pointer; width:100%;
+                ">${options}</select>
+                <div class="ai-config-status" data-event="${et}" style="font-size:0.65rem;min-height:1rem;color:var(--text-dim)"></div>
+            </div>`;
+    }).join("");
+
+    container.innerHTML = `<div class="admin-engagement">${cards}</div>`;
+
+    $$(".ai-config-select").forEach(sel => {
+        sel.addEventListener("change", async () => {
+            const et = sel.dataset.event;
+            const provider = sel.value;
+            const status = $(`.ai-config-status[data-event="${et}"]`);
+            status.textContent = "Guardando...";
+            status.style.color = "var(--text-dim)";
+            try {
+                const resp = await fetch("/api/admin/ai-config", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ event_type: et, provider }),
+                });
+                if (resp.ok) {
+                    status.textContent = "Guardado";
+                    status.style.color = "#0d9488";
+                    setTimeout(() => { status.textContent = ""; }, 2000);
+                } else {
+                    const err = await resp.json();
+                    status.textContent = err.error || "Error";
+                    status.style.color = "#ea580c";
+                }
+            } catch (err) {
+                status.textContent = "Error de red";
+                status.style.color = "#ea580c";
+            }
+        });
+    });
 }
 
 // ── Shared rendering ────────────────────────────────────────────────────

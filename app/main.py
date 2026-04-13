@@ -27,6 +27,15 @@ from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
 from app.ai_search import ai_news_search, ai_topics, ai_top_story, ai_weekly_summary
+from app.ai_store import (
+    get_provider_config,
+    init_ai_tables,
+    query_ai_cost_summary,
+    query_ai_daily_cost,
+    set_provider_config,
+    VALID_EVENT_TYPES,
+    VALID_PROVIDERS,
+)
 from app.wordcloud import build_wordcloud
 from app.metrics_store import init_db, query_metrics, save_group_metrics
 from app.models import Article, ArticleGroup, FeedStatus
@@ -231,6 +240,10 @@ async def lifespan(_app: FastAPI):
         init_tracking_table()
     except Exception as exc:
         logger.error("init_tracking_table failed: %s", exc)
+    try:
+        init_ai_tables()
+    except Exception as exc:
+        logger.error("init_ai_tables failed: %s", exc)
 
     try:
         today = datetime.now(ART).strftime("%Y-%m-%d")
@@ -654,6 +667,61 @@ async def admin_purge_proxy_events(_admin: dict = Depends(require_admin)):
     """Delete anonymous tracking events that have Railway proxy IPs (100.64.x.x)."""
     deleted = purge_proxy_ip_events()
     return {"deleted": deleted}
+
+
+@app.get("/api/admin/ai-cost")
+async def admin_ai_cost(
+    desde: str | None = Query(None),
+    hasta: str | None = Query(None),
+    _admin: dict = Depends(require_admin),
+):
+    """AI usage cost summary and daily breakdown."""
+    return {
+        "summary": query_ai_cost_summary(desde=desde, hasta=hasta),
+        "daily": query_ai_daily_cost(desde=desde, hasta=hasta),
+    }
+
+
+@app.get("/api/admin/ai-config")
+async def admin_ai_config_get(_admin: dict = Depends(require_admin)):
+    """Return current AI provider configuration per event type."""
+    config = get_provider_config()
+    return {
+        "config": config,
+        "valid_providers": sorted(VALID_PROVIDERS),
+        "valid_event_types": sorted(VALID_EVENT_TYPES),
+    }
+
+
+@app.post("/api/admin/ai-config")
+async def admin_ai_config_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Update AI provider for a specific event type."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    event_type = body.get("event_type", "")
+    provider = body.get("provider", "")
+
+    if event_type not in VALID_EVENT_TYPES:
+        return JSONResponse(
+            {"error": f"Invalid event_type. Valid: {sorted(VALID_EVENT_TYPES)}"},
+            status_code=400,
+        )
+    if provider not in VALID_PROVIDERS:
+        return JSONResponse(
+            {"error": f"Invalid provider. Valid: {sorted(VALID_PROVIDERS)}"},
+            status_code=400,
+        )
+
+    ok = set_provider_config(event_type, provider)
+    if not ok:
+        return JSONResponse({"error": "Failed to update"}, status_code=500)
+    return {"ok": True, "event_type": event_type, "provider": provider}
 
 
 # ── Health check ─────────────────────────────────────────────────────────────

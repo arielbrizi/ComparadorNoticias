@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from google import genai
 from groq import AsyncGroq
 
+from app.ai_store import get_provider_config, log_ai_usage
 from app.models import ArticleGroup
 
 logger = logging.getLogger(__name__)
@@ -120,8 +121,13 @@ def _clean_json_response(text: str) -> str:
     return text.strip()
 
 
-async def _call_gemini(prompt: str, timeout: float = GEMINI_TIMEOUT) -> str:
-    """Call Gemini with automatic retry on 429 rate-limit errors."""
+async def _call_gemini(
+    prompt: str, timeout: float = GEMINI_TIMEOUT,
+) -> tuple[str, int, int]:
+    """Call Gemini with automatic retry on 429 rate-limit errors.
+
+    Returns (text, input_tokens, output_tokens).
+    """
     global _rate_limit_until
 
     client = _get_gemini_client()
@@ -141,7 +147,9 @@ async def _call_gemini(prompt: str, timeout: float = GEMINI_TIMEOUT) -> str:
                 ),
                 timeout=timeout,
             )
-            return response.text
+            in_tok = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+            out_tok = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+            return response.text, in_tok, out_tok
         except asyncio.TimeoutError:
             raise RuntimeError(
                 f"Gemini call timed out after {timeout}s"
@@ -168,8 +176,13 @@ GROQ_SYSTEM_MSG = (
 )
 
 
-async def _call_groq(prompt: str, timeout: float = 30) -> str:
-    """Call Groq (Llama) as fallback provider."""
+async def _call_groq(
+    prompt: str, timeout: float = 30,
+) -> tuple[str, int, int]:
+    """Call Groq (Llama) as fallback provider.
+
+    Returns (text, input_tokens, output_tokens).
+    """
     client = _get_groq_client()
     if not client:
         raise RuntimeError("Groq client not available")
@@ -193,31 +206,86 @@ async def _call_groq(prompt: str, timeout: float = 30) -> str:
     text = response.choices[0].message.content
     if not text:
         raise RuntimeError("Groq returned empty response")
-    return text
+    usage = response.usage
+    in_tok = getattr(usage, "prompt_tokens", 0) or 0 if usage else 0
+    out_tok = getattr(usage, "completion_tokens", 0) or 0 if usage else 0
+    return text, in_tok, out_tok
 
 
-async def _call_ai(prompt: str, timeout: float = GEMINI_TIMEOUT) -> tuple[str, str]:
-    """Try Gemini first; if it fails, fall back to Groq.
+async def _call_ai(
+    prompt: str,
+    timeout: float = GEMINI_TIMEOUT,
+    event_type: str = "unknown",
+) -> tuple[str, str]:
+    """Call the AI provider configured for *event_type*.
 
     Returns (response_text, provider_name).
     """
+    config = get_provider_config()
+    mode = config.get(event_type, "gemini_fallback_groq")
+
     gemini_ok = _get_gemini_client() is not None
     groq_ok = _get_groq_client() is not None
 
     if not gemini_ok and not groq_ok:
         raise RuntimeError("No AI provider configured")
 
-    if gemini_ok:
+    use_gemini = gemini_ok and mode in ("gemini", "gemini_fallback_groq")
+    use_groq = groq_ok and mode in ("groq", "gemini_fallback_groq")
+
+    if not use_gemini and not use_groq:
+        if mode == "gemini" and not gemini_ok:
+            raise RuntimeError("Gemini configured but API key missing")
+        if mode == "groq" and not groq_ok:
+            raise RuntimeError("Groq configured but API key missing")
+
+    t0 = time.time()
+
+    if use_gemini:
         try:
-            text = await _call_gemini(prompt, timeout=timeout)
+            text, in_tok, out_tok = await _call_gemini(prompt, timeout=timeout)
+            _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
             return text, "Gemini"
         except Exception as exc:
-            if not groq_ok:
+            _log_error(event_type, "gemini", GEMINI_MODEL, t0, exc)
+            if not use_groq:
                 raise
             logger.warning("Gemini failed (%s), falling back to Groq", exc)
+            t0 = time.time()
 
-    text = await _call_groq(prompt, timeout=min(timeout, 60))
+    text, in_tok, out_tok = await _call_groq(prompt, timeout=min(timeout, 60))
+    _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
     return text, "Groq"
+
+
+def _log_success(
+    event_type: str, provider: str, model: str,
+    in_tok: int, out_tok: int, t0: float,
+) -> None:
+    log_ai_usage(
+        event_type=event_type,
+        provider=provider,
+        model=model,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        latency_ms=int((time.time() - t0) * 1000),
+    )
+
+
+def _log_error(
+    event_type: str, provider: str, model: str,
+    t0: float, exc: Exception,
+) -> None:
+    log_ai_usage(
+        event_type=event_type,
+        provider=provider,
+        model=model,
+        input_tokens=0,
+        output_tokens=0,
+        latency_ms=int((time.time() - t0) * 1000),
+        success=False,
+        error_message=str(exc)[:500],
+    )
 
 
 # ── Search ───────────────────────────────────────────────────────────────
@@ -244,7 +312,12 @@ Noticias disponibles:
 {context}"""
 
 
-async def ai_news_search(query: str, groups: list[ArticleGroup]) -> dict:
+async def ai_news_search(
+    query: str,
+    groups: list[ArticleGroup],
+    *,
+    event_type: str = "search",
+) -> dict:
     """Send query + groups context to AI and return structured results."""
     if not _ai_available():
         return {"ai_available": False, "error": "API key not configured"}
@@ -260,7 +333,7 @@ async def ai_news_search(query: str, groups: list[ArticleGroup]) -> dict:
     prompt = SEARCH_PROMPT.format(query=query, context=context)
 
     try:
-        raw, provider = await _call_ai_search(prompt, query, groups)
+        raw, provider = await _call_ai_search(prompt, query, groups, event_type=event_type)
         text = _clean_json_response(raw)
         result = json.loads(text)
         result["ai_available"] = True
@@ -282,22 +355,34 @@ async def ai_news_search(query: str, groups: list[ArticleGroup]) -> dict:
 
 async def _call_ai_search(
     prompt: str, query: str, groups: list[ArticleGroup],
+    *, event_type: str = "search",
 ) -> tuple[str, str]:
     """Try Gemini with full context; fall back to Groq with a right-sized prompt."""
+    config = get_provider_config()
+    mode = config.get(event_type, "gemini_fallback_groq")
+
     gemini_ok = _get_gemini_client() is not None
     groq_ok = _get_groq_client() is not None
 
     if not gemini_ok and not groq_ok:
         raise RuntimeError("No AI provider configured")
 
-    if gemini_ok:
+    use_gemini = gemini_ok and mode in ("gemini", "gemini_fallback_groq")
+    use_groq = groq_ok and mode in ("groq", "gemini_fallback_groq")
+
+    t0 = time.time()
+
+    if use_gemini:
         try:
-            text = await _call_gemini(prompt, timeout=GEMINI_TIMEOUT)
+            text, in_tok, out_tok = await _call_gemini(prompt, timeout=GEMINI_TIMEOUT)
+            _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
             return text, "Gemini"
         except Exception as exc:
-            if not groq_ok:
+            _log_error(event_type, "gemini", GEMINI_MODEL, t0, exc)
+            if not use_groq:
                 raise
             logger.warning("Gemini failed (%s), falling back to Groq", exc)
+            t0 = time.time()
 
     prompt_overhead = len(SEARCH_PROMPT.format(query=query, context=""))
     groq_context_budget = GROQ_MAX_PROMPT_CHARS - prompt_overhead - 100
@@ -306,7 +391,8 @@ async def _call_ai_search(
     )
     groq_prompt = SEARCH_PROMPT.format(query=query, context=groq_context)
 
-    text = await _call_groq(groq_prompt, timeout=60)
+    text, in_tok, out_tok = await _call_groq(groq_prompt, timeout=60)
+    _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
     return text, "Groq"
 
 
@@ -360,7 +446,7 @@ async def ai_topics(groups: list[ArticleGroup]) -> dict:
     prompt = TOPICS_PROMPT.format(context=context)
 
     try:
-        raw, provider = await _call_ai(prompt)
+        raw, provider = await _call_ai(prompt, event_type="topics")
         text = _clean_json_response(raw)
         result = json.loads(text)
         topics = result.get("topics", [])[:6]
@@ -390,7 +476,7 @@ async def _prefetch_topic_searches(
         if not label:
             continue
         try:
-            await ai_news_search(label, groups)
+            await ai_news_search(label, groups, event_type="search_prefetch")
         except Exception as exc:
             logger.warning("Prefetch failed for topic '%s': %s", label, exc)
         if i < len(topics) - 1:
@@ -470,7 +556,7 @@ async def ai_weekly_summary(
     )
 
     try:
-        raw, provider = await _call_ai(prompt, timeout=WEEKLY_TIMEOUT)
+        raw, provider = await _call_ai(prompt, timeout=WEEKLY_TIMEOUT, event_type="weekly_summary")
         text = _clean_json_response(raw)
         result = json.loads(text)
         themes = result.get("themes", [])[:10]
@@ -597,7 +683,7 @@ async def ai_top_story(
     )
 
     try:
-        raw, provider = await _call_ai(prompt, timeout=TOPSTORY_TIMEOUT)
+        raw, provider = await _call_ai(prompt, timeout=TOPSTORY_TIMEOUT, event_type="top_story")
         text = _clean_json_response(raw)
         result = json.loads(text)
 

@@ -27,6 +27,16 @@ def _no_ai(monkeypatch):
     monkeypatch.setattr("app.ai_search._groq_client", None)
 
 
+def _mock_ai_store(monkeypatch):
+    """Stub out ai_store DB calls used by _call_ai / _call_ai_search."""
+    monkeypatch.setattr(
+        "app.ai_search.get_provider_config",
+        lambda: {et: "gemini_fallback_groq" for et in
+                 ("search", "search_prefetch", "topics", "weekly_summary", "top_story")},
+    )
+    monkeypatch.setattr("app.ai_search.log_ai_usage", lambda **kw: None)
+
+
 class TestBuildContext:
     def test_includes_group_ids(self, sample_groups):
         context = _build_context(sample_groups)
@@ -108,8 +118,12 @@ class TestCallGemini:
     async def test_successful_call(self, monkeypatch):
         monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
 
+        mock_usage = MagicMock()
+        mock_usage.prompt_token_count = 100
+        mock_usage.candidates_token_count = 50
         mock_response = MagicMock()
         mock_response.text = '{"answer": "ok"}'
+        mock_response.usage_metadata = mock_usage
 
         async def _fast(*args, **kwargs):
             return mock_response
@@ -119,12 +133,15 @@ class TestCallGemini:
         monkeypatch.setattr("app.ai_search._gemini_client", mock_client)
         monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
-        result = await _call_gemini("test prompt")
-        assert result == '{"answer": "ok"}'
+        text, in_tok, out_tok = await _call_gemini("test prompt")
+        assert text == '{"answer": "ok"}'
+        assert in_tok == 100
+        assert out_tok == 50
 
 
 class TestCallAiFallback:
     async def test_falls_back_to_groq_when_gemini_fails(self, monkeypatch):
+        _mock_ai_store(monkeypatch)
         monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
         monkeypatch.setenv("GEMINI_API_KEY", "fake")
         monkeypatch.setenv("GROQ_API_KEY", "fake")
@@ -136,25 +153,34 @@ class TestCallAiFallback:
         mock_gemini.aio.models.generate_content = _gemini_fail
         monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
 
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 80
+        mock_usage.completion_tokens = 40
         mock_choice = MagicMock()
         mock_choice.message.content = '{"result": "from groq"}'
         mock_resp = MagicMock()
         mock_resp.choices = [mock_choice]
+        mock_resp.usage = mock_usage
 
         mock_groq = AsyncMock()
         mock_groq.chat.completions.create = AsyncMock(return_value=mock_resp)
         monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
 
-        text, provider = await _call_ai("test prompt")
+        text, provider = await _call_ai("test prompt", event_type="topics")
         assert text == '{"result": "from groq"}'
         assert provider == "Groq"
 
     async def test_uses_gemini_when_available(self, monkeypatch):
+        _mock_ai_store(monkeypatch)
         monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
         monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
+        mock_usage = MagicMock()
+        mock_usage.prompt_token_count = 100
+        mock_usage.candidates_token_count = 50
         mock_response = MagicMock()
         mock_response.text = '{"result": "from gemini"}'
+        mock_response.usage_metadata = mock_usage
 
         async def _fast(*a, **kw):
             return mock_response
@@ -163,32 +189,38 @@ class TestCallAiFallback:
         mock_client.aio.models.generate_content = _fast
         monkeypatch.setattr("app.ai_search._gemini_client", mock_client)
 
-        text, provider = await _call_ai("test prompt")
+        text, provider = await _call_ai("test prompt", event_type="topics")
         assert text == '{"result": "from gemini"}'
         assert provider == "Gemini"
 
     async def test_groq_only_when_no_gemini_key(self, monkeypatch):
+        _mock_ai_store(monkeypatch)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.setattr("app.ai_search._gemini_client", None)
         monkeypatch.setenv("GROQ_API_KEY", "fake")
 
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 80
+        mock_usage.completion_tokens = 40
         mock_choice = MagicMock()
         mock_choice.message.content = '{"result": "groq only"}'
         mock_resp = MagicMock()
         mock_resp.choices = [mock_choice]
+        mock_resp.usage = mock_usage
 
         mock_groq = AsyncMock()
         mock_groq.chat.completions.create = AsyncMock(return_value=mock_resp)
         monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
 
-        text, provider = await _call_ai("test prompt")
+        text, provider = await _call_ai("test prompt", event_type="topics")
         assert text == '{"result": "groq only"}'
         assert provider == "Groq"
 
     async def test_raises_when_no_provider(self, monkeypatch):
+        _mock_ai_store(monkeypatch)
         _no_ai(monkeypatch)
         with pytest.raises(RuntimeError, match="No AI provider"):
-            await _call_ai("test prompt")
+            await _call_ai("test prompt", event_type="topics")
 
 
 class TestAiNewsSearch:
@@ -406,6 +438,7 @@ class TestAiTopStory:
 
 def _setup_ai_mock(monkeypatch, search_response=None):
     """Configure a fake Gemini that returns a valid search JSON."""
+    _mock_ai_store(monkeypatch)
     monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
@@ -414,8 +447,12 @@ def _setup_ai_mock(monkeypatch, search_response=None):
     if search_response is None:
         search_response = '{"summary":"Resumen","relevant_group_ids":["abc1234567"],"has_results":true}'
 
+    mock_usage = MagicMock()
+    mock_usage.prompt_token_count = 100
+    mock_usage.candidates_token_count = 50
     mock_response = MagicMock()
     mock_response.text = search_response
+    mock_response.usage_metadata = mock_usage
 
     async def _fast(*a, **kw):
         return mock_response
@@ -458,7 +495,7 @@ class TestPrefetchTopicSearches:
         call_count = 0
         original_search = ai_news_search.__wrapped__ if hasattr(ai_news_search, "__wrapped__") else None
 
-        async def _mock_search(query, groups):
+        async def _mock_search(query, groups, **kwargs):
             nonlocal call_count
             call_count += 1
             if query.strip().lower() == "tema fail":
@@ -485,7 +522,7 @@ class TestPrefetchTopicSearches:
         monkeypatch.setattr("app.ai_search._PREFETCH_DELAY", 0)
 
         calls = []
-        async def _mock_search(query, groups):
+        async def _mock_search(query, groups, **kwargs):
             calls.append(query)
             return {
                 "summary": "ok", "relevant_group_ids": [], "has_results": True,

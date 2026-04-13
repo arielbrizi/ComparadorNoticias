@@ -717,13 +717,20 @@ function _scheduleCachedRecheck() {
                 else {
                     const input = $("#hero-search-input");
                     if (input && document.activeElement === input && !input.value.trim()) showSuggestions();
+                    $$(".suggestion-cached").forEach(el => el.remove());
+                    $$(".suggestion-item").forEach(el => {
+                        const label = el.querySelector(".suggestion-text")?.textContent;
+                        if (label && _topicsSearchCached.has(label)) {
+                            el.insertAdjacentHTML("beforeend", `<span class="suggestion-cached" title="Búsqueda lista">✓</span>`);
+                        }
+                    });
                 }
                 if (_topicsSearchCached.size < (_topicsCache?.length || 6)) {
                     _scheduleCachedRecheck();
                 }
             }
         } catch { /* silent */ }
-    }, 15_000);
+    }, 8_000);
 }
 
 function showSuggestions() {

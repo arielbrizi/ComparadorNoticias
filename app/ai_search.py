@@ -472,24 +472,25 @@ async def ai_topics(groups: list[ArticleGroup]) -> dict:
         return {"topics": [], "ai_available": False}
 
 
-_PREFETCH_DELAY = 2  # seconds between prefetch calls to avoid rate limits
+_PREFETCH_CONCURRENCY = 2
 
 
 async def _prefetch_topic_searches(
     topics: list[dict], groups: list[ArticleGroup],
 ) -> None:
     """Pre-warm _search_cache for each topic label after topic generation."""
-    for i, topic in enumerate(topics):
-        label = topic.get("label", "")
-        if not label:
-            continue
-        try:
-            await ai_news_search(label, groups, event_type="search_prefetch")
-        except Exception as exc:
-            logger.warning("Prefetch failed for topic '%s': %s", label, exc)
-        if i < len(topics) - 1:
-            await asyncio.sleep(_PREFETCH_DELAY)
-    logger.info("Topic prefetch complete: %d/%d cached", len(_search_cache), len(topics))
+    sem = asyncio.Semaphore(_PREFETCH_CONCURRENCY)
+
+    async def _fetch_one(label: str) -> None:
+        async with sem:
+            try:
+                await ai_news_search(label, groups, event_type="search_prefetch")
+            except Exception as exc:
+                logger.warning("Prefetch failed for topic '%s': %s", label, exc)
+
+    labels = [t.get("label", "") for t in topics if t.get("label")]
+    await asyncio.gather(*[_fetch_one(lbl) for lbl in labels])
+    logger.info("Topic prefetch complete: %d/%d cached", len(_search_cache), len(labels))
 
 
 # ── Weekly summary ────────────────────────────────────────────────────

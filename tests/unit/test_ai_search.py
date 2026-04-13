@@ -472,7 +472,7 @@ class TestPrefetchTopicSearches:
         ]
         monkeypatch.setattr("app.ai_search._topics_cache", {"topics": topics, "ts": 0})
         monkeypatch.setattr("app.ai_search._search_cache", {})
-        monkeypatch.setattr("app.ai_search._PREFETCH_DELAY", 0)
+        monkeypatch.setattr("app.ai_search._PREFETCH_CONCURRENCY", 10)
         _setup_ai_mock(monkeypatch)
 
         import app.ai_search as mod
@@ -490,7 +490,7 @@ class TestPrefetchTopicSearches:
         ]
         monkeypatch.setattr("app.ai_search._topics_cache", {"topics": topics, "ts": 0})
         monkeypatch.setattr("app.ai_search._search_cache", {})
-        monkeypatch.setattr("app.ai_search._PREFETCH_DELAY", 0)
+        monkeypatch.setattr("app.ai_search._PREFETCH_CONCURRENCY", 10)
 
         call_count = 0
         original_search = ai_news_search.__wrapped__ if hasattr(ai_news_search, "__wrapped__") else None
@@ -519,7 +519,7 @@ class TestPrefetchTopicSearches:
         ]
         monkeypatch.setattr("app.ai_search._topics_cache", {"topics": topics, "ts": 0})
         monkeypatch.setattr("app.ai_search._search_cache", {})
-        monkeypatch.setattr("app.ai_search._PREFETCH_DELAY", 0)
+        monkeypatch.setattr("app.ai_search._PREFETCH_CONCURRENCY", 10)
 
         calls = []
         async def _mock_search(query, groups, **kwargs):

@@ -247,7 +247,7 @@ async def lifespan(_app: FastAPI):
     asyncio.create_task(_startup_prefetch())
     scheduler.add_job(refresh_news, "interval", minutes=10)
     scheduler.add_job(refresh_wordcloud, "interval", hours=2)
-    scheduler.add_job(prefetch_top_story, "interval", hours=1)
+    scheduler.add_job(prefetch_top_story, "interval", hours=3)
     scheduler.add_job(prefetch_topics, "interval", hours=1)
     scheduler.add_job(prefetch_weekly_summary, "cron", hour=9, minute=15)
     scheduler.add_job(prefetch_weekly_summary, "cron", hour=18, minute=0)

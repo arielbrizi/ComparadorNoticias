@@ -26,7 +26,7 @@ from app.auth import get_current_user, require_admin, require_login, router as a
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
-from app.ai_search import ai_news_search, ai_topics, ai_top_story, ai_weekly_summary, invalidate_search_cache
+from app.ai_search import ai_news_search, ai_topics, ai_top_story, ai_weekly_summary
 from app.ai_store import (
     get_provider_config,
     init_ai_tables,
@@ -437,14 +437,9 @@ async def ai_search(
     ids = set(result.get("relevant_group_ids", []))
 
     if ids:
-        matched = [by_id[gid].model_dump(mode="json") for gid in ids if gid in by_id]
-        if not matched and result.get("has_results"):
-            invalidate_search_cache(q)
-            result = await ai_news_search(q, grps)
-            ids = set(result.get("relevant_group_ids", []))
-            matched = [by_id[gid].model_dump(mode="json") for gid in ids if gid in by_id]
-        if matched:
-            result["matched_groups"] = matched
+        result["matched_groups"] = [
+            by_id[gid].model_dump(mode="json") for gid in ids if gid in by_id
+        ]
 
     db_groups = _db_text_search(q)
     existing = {g["group_id"] for g in result.get("matched_groups", [])}

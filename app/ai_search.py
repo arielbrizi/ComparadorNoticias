@@ -326,8 +326,18 @@ async def ai_news_search(
     is_topic = cache_key in _get_cached_topic_labels()
 
     if is_topic and cache_key in _search_cache:
-        logger.info("Search cache hit for topic: %s", query)
-        return _search_cache[cache_key]
+        cached = _search_cache[cache_key]
+        cached_ids = set(cached.get("relevant_group_ids", []))
+        if cached_ids:
+            current_ids = {g.group_id for g in groups}
+            if cached_ids & current_ids:
+                logger.info("Search cache hit for topic: %s", query)
+                return cached
+            logger.info("Search cache stale for topic: %s (0/%d IDs match), refreshing", query, len(cached_ids))
+            del _search_cache[cache_key]
+        else:
+            logger.info("Search cache hit for topic: %s", query)
+            return cached
 
     context = _build_context(groups, max_groups=150)
     prompt = SEARCH_PROMPT.format(query=query, context=context)

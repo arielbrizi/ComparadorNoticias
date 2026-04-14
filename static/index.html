@@ -4,11 +4,20 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#0e1117">
+    <meta name="description" content="Compará cómo los medios argentinos cubren la misma noticia. Más contexto, menos relato.">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Vs News">
+    <meta property="og:title" content="Vs News — Más contexto, menos relato">
+    <meta property="og:description" content="Compará cómo los medios argentinos cubren la misma noticia. Métricas de agenda, resumen semanal, nube de palabras y más.">
+    <meta property="og:url" content="https://www.vsnews.io/">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="Vs News — Más contexto, menos relato">
+    <meta name="twitter:description" content="Compará cómo los medios argentinos cubren la misma noticia. Más contexto, menos relato.">
     <title>Vs News — Más contexto, menos relato</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Playfair+Display:wght@700;800;900&family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/styles.css?v=20">
+    <link rel="stylesheet" href="/static/css/styles.css?v=22">
 </head>
 <body>
 
@@ -114,6 +123,12 @@
                 <span class="hero-action-label">Panel Admin</span>
             </button>
         </div>
+        </div>
+
+        <!-- Dollar ticker -->
+        <div class="dolar-ticker" id="dolar-ticker" hidden>
+            <span class="dolar-ticker-label">Dólar</span>
+            <div class="dolar-ticker-rates" id="dolar-ticker-rates"></div>
         </div>
 
         <!-- Filters (inline) -->
@@ -352,6 +367,6 @@
 </footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/wordcloud2.js/1.2.2/wordcloud2.min.js"></script>
-<script src="/static/js/app.js?v=20"></script>
+<script src="/static/js/app.js?v=22"></script>
 </body>
 </html>

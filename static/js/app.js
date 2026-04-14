@@ -4,6 +4,23 @@ const API = "";
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
+// ── Deep-link support ────────────────────────────────────────────────────
+const VALID_VIEWS = new Set(["noticias", "metricas", "semana", "importante", "temas", "nube"]);
+
+const VIEW_TITLES = {
+    noticias:   "Vs News — Más contexto, menos relato",
+    metricas:   "Métricas de Agenda — Vs News",
+    semana:     "Resumen de la Semana — Vs News",
+    importante: "La Noticia Más Importante del Día — Vs News",
+    temas:      "Resumen de Temas — Vs News",
+    nube:       "Nube de Palabras — Vs News",
+};
+
+function getViewFromHash() {
+    const hash = location.hash.slice(1);
+    return VALID_VIEWS.has(hash) ? hash : "noticias";
+}
+
 // ── State ─────────────────────────────────────────────────────────────────
 let state = {
     groups: [],
@@ -29,15 +46,20 @@ let state = {
 
 // ── Init ──────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", async () => {
+    const initialView = getViewFromHash();
     setHeaderDate();
-    setupViewNav();
+    setupViewNav(initialView);
     setupFilters();
     setupModal();
     setupHeroSearch();
     setupAuth();
     initAuth();
-    track("page_view", { view: "noticias", initial: true });
+    loadDolarTicker();
+    track("page_view", { view: initialView, initial: true });
     await loadData();
+    if (initialView !== "noticias") {
+        _switchViewInternal(initialView);
+    }
 });
 
 function setHeaderDate() {
@@ -45,6 +67,48 @@ function setHeaderDate() {
     const opts = { weekday: "long", year: "numeric", month: "long", day: "numeric" };
     const dateStr = d.toLocaleDateString("es-AR", opts);
     $("#header-date").textContent = dateStr.charAt(0).toUpperCase() + dateStr.slice(1);
+}
+
+// ── Dollar Ticker ────────────────────────────────────────────────────────
+const DOLAR_DISPLAY = {
+    oficial:         "Oficial",
+    blue:            "Blue",
+    bolsa:           "MEP",
+    contadoconliqui: "CCL",
+    cripto:          "Cripto",
+    tarjeta:         "Tarjeta",
+};
+
+async function loadDolarTicker() {
+    try {
+        const res = await fetch("https://dolarapi.com/v1/dolares");
+        if (!res.ok) return;
+        const data = await res.json();
+
+        const container = $("#dolar-ticker-rates");
+        const frag = document.createDocumentFragment();
+        const fmt = (v) => v != null ? `$${Number(v).toLocaleString("es-AR")}` : "–";
+
+        data.filter(d => d.casa in DOLAR_DISPLAY).forEach((d, i) => {
+            if (i > 0) {
+                const sep = document.createElement("span");
+                sep.className = "dolar-ticker-sep";
+                sep.textContent = "•";
+                frag.appendChild(sep);
+            }
+            const item = document.createElement("span");
+            item.className = "dolar-ticker-item";
+            item.innerHTML =
+                `<span class="dolar-ticker-name">${DOLAR_DISPLAY[d.casa]}:</span>` +
+                `<span class="dolar-ticker-buy">C ${fmt(d.compra)}</span>` +
+                `<span class="dolar-ticker-slash">/</span>` +
+                `<span class="dolar-ticker-sell">V ${fmt(d.venta)}</span>`;
+            frag.appendChild(item);
+        });
+
+        container.appendChild(frag);
+        $("#dolar-ticker").hidden = false;
+    } catch (_) { /* silent — ticker is non-critical */ }
 }
 
 // ── Data loading ──────────────────────────────────────────────────────────
@@ -166,7 +230,7 @@ function populateFooterSources(sources) {
 }
 
 // ── View navigation ───────────────────────────────────────────────────────
-function setupViewNav() {
+function setupViewNav(initialView = "noticias") {
     ["btn-back-home", "btn-back-home-weekly", "btn-back-home-topstory", "btn-back-home-nube"].forEach(id => {
         const btn = $(`#${id}`);
         if (btn) btn.addEventListener("click", () => history.back());
@@ -185,11 +249,11 @@ function setupViewNav() {
         if (!e.state || !e.state.modal) {
             _closeModalVisual();
         }
-        const view = (e.state && e.state.view) || "noticias";
+        const view = (e.state && e.state.view) || getViewFromHash();
         _switchViewInternal(view);
     });
 
-    history.replaceState({ view: "noticias" }, "");
+    history.replaceState({ view: initialView }, "");
 
     const brandHome = $("#brand-home");
     if (brandHome) brandHome.addEventListener("click", (e) => {
@@ -210,6 +274,7 @@ function _switchViewInternal(view) {
 
     if (view !== state.currentView) track("page_view", { view });
     state.currentView = view;
+    document.title = VIEW_TITLES[view] || VIEW_TITLES.noticias;
 
     noticias.hidden = true;
     metricas.hidden = true;

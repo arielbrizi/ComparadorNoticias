@@ -479,6 +479,92 @@ a.brand { text-decoration: none; color: inherit; cursor: pointer; }
     letter-spacing: 0.005em;
 }
 
+/* ── Dollar Ticker ────────────────────────────────────────────────────── */
+.dolar-ticker {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    max-width: 920px;
+    margin: 0.85rem auto 0;
+    padding: 0.5rem 1rem;
+    background: rgba(18, 22, 30, 0.6);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    backdrop-filter: blur(8px);
+    overflow: hidden;
+}
+.dolar-ticker[hidden] { display: none; }
+
+.dolar-ticker-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.dolar-ticker-rates {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+}
+.dolar-ticker-rates::-webkit-scrollbar { display: none; }
+
+.dolar-ticker-item {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    white-space: nowrap;
+    font-size: 0.73rem;
+    padding: 0 0.35rem;
+}
+
+.dolar-ticker-name {
+    color: var(--text-dim);
+    font-weight: 500;
+}
+.dolar-ticker-buy {
+    color: var(--green);
+    font-weight: 600;
+}
+.dolar-ticker-sell {
+    color: var(--text);
+    font-weight: 600;
+}
+.dolar-ticker-slash {
+    color: var(--text-dim);
+    opacity: 0.4;
+    font-weight: 300;
+}
+.dolar-ticker-sep {
+    color: var(--text-dim);
+    opacity: 0.25;
+    margin: 0 0.1rem;
+    font-size: 0.5rem;
+}
+
+@media (max-width: 768px) {
+    .dolar-ticker {
+        margin: 0.6rem -1rem 0;
+        max-width: none;
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+        justify-content: flex-start;
+        padding: 0.45rem 0.75rem;
+    }
+}
+@media (max-width: 480px) {
+    .dolar-ticker-item { font-size: 0.68rem; }
+    .dolar-ticker-label { font-size: 0.65rem; }
+}
+
 /* ── Main content ─────────────────────────────────────────────────────── */
 .main-content {
     max-width: var(--max-w);

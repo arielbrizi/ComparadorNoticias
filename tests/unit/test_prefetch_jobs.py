@@ -176,6 +176,7 @@ class TestPrefetchTopics:
 
         monkeypatch.setattr(main, "_groups", [])
         monkeypatch.setattr(main, "_lock", asyncio.Lock())
+        monkeypatch.setattr("app.main.load_groups_from_db", lambda **kw: ([], []))
 
         mock_ai = AsyncMock()
         monkeypatch.setattr("app.main.ai_topics", mock_ai)
@@ -183,6 +184,24 @@ class TestPrefetchTopics:
         await main.prefetch_topics()
 
         mock_ai.assert_not_called()
+
+    async def test_falls_back_to_db_when_memory_empty(self, monkeypatch):
+        from app import main
+
+        groups = _make_groups()
+        monkeypatch.setattr(main, "_groups", [])
+        monkeypatch.setattr(main, "_lock", asyncio.Lock())
+        monkeypatch.setattr("app.main.load_groups_from_db", lambda **kw: ([], groups))
+
+        mock_result = {"ai_available": True, "topics": [{"label": "Test", "emoji": "🔥"}], "cached": False}
+        mock_ai = AsyncMock(return_value=mock_result)
+        monkeypatch.setattr("app.main.ai_topics", mock_ai)
+
+        await main.prefetch_topics()
+
+        mock_ai.assert_called_once()
+        call_groups = mock_ai.call_args[0][0]
+        assert len(call_groups) > 0
 
 
 class TestStartupPrefetch:
@@ -201,11 +220,45 @@ class TestStartupPrefetch:
         async def _mock_topics():
             call_order.append("topics")
 
+        async def _instant_sleep(_):
+            pass
+
         monkeypatch.setattr(main, "_groups", groups)
         monkeypatch.setattr(main, "_lock", asyncio.Lock())
         monkeypatch.setattr("app.main.prefetch_top_story", _mock_top_story)
         monkeypatch.setattr("app.main.prefetch_weekly_summary", _mock_weekly)
         monkeypatch.setattr("app.main.prefetch_topics", _mock_topics)
+        monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+        await main._startup_prefetch()
+
+        assert call_order == ["top_story", "weekly", "topics"]
+
+    async def test_continues_after_individual_failure(self, monkeypatch):
+        from app import main
+
+        groups = _make_groups()
+        call_order = []
+
+        async def _mock_top_story():
+            call_order.append("top_story")
+            raise RuntimeError("Gemini rate limited")
+
+        async def _mock_weekly():
+            call_order.append("weekly")
+
+        async def _mock_topics():
+            call_order.append("topics")
+
+        async def _instant_sleep(_):
+            pass
+
+        monkeypatch.setattr(main, "_groups", groups)
+        monkeypatch.setattr(main, "_lock", asyncio.Lock())
+        monkeypatch.setattr("app.main.prefetch_top_story", _mock_top_story)
+        monkeypatch.setattr("app.main.prefetch_weekly_summary", _mock_weekly)
+        monkeypatch.setattr("app.main.prefetch_topics", _mock_topics)
+        monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
 
         await main._startup_prefetch()
 

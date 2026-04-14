@@ -535,6 +535,7 @@ let _topicsLoading = false;
 let _topicsCacheTs = 0;
 let _topicsLoadingSince = 0;
 let _topicsSearchCached = new Set();
+let _topicsGeneratedAt = null;
 const _topicsTTL = 55 * 60 * 1000; // 55 min (slightly less than server's 1h TTL)
 const _topicsLoadingTimeout = 20_000;
 
@@ -643,6 +644,7 @@ function setupHeroSearch() {
             _topicsCache = null;
             _topicsCacheTs = 0;
             _topicsSearchCached = new Set();
+            _topicsGeneratedAt = null;
             prefetchTopics();
         }
     }, 10 * 60 * 1000); // check every 10 min
@@ -662,6 +664,7 @@ function setupHeroSearch() {
         _topicsCache = null;
         _topicsCacheTs = 0;
         _topicsSearchCached = new Set();
+        _topicsGeneratedAt = null;
         prefetchTopics();
     });
 }
@@ -681,6 +684,7 @@ async function prefetchTopics() {
             _topicsCache = data.topics;
             _topicsCacheTs = Date.now();
             _topicsSearchCached = new Set(data.search_cached || []);
+            _topicsGeneratedAt = data.generated_at || null;
             if (_topicsSearchCached.size < data.topics.length) {
                 _scheduleCachedRecheck();
             }
@@ -1672,13 +1676,15 @@ function renderTopStory(data) {
 
 let _temasSubview = "topics"; // "topics" | "detail"
 
-function _setTemasAttr(attrState, extra, provider) {
+function _setTemasAttr(attrState, extra, provider, generatedAt) {
     const attr = $("#temas-ai-attr");
     if (!attr) return;
     const datePart = extra
         ? `<span class="weekly-ai-sep">·</span><span class="weekly-ai-dates">${escHtml(extra)}</span>`
         : "";
     const pw = provider ? `<span class="weekly-ai-sep">·</span><span class="ai-provider">Powered by ${escHtml(provider)}</span>` : "";
+    const genLabel = _formatGeneratedAt(generatedAt);
+    const gen = genLabel ? `<span class="weekly-ai-sep">·</span><span class="ai-generated-at" title="Fecha de generación">Generado: ${genLabel}</span>` : "";
 
     if (attrState === "loading") {
         attr.className = "weekly-ai-attribution weekly-ai-loading";
@@ -1686,7 +1692,7 @@ function _setTemasAttr(attrState, extra, provider) {
         attr.hidden = false;
     } else if (attrState === "done") {
         attr.className = "weekly-ai-attribution weekly-ai-done";
-        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${pw}${datePart}`;
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span><span class="weekly-ai-check">Listo</span>${pw}${datePart}${gen}`;
         attr.hidden = false;
         setTimeout(() => {
             const check = attr.querySelector(".weekly-ai-check");
@@ -1694,7 +1700,7 @@ function _setTemasAttr(attrState, extra, provider) {
         }, 2500);
     } else {
         attr.className = "weekly-ai-attribution";
-        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${pw}${datePart}`;
+        attr.innerHTML = `${_sparkleIcon}<span>Generado con IA</span>${pw}${datePart}${gen}`;
         attr.hidden = false;
     }
 }
@@ -1719,7 +1725,7 @@ async function loadTemasView() {
 
     if (_isTopicsCacheValid() && _topicsCache?.length) {
         renderTemasCards(_topicsCache);
-        _setTemasAttr("static", "");
+        _setTemasAttr("static", "", null, _topicsGeneratedAt);
         return;
     }
 
@@ -1743,8 +1749,9 @@ async function loadTemasView() {
                 _topicsCache = data.topics;
                 _topicsCacheTs = Date.now();
                 _topicsSearchCached = new Set(data.search_cached || []);
+                _topicsGeneratedAt = data.generated_at || null;
                 renderTemasCards(data.topics);
-                _setTemasAttr("done", "", data.ai_provider);
+                _setTemasAttr("done", "", data.ai_provider, data.generated_at);
             } else if (data.ai_available) {
                 _setTemasAttr("static", "");
                 if (error) { error.innerHTML = "<p>No hay suficientes noticias para extraer temas.</p>"; error.hidden = false; }

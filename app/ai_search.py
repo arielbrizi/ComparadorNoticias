@@ -408,9 +408,19 @@ async def _call_ai_search(
 
 # ── Trending topics ──────────────────────────────────────────────────────
 
-_topics_cache: dict = {"topics": [], "ts": 0}
+_topics_cache: dict = {"topics": [], "ts": 0, "generated_at": ""}
 _search_cache: dict[str, dict] = {}
 TOPICS_TTL = 3600  # 1 hour
+
+
+def is_topics_cache_valid() -> bool:
+    """True if topics cache has data and hasn't expired."""
+    return bool(_topics_cache.get("topics")) and (time.time() - _topics_cache.get("ts", 0)) < TOPICS_TTL
+
+
+def is_topstory_cache_valid() -> bool:
+    """True if top story cache has data and hasn't expired."""
+    return bool(_topstory_cache.get("data")) and (time.time() - _topstory_cache.get("ts", 0)) < TOPSTORY_TTL
 
 
 def invalidate_search_cache(query: str) -> None:
@@ -455,7 +465,8 @@ async def ai_topics(groups: list[ArticleGroup]) -> dict:
                          if t.get("label", "").strip().lower() in _search_cache]
         return {"topics": _topics_cache["topics"], "ai_available": True, "cached": True,
                 "ai_provider": _topics_cache.get("ai_provider", "unknown"),
-                "search_cached": cached_labels}
+                "search_cached": cached_labels,
+                "generated_at": _topics_cache.get("generated_at", "")}
 
     if not _ai_available():
         return {"topics": [], "ai_available": False}
@@ -468,14 +479,17 @@ async def ai_topics(groups: list[ArticleGroup]) -> dict:
         text = _clean_json_response(raw)
         result = json.loads(text)
         topics = result.get("topics", [])[:6]
+        generated_at = datetime.now(timezone.utc).isoformat()
         _topics_cache["topics"] = topics
         _topics_cache["ts"] = now
         _topics_cache["ai_provider"] = provider
+        _topics_cache["generated_at"] = generated_at
         _search_cache.clear()
         logger.info("Topics regenerated via %s — search cache cleared (%d topics)", provider, len(topics))
         asyncio.create_task(_prefetch_topic_searches(topics, groups))
         return {"topics": topics, "ai_available": True, "cached": False, "ai_provider": provider,
-                "search_cached": []}
+                "search_cached": [],
+                "generated_at": generated_at}
 
     except Exception as exc:
         logger.error("AI topics failed: %s", exc)

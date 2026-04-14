@@ -26,7 +26,14 @@ from app.auth import get_current_user, require_admin, require_login, router as a
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
 from app.feed_reader import fetch_all_feeds
-from app.ai_search import ai_news_search, ai_topics, ai_top_story, ai_weekly_summary
+from app.ai_search import (
+    ai_news_search,
+    ai_topics,
+    ai_top_story,
+    ai_weekly_summary,
+    is_topstory_cache_valid,
+    is_topics_cache_valid,
+)
 from app.ai_store import (
     get_provider_config,
     init_ai_tables,
@@ -134,6 +141,7 @@ async def refresh_news():
         len(statuses),
     )
     await refresh_wordcloud()
+    asyncio.create_task(_post_refresh_catchup())
 
 
 async def refresh_wordcloud():
@@ -147,17 +155,44 @@ async def refresh_wordcloud():
     logger.info("Word cloud actualizada: %d términos", len(words))
 
 
+async def _post_refresh_catchup():
+    """After news refresh, fill any AI caches that are still empty."""
+    try:
+        if not is_topics_cache_valid():
+            logger.info("Post-refresh: topics cache empty, triggering prefetch")
+            await prefetch_topics()
+        if not is_topstory_cache_valid():
+            logger.info("Post-refresh: top story cache empty, triggering prefetch")
+            await prefetch_top_story()
+    except Exception as exc:
+        logger.warning("Post-refresh catch-up failed: %s", exc)
+
+
 async def _startup_prefetch():
-    """Wait for initial news load, then pre-warm top story, weekly, and topics caches."""
+    """Wait for initial news load, then pre-warm top story, weekly, and topics caches.
+
+    Each prefetch is isolated so one failure doesn't block others.
+    A brief pause between calls reduces rate-limiting risk.
+    """
     for _ in range(30):
         async with _lock:
             has_groups = bool(_groups)
         if has_groups:
             break
         await asyncio.sleep(2)
-    await prefetch_top_story()
-    await prefetch_weekly_summary()
-    await prefetch_topics()
+    else:
+        logger.warning("Startup prefetch: no groups available after 60s wait")
+
+    for name, fn in [
+        ("top_story", prefetch_top_story),
+        ("weekly_summary", prefetch_weekly_summary),
+        ("topics", prefetch_topics),
+    ]:
+        try:
+            await fn()
+        except Exception as exc:
+            logger.error("Startup prefetch '%s' failed: %s", name, exc)
+        await asyncio.sleep(1)
 
 
 async def prefetch_top_story():
@@ -203,6 +238,12 @@ async def prefetch_topics():
     async with _lock:
         grps = list(_groups)
     if not grps:
+        try:
+            today = datetime.now(ART).strftime("%Y-%m-%d")
+            _, grps = load_groups_from_db(desde=today)
+        except Exception as exc:
+            logger.warning("prefetch_topics DB fallback failed: %s", exc)
+    if not grps:
         return
     try:
         result = await ai_topics(grps)
@@ -218,7 +259,7 @@ async def prefetch_topics():
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone=ART)
 
 
 @asynccontextmanager

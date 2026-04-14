@@ -246,6 +246,7 @@ class TestAiTopics:
         ]
         monkeypatch.setattr("app.ai_search._topics_cache", {
             "topics": topics, "ts": time.time(), "ai_provider": "Test",
+            "generated_at": "2026-04-13T12:00:00+00:00",
         })
         monkeypatch.setattr("app.ai_search._search_cache", {
             "dólar": {"summary": "ok", "has_results": True},
@@ -257,9 +258,10 @@ class TestAiTopics:
         assert result["cached"] is True
         assert set(result["search_cached"]) == {"Dólar", "Inflación"}
         assert "Deporte" not in result["search_cached"]
+        assert result["generated_at"] == "2026-04-13T12:00:00+00:00"
 
     async def test_fresh_response_has_empty_search_cached(self, sample_groups, monkeypatch):
-        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0})
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0, "generated_at": ""})
         monkeypatch.setattr("app.ai_search._search_cache", {})
 
         topics_json = '{"topics":[{"label":"Dólar","emoji":"💵"}]}'
@@ -278,6 +280,8 @@ class TestAiTopics:
 
         assert result["search_cached"] == []
         assert result["cached"] is False
+        assert "generated_at" in result
+        assert result["generated_at"]  # non-empty ISO string
 
         for task in created_tasks:
             task.cancel()
@@ -537,7 +541,7 @@ class TestPrefetchTopicSearches:
 
     async def test_topics_launches_prefetch_task(self, sample_groups, monkeypatch):
         import time
-        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0})
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0, "generated_at": ""})
         monkeypatch.setattr("app.ai_search._search_cache", {})
 
         topics_json = '{"topics":[{"label":"Dólar","emoji":"💵"},{"label":"Inflación","emoji":"📈"}]}'

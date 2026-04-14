@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from google import genai
 from groq import AsyncGroq
 
-from app.ai_store import get_provider_config, log_ai_usage
+from app.ai_store import get_provider_config, is_in_quiet_hours, log_ai_usage
 from app.models import ArticleGroup
 
 logger = logging.getLogger(__name__)
@@ -230,16 +230,32 @@ async def _call_ai(
     if not gemini_ok and not groq_ok:
         raise RuntimeError("No AI provider configured")
 
-    use_gemini = gemini_ok and mode in ("gemini", "gemini_fallback_groq")
-    use_groq = groq_ok and mode in ("groq", "gemini_fallback_groq")
+    use_gemini = gemini_ok and mode in ("gemini", "gemini_fallback_groq", "groq_fallback_gemini")
+    use_groq = groq_ok and mode in ("groq", "gemini_fallback_groq", "groq_fallback_gemini")
 
     if not use_gemini and not use_groq:
-        if mode == "gemini" and not gemini_ok:
+        if mode in ("gemini", "groq_fallback_gemini") and not gemini_ok:
             raise RuntimeError("Gemini configured but API key missing")
-        if mode == "groq" and not groq_ok:
+        if mode in ("groq", "gemini_fallback_groq") and not groq_ok:
             raise RuntimeError("Groq configured but API key missing")
 
     t0 = time.time()
+
+    if mode == "groq_fallback_gemini" and use_groq:
+        try:
+            text, in_tok, out_tok = await _call_groq(prompt, timeout=min(timeout, 60))
+            _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
+            return text, "Groq"
+        except Exception as exc:
+            _log_error(event_type, "groq", GROQ_MODEL, t0, exc)
+            if not use_gemini:
+                raise
+            logger.warning("Groq failed (%s), falling back to Gemini", exc)
+            t0 = time.time()
+
+        text, in_tok, out_tok = await _call_gemini(prompt, timeout=timeout)
+        _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
+        return text, "Gemini"
 
     if use_gemini:
         try:
@@ -367,7 +383,7 @@ async def _call_ai_search(
     prompt: str, query: str, groups: list[ArticleGroup],
     *, event_type: str = "search",
 ) -> tuple[str, str]:
-    """Try Gemini with full context; fall back to Groq with a right-sized prompt."""
+    """Try primary provider with appropriate context; fall back if configured."""
     config = get_provider_config()
     mode = config.get(event_type, "gemini_fallback_groq")
 
@@ -377,10 +393,34 @@ async def _call_ai_search(
     if not gemini_ok and not groq_ok:
         raise RuntimeError("No AI provider configured")
 
-    use_gemini = gemini_ok and mode in ("gemini", "gemini_fallback_groq")
-    use_groq = groq_ok and mode in ("groq", "gemini_fallback_groq")
+    use_gemini = gemini_ok and mode in ("gemini", "gemini_fallback_groq", "groq_fallback_gemini")
+    use_groq = groq_ok and mode in ("groq", "gemini_fallback_groq", "groq_fallback_gemini")
 
     t0 = time.time()
+
+    def _build_groq_prompt() -> str:
+        prompt_overhead = len(SEARCH_PROMPT.format(query=query, context=""))
+        groq_context_budget = GROQ_MAX_PROMPT_CHARS - prompt_overhead - 100
+        groq_context = _build_context(
+            groups, max_groups=150, max_chars=max(groq_context_budget, 2000),
+        )
+        return SEARCH_PROMPT.format(query=query, context=groq_context)
+
+    if mode == "groq_fallback_gemini" and use_groq:
+        try:
+            text, in_tok, out_tok = await _call_groq(_build_groq_prompt(), timeout=60)
+            _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
+            return text, "Groq"
+        except Exception as exc:
+            _log_error(event_type, "groq", GROQ_MODEL, t0, exc)
+            if not use_gemini:
+                raise
+            logger.warning("Groq failed (%s), falling back to Gemini", exc)
+            t0 = time.time()
+
+        text, in_tok, out_tok = await _call_gemini(prompt, timeout=GEMINI_TIMEOUT)
+        _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
+        return text, "Gemini"
 
     if use_gemini:
         try:
@@ -394,14 +434,7 @@ async def _call_ai_search(
             logger.warning("Gemini failed (%s), falling back to Groq", exc)
             t0 = time.time()
 
-    prompt_overhead = len(SEARCH_PROMPT.format(query=query, context=""))
-    groq_context_budget = GROQ_MAX_PROMPT_CHARS - prompt_overhead - 100
-    groq_context = _build_context(
-        groups, max_groups=150, max_chars=max(groq_context_budget, 2000),
-    )
-    groq_prompt = SEARCH_PROMPT.format(query=query, context=groq_context)
-
-    text, in_tok, out_tok = await _call_groq(groq_prompt, timeout=60)
+    text, in_tok, out_tok = await _call_groq(_build_groq_prompt(), timeout=60)
     _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
     return text, "Groq"
 
@@ -503,6 +536,10 @@ async def _prefetch_topic_searches(
     topics: list[dict], groups: list[ArticleGroup],
 ) -> None:
     """Pre-warm _search_cache for each topic label after topic generation."""
+    if is_in_quiet_hours("search_prefetch"):
+        logger.info("Search prefetch skipped — inside quiet hours")
+        return
+
     sem = asyncio.Semaphore(_PREFETCH_CONCURRENCY)
 
     async def _fetch_one(label: str) -> None:

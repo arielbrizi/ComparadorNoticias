@@ -458,6 +458,7 @@ const _providerLabels = {
     gemini: "Gemini",
     groq: "Groq",
     gemini_fallback_groq: "Gemini (fallback Groq)",
+    groq_fallback_gemini: "Groq (fallback Gemini)",
 };
 
 function fmtUSD(v) {
@@ -601,18 +602,29 @@ async function loadAIConfig() {
         const resp = await fetch("/api/admin/ai-config");
         if (resp.status === 403) return;
         const data = await resp.json();
-        renderAIConfig(data.config, data.valid_providers, data.valid_event_types);
+        renderAIConfig(data.config, data.valid_providers, data.valid_event_types, data.schedule || {});
     } catch (err) {
         console.error("AI config load failed:", err);
     }
 }
 
-function renderAIConfig(config, validProviders, validEventTypes) {
+function _buildHourOptions(selected) {
+    const opts = ['<option value="">—</option>'];
+    for (let h = 0; h < 24; h++) {
+        const val = String(h).padStart(2, "0") + ":00";
+        opts.push(`<option value="${val}" ${val === selected ? "selected" : ""}>${val}</option>`);
+    }
+    return opts.join("");
+}
+
+function renderAIConfig(config, validProviders, validEventTypes, schedule) {
     const container = $("#ai-config-wrap");
     if (!validEventTypes || !validEventTypes.length) {
         container.innerHTML = `<div class="admin-empty">No hay configuración disponible</div>`;
         return;
     }
+
+    const selectStyle = "";
 
     const cards = validEventTypes.map(et => {
         const current = config[et] || "gemini_fallback_groq";
@@ -621,16 +633,35 @@ function renderAIConfig(config, validProviders, validEventTypes) {
         ).join("");
 
         const desc = _eventDescs[et] || "";
+
+        let scheduleHtml = "";
+        if (et === "search_prefetch") {
+            const sched = schedule[et] || {};
+            const qStart = sched.quiet_start || "";
+            const qEnd = sched.quiet_end || "";
+            scheduleHtml = `
+                <div style="margin-top:0.4rem;padding-top:0.4rem;border-top:1px solid var(--border)">
+                    <div style="font-size:0.72rem;font-weight:600;color:var(--text);margin-bottom:0.3rem">Franja horaria de desactivación</div>
+                    <div style="display:flex;gap:0.4rem;align-items:center">
+                        <select class="ai-schedule-start" data-event="${et}" style="width:auto;flex:1">
+                            ${_buildHourOptions(qStart)}
+                        </select>
+                        <span style="font-size:0.75rem;color:var(--text-dim)">a</span>
+                        <select class="ai-schedule-end" data-event="${et}" style="width:auto;flex:1">
+                            ${_buildHourOptions(qEnd)}
+                        </select>
+                    </div>
+                    <div class="ai-schedule-status" data-event="${et}" style="font-size:0.65rem;min-height:1rem;color:var(--text-dim)"></div>
+                </div>`;
+        }
+
         return `
             <div class="admin-eng-card" style="flex-direction:column;align-items:stretch;gap:0.4rem">
                 <div style="font-size:0.82rem;font-weight:600;color:var(--text)">${escHtml(_eventLabels[et] || et)}</div>
                 <div style="font-size:0.68rem;color:var(--text-dim);margin-bottom:0.2rem">${escHtml(desc)}</div>
-                <select class="ai-config-select" data-event="${et}" style="
-                    padding:0.4rem 0.6rem; font-size:0.78rem; border-radius:6px;
-                    border:1px solid var(--border); background:var(--card-bg); color:var(--text);
-                    cursor:pointer; width:100%;
-                ">${options}</select>
+                <select class="ai-config-select" data-event="${et}" style="${selectStyle}">${options}</select>
                 <div class="ai-config-status" data-event="${et}" style="font-size:0.65rem;min-height:1rem;color:var(--text-dim)"></div>
+                ${scheduleHtml}
             </div>`;
     }).join("");
 
@@ -653,6 +684,41 @@ function renderAIConfig(config, validProviders, validEventTypes) {
                     status.textContent = "Guardado";
                     status.style.color = "#0d9488";
                     setTimeout(() => { status.textContent = ""; }, 2000);
+                } else {
+                    const err = await resp.json();
+                    status.textContent = err.error || "Error";
+                    status.style.color = "#ea580c";
+                }
+            } catch (err) {
+                status.textContent = "Error de red";
+                status.style.color = "#ea580c";
+            }
+        });
+    });
+
+    $$(".ai-schedule-start, .ai-schedule-end").forEach(sel => {
+        sel.addEventListener("change", async () => {
+            const et = sel.dataset.event;
+            const startSel = $(`.ai-schedule-start[data-event="${et}"]`);
+            const endSel = $(`.ai-schedule-end[data-event="${et}"]`);
+            const qStart = startSel.value;
+            const qEnd = endSel.value;
+
+            if ((qStart && !qEnd) || (!qStart && qEnd)) return;
+
+            const status = $(`.ai-schedule-status[data-event="${et}"]`);
+            status.textContent = "Guardando...";
+            status.style.color = "var(--text-dim)";
+            try {
+                const resp = await fetch("/api/admin/ai-schedule", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ event_type: et, quiet_start: qStart, quiet_end: qEnd }),
+                });
+                if (resp.ok) {
+                    status.textContent = qStart && qEnd ? `Desactivado de ${qStart} a ${qEnd}` : "Sin restricción";
+                    status.style.color = "#0d9488";
+                    setTimeout(() => { status.textContent = ""; }, 3000);
                 } else {
                     const err = await resp.json();
                     status.textContent = err.error || "Error";

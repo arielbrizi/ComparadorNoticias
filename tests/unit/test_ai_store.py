@@ -9,11 +9,14 @@ from app.ai_store import (
     VALID_PROVIDERS,
     compute_cost,
     get_provider_config,
+    get_schedule_config,
     init_ai_tables,
+    is_in_quiet_hours,
     log_ai_usage,
     query_ai_cost_summary,
     query_ai_daily_cost,
     set_provider_config,
+    set_schedule_config,
 )
 
 
@@ -173,3 +176,86 @@ class TestProviderConfig:
         set_provider_config("topics", "gemini")
         config = get_provider_config()
         assert config["topics"] == "gemini"
+
+    def test_set_groq_fallback_gemini(self):
+        ok = set_provider_config("topics", "groq_fallback_gemini")
+        assert ok is True
+        config = get_provider_config()
+        assert config["topics"] == "groq_fallback_gemini"
+
+
+class TestScheduleConfig:
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def test_empty_by_default(self):
+        schedule = get_schedule_config()
+        assert schedule == {}
+
+    def test_set_and_get(self):
+        ok = set_schedule_config("search_prefetch", "00:00", "06:00")
+        assert ok is True
+        schedule = get_schedule_config()
+        assert schedule["search_prefetch"] == {"quiet_start": "00:00", "quiet_end": "06:00"}
+
+    def test_clear_schedule(self):
+        set_schedule_config("search_prefetch", "00:00", "06:00")
+        ok = set_schedule_config("search_prefetch", "", "")
+        assert ok is True
+        schedule = get_schedule_config()
+        assert "search_prefetch" not in schedule
+
+    def test_invalid_event_type(self):
+        ok = set_schedule_config("invalid", "00:00", "06:00")
+        assert ok is False
+
+    def test_invalid_time_format(self):
+        assert set_schedule_config("search_prefetch", "25:00", "06:00") is False
+        assert set_schedule_config("search_prefetch", "abc", "06:00") is False
+
+    def test_mismatched_empty(self):
+        assert set_schedule_config("search_prefetch", "00:00", "") is False
+        assert set_schedule_config("search_prefetch", "", "06:00") is False
+
+    def test_update_existing(self):
+        set_schedule_config("search_prefetch", "00:00", "06:00")
+        set_schedule_config("search_prefetch", "22:00", "07:00")
+        schedule = get_schedule_config()
+        assert schedule["search_prefetch"] == {"quiet_start": "22:00", "quiet_end": "07:00"}
+
+    def test_is_in_quiet_hours_no_config(self):
+        assert is_in_quiet_hours("search_prefetch") is False
+
+    def test_is_in_quiet_hours_inside(self, monkeypatch):
+        from datetime import datetime, timezone, timedelta
+        set_schedule_config("search_prefetch", "00:00", "06:00")
+        ART = timezone(timedelta(hours=-3))
+        fake_now = datetime(2026, 4, 13, 3, 30, tzinfo=ART)
+        monkeypatch.setattr("app.ai_store.datetime", type("FakeDT", (), {
+            "now": staticmethod(lambda tz=None: fake_now),
+            "strftime": datetime.strftime,
+        })())
+        assert is_in_quiet_hours("search_prefetch") is True
+
+    def test_is_in_quiet_hours_outside(self, monkeypatch):
+        from datetime import datetime, timezone, timedelta
+        set_schedule_config("search_prefetch", "00:00", "06:00")
+        ART = timezone(timedelta(hours=-3))
+        fake_now = datetime(2026, 4, 13, 10, 0, tzinfo=ART)
+        monkeypatch.setattr("app.ai_store.datetime", type("FakeDT", (), {
+            "now": staticmethod(lambda tz=None: fake_now),
+            "strftime": datetime.strftime,
+        })())
+        assert is_in_quiet_hours("search_prefetch") is False
+
+    def test_is_in_quiet_hours_wraps_midnight(self, monkeypatch):
+        from datetime import datetime, timezone, timedelta
+        set_schedule_config("search_prefetch", "22:00", "06:00")
+        ART = timezone(timedelta(hours=-3))
+        fake_now = datetime(2026, 4, 13, 23, 30, tzinfo=ART)
+        monkeypatch.setattr("app.ai_store.datetime", type("FakeDT", (), {
+            "now": staticmethod(lambda tz=None: fake_now),
+            "strftime": datetime.strftime,
+        })())
+        assert is_in_quiet_hours("search_prefetch") is True

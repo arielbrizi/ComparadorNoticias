@@ -200,3 +200,98 @@ class TestAIConfigEndpoint:
             cookies={"vs_token": token},
         )
         assert resp.status_code == 400
+
+    async def test_set_groq_fallback_gemini(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-config",
+            json={"event_type": "topics", "provider": "groq_fallback_gemini"},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        resp = await client.get("/api/admin/ai-config", cookies={"vs_token": token})
+        assert resp.json()["config"]["topics"] == "groq_fallback_gemini"
+
+    async def test_config_returns_schedule(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.get("/api/admin/ai-config", cookies={"vs_token": token})
+        assert resp.status_code == 200
+        assert "schedule" in resp.json()
+
+
+class TestAIScheduleEndpoint:
+    async def test_requires_admin(self, client):
+        resp = await client.post("/api/admin/ai-schedule", json={
+            "event_type": "search_prefetch", "quiet_start": "00:00", "quiet_end": "06:00",
+        })
+        assert resp.status_code == 403
+
+    async def test_set_schedule(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-schedule",
+            json={"event_type": "search_prefetch", "quiet_start": "00:00", "quiet_end": "06:00"},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        resp = await client.get("/api/admin/ai-config", cookies={"vs_token": token})
+        schedule = resp.json()["schedule"]
+        assert schedule["search_prefetch"]["quiet_start"] == "00:00"
+        assert schedule["search_prefetch"]["quiet_end"] == "06:00"
+
+    async def test_clear_schedule(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        await client.post(
+            "/api/admin/ai-schedule",
+            json={"event_type": "search_prefetch", "quiet_start": "00:00", "quiet_end": "06:00"},
+            cookies={"vs_token": token},
+        )
+        resp = await client.post(
+            "/api/admin/ai-schedule",
+            json={"event_type": "search_prefetch", "quiet_start": "", "quiet_end": ""},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+
+        resp = await client.get("/api/admin/ai-config", cookies={"vs_token": token})
+        assert "search_prefetch" not in resp.json()["schedule"]
+
+    async def test_invalid_event_type(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-schedule",
+            json={"event_type": "invalid", "quiet_start": "00:00", "quiet_end": "06:00"},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+    async def test_invalid_time_format(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-schedule",
+            json={"event_type": "search_prefetch", "quiet_start": "25:00", "quiet_end": "06:00"},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400

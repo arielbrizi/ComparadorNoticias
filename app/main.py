@@ -36,10 +36,12 @@ from app.ai_search import (
 )
 from app.ai_store import (
     get_provider_config,
+    get_schedule_config,
     init_ai_tables,
     query_ai_cost_summary,
     query_ai_daily_cost,
     set_provider_config,
+    set_schedule_config,
     VALID_EVENT_TYPES,
     VALID_PROVIDERS,
 )
@@ -727,8 +729,10 @@ async def admin_ai_cost(
 async def admin_ai_config_get(_admin: dict = Depends(require_admin)):
     """Return current AI provider configuration per event type."""
     config = get_provider_config()
+    schedule = get_schedule_config()
     return {
         "config": config,
+        "schedule": schedule,
         "valid_providers": sorted(VALID_PROVIDERS),
         "valid_event_types": sorted(VALID_EVENT_TYPES),
     }
@@ -763,6 +767,33 @@ async def admin_ai_config_set(
     if not ok:
         return JSONResponse({"error": "Failed to update"}, status_code=500)
     return {"ok": True, "event_type": event_type, "provider": provider}
+
+
+@app.post("/api/admin/ai-schedule")
+async def admin_ai_schedule_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Update quiet-hours schedule for a specific event type."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    event_type = body.get("event_type", "")
+    quiet_start = body.get("quiet_start", "")
+    quiet_end = body.get("quiet_end", "")
+
+    if event_type not in VALID_EVENT_TYPES:
+        return JSONResponse(
+            {"error": f"Invalid event_type. Valid: {sorted(VALID_EVENT_TYPES)}"},
+            status_code=400,
+        )
+
+    ok = set_schedule_config(event_type, quiet_start, quiet_end)
+    if not ok:
+        return JSONResponse({"error": "Invalid schedule values"}, status_code=400)
+    return {"ok": True, "event_type": event_type, "quiet_start": quiet_start, "quiet_end": quiet_end}
 
 
 # ── Health check ─────────────────────────────────────────────────────────────

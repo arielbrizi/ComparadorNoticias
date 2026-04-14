@@ -27,11 +27,11 @@ def _no_ai(monkeypatch):
     monkeypatch.setattr("app.ai_search._groq_client", None)
 
 
-def _mock_ai_store(monkeypatch):
+def _mock_ai_store(monkeypatch, provider="gemini_fallback_groq"):
     """Stub out ai_store DB calls used by _call_ai / _call_ai_search."""
     monkeypatch.setattr(
         "app.ai_search.get_provider_config",
-        lambda: {et: "gemini_fallback_groq" for et in
+        lambda: {et: provider for et in
                  ("search", "search_prefetch", "topics", "weekly_summary", "top_story")},
     )
     monkeypatch.setattr("app.ai_search.log_ai_usage", lambda **kw: None)
@@ -221,6 +221,60 @@ class TestCallAiFallback:
         _no_ai(monkeypatch)
         with pytest.raises(RuntimeError, match="No AI provider"):
             await _call_ai("test prompt", event_type="topics")
+
+    async def test_groq_fallback_gemini_uses_groq_first(self, monkeypatch):
+        _mock_ai_store(monkeypatch, provider="groq_fallback_gemini")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 80
+        mock_usage.completion_tokens = 40
+        mock_choice = MagicMock()
+        mock_choice.message.content = '{"result": "from groq primary"}'
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = mock_usage
+
+        mock_groq = AsyncMock()
+        mock_groq.chat.completions.create = AsyncMock(return_value=mock_resp)
+        monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
+
+        mock_gemini = MagicMock()
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"result": "from groq primary"}'
+        assert provider == "Groq"
+
+    async def test_groq_fallback_gemini_falls_back(self, monkeypatch):
+        _mock_ai_store(monkeypatch, provider="groq_fallback_gemini")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+
+        mock_groq = AsyncMock()
+        mock_groq.chat.completions.create = AsyncMock(side_effect=RuntimeError("Groq down"))
+        monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
+
+        mock_usage = MagicMock()
+        mock_usage.prompt_token_count = 100
+        mock_usage.candidates_token_count = 50
+        mock_response = MagicMock()
+        mock_response.text = '{"result": "from gemini fallback"}'
+        mock_response.usage_metadata = mock_usage
+
+        async def _fast(*a, **kw):
+            return mock_response
+
+        mock_gemini = MagicMock()
+        mock_gemini.aio.models.generate_content = _fast
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"result": "from gemini fallback"}'
+        assert provider == "Gemini"
 
 
 class TestAiNewsSearch:
@@ -538,6 +592,25 @@ class TestPrefetchTopicSearches:
         await _prefetch_topic_searches(topics, sample_groups)
 
         assert calls == ["Tema real"]
+
+    async def test_prefetch_skipped_during_quiet_hours(self, sample_groups, monkeypatch):
+        topics = [{"label": "Test topic", "emoji": "🧪"}]
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": topics, "ts": 0})
+        monkeypatch.setattr("app.ai_search._search_cache", {})
+        monkeypatch.setattr("app.ai_search._PREFETCH_CONCURRENCY", 10)
+        monkeypatch.setattr("app.ai_search.is_in_quiet_hours", lambda et: True)
+
+        calls = []
+        async def _mock_search(query, groups, **kwargs):
+            calls.append(query)
+            return {"summary": "ok", "relevant_group_ids": [], "has_results": True,
+                    "ai_available": True, "ai_provider": "Mock"}
+
+        monkeypatch.setattr("app.ai_search.ai_news_search", _mock_search)
+
+        await _prefetch_topic_searches(topics, sample_groups)
+
+        assert calls == []
 
     async def test_topics_launches_prefetch_task(self, sample_groups, monkeypatch):
         import time

@@ -24,7 +24,7 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
 VALID_EVENT_TYPES = frozenset(
     {"search", "search_prefetch", "topics", "weekly_summary", "top_story"}
 )
-VALID_PROVIDERS = frozenset({"gemini", "groq", "gemini_fallback_groq"})
+VALID_PROVIDERS = frozenset({"gemini", "groq", "gemini_fallback_groq", "groq_fallback_gemini"})
 
 # ── Table init ────────────────────────────────────────────────────────────────
 
@@ -89,6 +89,18 @@ def init_ai_tables() -> None:
             """,
         )
         _seed_provider_config(conn)
+
+        execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS ai_schedule_config (
+                event_type  TEXT PRIMARY KEY,
+                quiet_start TEXT NOT NULL DEFAULT '',
+                quiet_end   TEXT NOT NULL DEFAULT '',
+                updated_at  TEXT NOT NULL
+            )
+            """,
+        )
 
     backend = "PostgreSQL" if is_postgres() else "SQLite"
     logger.info("AI tables ready — %s", backend)
@@ -220,6 +232,99 @@ def set_provider_config(event_type: str, provider: str) -> bool:
     except Exception as exc:
         logger.error("Failed to update AI provider config: %s", exc)
         return False
+
+
+# ── Schedule config (quiet hours) ─────────────────────────────────────────
+
+_VALID_HOUR_RE = __import__("re").compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+def get_schedule_config() -> dict[str, dict[str, str]]:
+    """Return {event_type: {quiet_start, quiet_end}} for all configured schedules."""
+    try:
+        with get_conn() as conn:
+            rows = query(conn, "SELECT event_type, quiet_start, quiet_end FROM ai_schedule_config").fetchall()
+        return {
+            r["event_type"]: {"quiet_start": r["quiet_start"], "quiet_end": r["quiet_end"]}
+            for r in rows
+            if r["quiet_start"] and r["quiet_end"]
+        }
+    except Exception as exc:
+        logger.warning("Failed to read AI schedule config: %s", exc)
+        return {}
+
+
+def set_schedule_config(event_type: str, quiet_start: str, quiet_end: str) -> bool:
+    """Set quiet hours for an event type. Empty strings clear the schedule."""
+    if event_type not in VALID_EVENT_TYPES:
+        return False
+
+    if quiet_start and not _VALID_HOUR_RE.match(quiet_start):
+        return False
+    if quiet_end and not _VALID_HOUR_RE.match(quiet_end):
+        return False
+    if bool(quiet_start) != bool(quiet_end):
+        return False
+
+    now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        with get_conn() as conn:
+            if is_postgres():
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_schedule_config (event_type, quiet_start, quiet_end, updated_at)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (event_type) DO UPDATE SET
+                        quiet_start = EXCLUDED.quiet_start,
+                        quiet_end = EXCLUDED.quiet_end,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (event_type, quiet_start, quiet_end, now_iso),
+                )
+            else:
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_schedule_config (event_type, quiet_start, quiet_end, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(event_type) DO UPDATE SET
+                        quiet_start = excluded.quiet_start,
+                        quiet_end = excluded.quiet_end,
+                        updated_at = excluded.updated_at
+                    """,
+                    (event_type, quiet_start, quiet_end, now_iso),
+                )
+        logger.info("AI schedule config updated: %s → %s–%s", event_type, quiet_start or "(none)", quiet_end or "(none)")
+        return True
+    except Exception as exc:
+        logger.error("Failed to update AI schedule config: %s", exc)
+        return False
+
+
+def is_in_quiet_hours(event_type: str) -> bool:
+    """Return True if the current time (ART) falls within the quiet window for *event_type*."""
+    schedule = get_schedule_config().get(event_type)
+    if not schedule:
+        return False
+
+    quiet_start = schedule["quiet_start"]
+    quiet_end = schedule["quiet_end"]
+    if not quiet_start or not quiet_end:
+        return False
+
+    now = datetime.now(ART)
+    current_minutes = now.hour * 60 + now.minute
+
+    sh, sm = map(int, quiet_start.split(":"))
+    eh, em = map(int, quiet_end.split(":"))
+    start_minutes = sh * 60 + sm
+    end_minutes = eh * 60 + em
+
+    if start_minutes <= end_minutes:
+        return start_minutes <= current_minutes < end_minutes
+    # Wraps midnight (e.g. 22:00–06:00)
+    return current_minutes >= start_minutes or current_minutes < end_minutes
 
 
 # ── Queries for admin panel ───────────────────────────────────────────────────

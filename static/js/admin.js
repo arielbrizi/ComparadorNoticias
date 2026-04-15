@@ -504,17 +504,24 @@ async function loadAIDashboard(desde, hasta) {
 
         const strip = $("#ai-providers-strip");
         if (s.by_provider.length) {
-            strip.innerHTML = s.by_provider.map(p => `
+            strip.innerHTML = s.by_provider.map(p => {
+                const color = p.provider === "gemini" ? "#4088c7" : "#0d9488";
+                const bg = p.provider === "gemini" ? "rgba(64,136,199,0.12)" : "rgba(13,148,136,0.12)";
+                return `
                 <div class="admin-eng-card">
-                    <div class="admin-eng-icon" style="background:${p.provider === "gemini" ? "rgba(64,136,199,0.12)" : "rgba(13,148,136,0.12)"}">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="${p.provider === "gemini" ? "#4088c7" : "#0d9488"}" stroke-width="2"><path d="M12 2a4 4 0 0 1 4 4v1a3 3 0 0 1 3 3v1a2 2 0 0 1-2 2h-1v3l-2-2h-4l-2 2v-3H7a2 2 0 0 1-2-2v-1a3 3 0 0 1 3-3V6a4 4 0 0 1 4-4z"/></svg>
+                    <div class="admin-eng-icon" style="background:${bg}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2"><path d="M12 2a4 4 0 0 1 4 4v1a3 3 0 0 1 3 3v1a2 2 0 0 1-2 2h-1v3l-2-2h-4l-2 2v-3H7a2 2 0 0 1-2-2v-1a3 3 0 0 1 3-3V6a4 4 0 0 1 4-4z"/></svg>
                     </div>
                     <div class="admin-eng-data">
                         <div class="admin-eng-value">${fmtUSD(p.cost_total)}</div>
                         <div class="admin-eng-label">${escHtml(p.provider)} (${p.calls} calls)</div>
+                        <div class="admin-eng-tokens" style="display:flex;gap:10px;margin-top:4px;font-size:.78rem;color:#94a3b8">
+                            <span title="Tokens entrada">▲ ${fmtTokens(p.input_tokens)}</span>
+                            <span title="Tokens salida">▼ ${fmtTokens(p.output_tokens)}</span>
+                        </div>
                     </div>
-                </div>
-            `).join("");
+                </div>`;
+            }).join("");
         } else {
             strip.innerHTML = "";
         }

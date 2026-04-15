@@ -373,6 +373,8 @@ def query_ai_cost_summary(
             conn,
             f"""SELECT provider,
                     COUNT(*) as calls,
+                    COALESCE(SUM(input_tokens), 0) as input_tokens,
+                    COALESCE(SUM(output_tokens), 0) as output_tokens,
                     COALESCE(SUM(cost_total), 0) as cost_total
                 FROM ai_usage_log{where_sql}
                 GROUP BY provider""",
@@ -407,6 +409,8 @@ def query_ai_cost_summary(
             {
                 "provider": r["provider"],
                 "calls": r["calls"],
+                "input_tokens": r["input_tokens"],
+                "output_tokens": r["output_tokens"],
                 "cost_total": round(r["cost_total"], 6),
             }
             for r in by_provider

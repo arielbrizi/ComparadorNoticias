@@ -9,7 +9,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
 
-from app.ai_store import init_ai_tables, log_ai_usage
+from app.ai_store import init_ai_tables, load_last_good_topics, log_ai_usage, save_last_good_topics
 from app.config import JWT_ALGORITHM, JWT_SECRET
 from app.models import Article, ArticleGroup
 from app.tracking_store import init_tracking_table
@@ -295,3 +295,38 @@ class TestAIScheduleEndpoint:
             cookies={"vs_token": token},
         )
         assert resp.status_code == 400
+
+
+class TestLastGoodTopicsPersistence:
+    async def test_save_and_load_round_trip(self, temp_db):
+        init_ai_tables()
+        topics = [{"label": "Dólar", "emoji": "💵"}, {"label": "Inflación", "emoji": "📈"}]
+        save_last_good_topics(topics, "Gemini", "2026-04-13T10:00:00+00:00")
+
+        loaded = load_last_good_topics()
+        assert loaded is not None
+        assert loaded["topics"] == topics
+        assert loaded["ai_provider"] == "Gemini"
+        assert loaded["generated_at"] == "2026-04-13T10:00:00+00:00"
+
+    async def test_save_overwrites_previous(self, temp_db):
+        init_ai_tables()
+        save_last_good_topics([{"label": "Old", "emoji": "📰"}], "Groq", "2026-04-12T08:00:00+00:00")
+        save_last_good_topics([{"label": "New", "emoji": "🆕"}], "Gemini", "2026-04-13T10:00:00+00:00")
+
+        loaded = load_last_good_topics()
+        assert loaded is not None
+        assert len(loaded["topics"]) == 1
+        assert loaded["topics"][0]["label"] == "New"
+        assert loaded["ai_provider"] == "Gemini"
+
+    async def test_load_returns_none_when_empty(self, temp_db):
+        init_ai_tables()
+        loaded = load_last_good_topics()
+        assert loaded is None
+
+    async def test_save_ignores_empty_topics(self, temp_db):
+        init_ai_tables()
+        save_last_good_topics([], "Gemini", "2026-04-13T10:00:00+00:00")
+        loaded = load_last_good_topics()
+        assert loaded is None

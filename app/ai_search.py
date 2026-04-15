@@ -16,7 +16,13 @@ from datetime import datetime, timezone
 from google import genai
 from groq import AsyncGroq
 
-from app.ai_store import get_provider_config, is_in_quiet_hours, log_ai_usage
+from app.ai_store import (
+    get_provider_config,
+    is_in_quiet_hours,
+    load_last_good_topics,
+    log_ai_usage,
+    save_last_good_topics,
+)
 from app.models import ArticleGroup
 
 logger = logging.getLogger(__name__)
@@ -443,7 +449,22 @@ async def _call_ai_search(
 
 _topics_cache: dict = {"topics": [], "ts": 0, "generated_at": ""}
 _search_cache: dict[str, dict] = {}
+_last_good_topics: dict = {"topics": [], "ai_provider": "", "generated_at": ""}
 TOPICS_TTL = 3600  # 1 hour
+
+
+def restore_last_good_topics() -> None:
+    """Load persisted last-good topics from DB into memory (call on startup)."""
+    saved = load_last_good_topics()
+    if saved and saved["topics"]:
+        _last_good_topics["topics"] = saved["topics"]
+        _last_good_topics["ai_provider"] = saved["ai_provider"]
+        _last_good_topics["generated_at"] = saved["generated_at"]
+        logger.info(
+            "Restored %d last-good topics from DB (provider=%s)",
+            len(saved["topics"]),
+            saved["ai_provider"],
+        )
 
 
 def is_topics_cache_valid() -> bool:
@@ -518,6 +539,13 @@ async def ai_topics(groups: list[ArticleGroup]) -> dict:
         _topics_cache["ai_provider"] = provider
         _topics_cache["generated_at"] = generated_at
         _search_cache.clear()
+
+        if topics:
+            _last_good_topics["topics"] = topics
+            _last_good_topics["ai_provider"] = provider
+            _last_good_topics["generated_at"] = generated_at
+            save_last_good_topics(topics, provider, generated_at)
+
         logger.info("Topics regenerated via %s — search cache cleared (%d topics)", provider, len(topics))
         asyncio.create_task(_prefetch_topic_searches(topics, groups))
         return {"topics": topics, "ai_available": True, "cached": False, "ai_provider": provider,
@@ -526,6 +554,28 @@ async def ai_topics(groups: list[ArticleGroup]) -> dict:
 
     except Exception as exc:
         logger.error("AI topics failed: %s", exc)
+
+        fallback = _last_good_topics["topics"]
+        if fallback:
+            logger.info(
+                "Returning %d last-good topics as fallback (provider=%s)",
+                len(fallback),
+                _last_good_topics["ai_provider"],
+            )
+            cached_labels = [
+                t["label"] for t in fallback
+                if t.get("label", "").strip().lower() in _search_cache
+            ]
+            return {
+                "topics": fallback,
+                "ai_available": True,
+                "cached": True,
+                "fallback": True,
+                "ai_provider": _last_good_topics["ai_provider"],
+                "search_cached": cached_labels,
+                "generated_at": _last_good_topics["generated_at"],
+            }
+
         return {"topics": [], "ai_available": False}
 
 

@@ -10,12 +10,14 @@ from app.ai_search import (
     _call_gemini,
     _call_groq,
     _clean_json_response,
+    _last_good_topics,
     _prefetch_topic_searches,
     ai_top_story,
     _parse_retry_seconds,
     ai_news_search,
     ai_topics,
     ai_weekly_summary,
+    restore_last_good_topics,
 )
 
 
@@ -343,6 +345,139 @@ class TestAiTopics:
                 await task
             except _asyncio.CancelledError:
                 pass
+
+
+    async def test_fallback_to_last_good_topics_when_ai_fails(self, sample_groups, monkeypatch):
+        """When both providers fail, return last-good topics instead of empty."""
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0, "generated_at": ""})
+        monkeypatch.setattr("app.ai_search._search_cache", {
+            "dólar": {"summary": "cached", "relevant_group_ids": ["abc1234567"], "has_results": True},
+        })
+
+        fallback_topics = [
+            {"label": "Dólar", "emoji": "💵"},
+            {"label": "Inflación", "emoji": "📈"},
+        ]
+        monkeypatch.setattr("app.ai_search._last_good_topics", {
+            "topics": fallback_topics,
+            "ai_provider": "Gemini",
+            "generated_at": "2026-04-13T10:00:00+00:00",
+        })
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        _mock_ai_store(monkeypatch)
+
+        async def _fail(*a, **kw):
+            raise RuntimeError("Gemini 503")
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = _fail
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_client)
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setattr("app.ai_search._groq_client", None)
+
+        result = await ai_topics(sample_groups)
+
+        assert result["topics"] == fallback_topics
+        assert result["ai_available"] is True
+        assert result["fallback"] is True
+        assert result["cached"] is True
+        assert result["ai_provider"] == "Gemini"
+        assert result["generated_at"] == "2026-04-13T10:00:00+00:00"
+        assert "Dólar" in result["search_cached"]
+
+    async def test_no_fallback_returns_empty_when_no_last_good(self, sample_groups, monkeypatch):
+        """When both providers fail and there's no last-good cache, return empty."""
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0, "generated_at": ""})
+        monkeypatch.setattr("app.ai_search._search_cache", {})
+        monkeypatch.setattr("app.ai_search._last_good_topics", {
+            "topics": [], "ai_provider": "", "generated_at": "",
+        })
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        _mock_ai_store(monkeypatch)
+
+        async def _fail(*a, **kw):
+            raise RuntimeError("Gemini 503")
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = _fail
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_client)
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setattr("app.ai_search._groq_client", None)
+
+        result = await ai_topics(sample_groups)
+
+        assert result["topics"] == []
+        assert result["ai_available"] is False
+
+    async def test_successful_generation_saves_last_good(self, sample_groups, monkeypatch):
+        """Successful topic generation should update _last_good_topics."""
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0, "generated_at": ""})
+        monkeypatch.setattr("app.ai_search._search_cache", {})
+        monkeypatch.setattr("app.ai_search._last_good_topics", {
+            "topics": [], "ai_provider": "", "generated_at": "",
+        })
+        monkeypatch.setattr("app.ai_search.save_last_good_topics", lambda *a, **kw: None)
+
+        topics_json = '{"topics":[{"label":"Dólar","emoji":"💵"},{"label":"Inflación","emoji":"📈"}]}'
+        _setup_ai_mock(monkeypatch, topics_json)
+
+        created_tasks = []
+        original_create_task = asyncio.create_task
+        def _spy(coro):
+            task = original_create_task(coro)
+            created_tasks.append(task)
+            return task
+        monkeypatch.setattr("app.ai_search.asyncio.create_task", _spy)
+
+        import app.ai_search as mod
+        result = await ai_topics(sample_groups)
+
+        assert result["ai_available"] is True
+        assert len(result["topics"]) == 2
+        assert mod._last_good_topics["topics"] == result["topics"]
+        assert mod._last_good_topics["ai_provider"] == "Gemini"
+        assert mod._last_good_topics["generated_at"] == result["generated_at"]
+
+        for task in created_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+class TestRestoreLastGoodTopics:
+    def test_restores_from_db(self, monkeypatch):
+        saved = {
+            "topics": [{"label": "Test", "emoji": "🧪"}],
+            "ai_provider": "Gemini",
+            "generated_at": "2026-04-13T12:00:00+00:00",
+        }
+        monkeypatch.setattr("app.ai_search.load_last_good_topics", lambda: saved)
+        monkeypatch.setattr("app.ai_search._last_good_topics", {
+            "topics": [], "ai_provider": "", "generated_at": "",
+        })
+
+        import app.ai_search as mod
+        restore_last_good_topics()
+
+        assert mod._last_good_topics["topics"] == saved["topics"]
+        assert mod._last_good_topics["ai_provider"] == "Gemini"
+
+    def test_noop_when_db_empty(self, monkeypatch):
+        monkeypatch.setattr("app.ai_search.load_last_good_topics", lambda: None)
+        monkeypatch.setattr("app.ai_search._last_good_topics", {
+            "topics": [], "ai_provider": "", "generated_at": "",
+        })
+
+        import app.ai_search as mod
+        restore_last_good_topics()
+
+        assert mod._last_good_topics["topics"] == []
 
 
 class TestAiWeeklySummary:

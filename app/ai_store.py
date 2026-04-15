@@ -4,6 +4,7 @@ Persistencia de uso de IA — tracking de tokens/costo y configuración de provi
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -101,6 +102,34 @@ def init_ai_tables() -> None:
             )
             """,
         )
+
+        if is_postgres():
+            execute(
+                conn,
+                """
+                CREATE TABLE IF NOT EXISTS ai_last_good_topics (
+                    id           INTEGER PRIMARY KEY DEFAULT 1,
+                    topics_json  TEXT NOT NULL,
+                    ai_provider  TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    updated_at   TEXT NOT NULL,
+                    CHECK (id = 1)
+                )
+                """,
+            )
+        else:
+            execute(
+                conn,
+                """
+                CREATE TABLE IF NOT EXISTS ai_last_good_topics (
+                    id           INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                    topics_json  TEXT NOT NULL,
+                    ai_provider  TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    updated_at   TEXT NOT NULL
+                )
+                """,
+            )
 
     backend = "PostgreSQL" if is_postgres() else "SQLite"
     logger.info("AI tables ready — %s", backend)
@@ -462,3 +491,74 @@ def query_ai_daily_cost(
         }
         for r in rows
     ]
+
+
+# ── Last good topics (fallback) ──────────────────────────────────────────────
+
+
+def save_last_good_topics(
+    topics: list[dict], ai_provider: str, generated_at: str,
+) -> None:
+    """Persist the last successfully generated topics for fallback on provider failure."""
+    if not topics:
+        return
+    now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+    topics_json = json.dumps(topics, ensure_ascii=False)
+    try:
+        with get_conn() as conn:
+            if is_postgres():
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_last_good_topics (id, topics_json, ai_provider, generated_at, updated_at)
+                    VALUES (1, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        topics_json  = EXCLUDED.topics_json,
+                        ai_provider  = EXCLUDED.ai_provider,
+                        generated_at = EXCLUDED.generated_at,
+                        updated_at   = EXCLUDED.updated_at
+                    """,
+                    (topics_json, ai_provider, generated_at, now_iso),
+                )
+            else:
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_last_good_topics (id, topics_json, ai_provider, generated_at, updated_at)
+                    VALUES (1, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        topics_json  = excluded.topics_json,
+                        ai_provider  = excluded.ai_provider,
+                        generated_at = excluded.generated_at,
+                        updated_at   = excluded.updated_at
+                    """,
+                    (topics_json, ai_provider, generated_at, now_iso),
+                )
+        logger.info("Last good topics saved (%d topics, provider=%s)", len(topics), ai_provider)
+    except Exception as exc:
+        logger.warning("Failed to save last good topics: %s", exc)
+
+
+def load_last_good_topics() -> dict | None:
+    """Load the last successfully generated topics from DB.
+
+    Returns dict with keys ``topics``, ``ai_provider``, ``generated_at``
+    or ``None`` if nothing was ever persisted.
+    """
+    try:
+        with get_conn() as conn:
+            row = query(
+                conn,
+                "SELECT topics_json, ai_provider, generated_at FROM ai_last_good_topics WHERE id = 1",
+            ).fetchone()
+        if not row:
+            return None
+        topics = json.loads(row["topics_json"])
+        return {
+            "topics": topics,
+            "ai_provider": row["ai_provider"],
+            "generated_at": row["generated_at"],
+        }
+    except Exception as exc:
+        logger.warning("Failed to load last good topics: %s", exc)
+        return None

@@ -33,6 +33,7 @@ from app.ai_search import (
     ai_weekly_summary,
     is_topstory_cache_valid,
     is_topics_cache_valid,
+    restore_last_good_topics,
 )
 from app.ai_store import (
     get_provider_config,
@@ -287,6 +288,11 @@ async def lifespan(_app: FastAPI):
         init_ai_tables()
     except Exception as exc:
         logger.error("init_ai_tables failed: %s", exc)
+
+    try:
+        restore_last_good_topics()
+    except Exception as exc:
+        logger.error("restore_last_good_topics failed: %s", exc)
 
     try:
         today = datetime.now(ART).strftime("%Y-%m-%d")

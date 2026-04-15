@@ -69,6 +69,11 @@ function computeRange(range) {
     switch (range) {
         case "hoy":
             return { desde: today, hasta: today };
+        case "2d": {
+            const d = new Date(now);
+            d.setDate(d.getDate() - 1);
+            return { desde: fmt(d), hasta: today };
+        }
         case "7d": {
             const d = new Date(now);
             d.setDate(d.getDate() - 6);

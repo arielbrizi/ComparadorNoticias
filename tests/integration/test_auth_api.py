@@ -120,13 +120,13 @@ class TestGoogleOAuth:
     async def test_login_with_config_redirects(self, client, monkeypatch):
         monkeypatch.setattr("app.auth.GOOGLE_CLIENT_ID", "test-client-id")
         resp = await client.get("/auth/google/login", follow_redirects=False)
-        assert resp.status_code == 307
-        assert "accounts.google.com" in resp.headers["location"]
+        assert resp.status_code == 200
+        assert "accounts.google.com" in resp.text
 
     async def test_callback_error_redirects(self, client):
         resp = await client.get("/auth/google/callback?error=access_denied", follow_redirects=False)
-        assert resp.status_code == 307
-        assert "auth_error" in resp.headers["location"]
+        assert resp.status_code == 200
+        assert "auth_error" in resp.text
 
 
 class TestMagicLinks:
@@ -148,20 +148,20 @@ class TestMagicLinks:
         from app.auth import _serializer
         token = _serializer.dumps("magic@test.com", salt="magic-link")
         resp = await client.get(f"/auth/magic/verify?token={token}", follow_redirects=False)
-        assert resp.status_code == 307
-        assert resp.headers["location"] == "/"
+        assert resp.status_code == 200
+        assert 'location.replace("/")' in resp.text
         cookies = resp.headers.get_list("set-cookie")
         assert any("vs_token" in c for c in cookies)
 
     async def test_verify_with_invalid_token(self, client):
         resp = await client.get("/auth/magic/verify?token=garbage", follow_redirects=False)
-        assert resp.status_code == 307
-        assert "auth_error=invalid" in resp.headers["location"]
+        assert resp.status_code == 200
+        assert "auth_error=invalid" in resp.text
 
     async def test_verify_with_empty_token(self, client):
         resp = await client.get("/auth/magic/verify?token=", follow_redirects=False)
-        assert resp.status_code == 307
-        assert "auth_error=no_token" in resp.headers["location"]
+        assert resp.status_code == 200
+        assert "auth_error=no_token" in resp.text
 
 
 class TestAdminEndpoints:

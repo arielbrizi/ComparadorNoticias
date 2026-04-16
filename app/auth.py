@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from jose import JWTError, jwt
 
@@ -65,6 +65,17 @@ def _delete_auth_cookie(response):
     response.delete_cookie(_COOKIE_NAME, path="/")
 
 
+def _redirect_replace(url: str) -> HTMLResponse:
+    """Navigate via location.replace() so auth URLs don't stay in browser history."""
+    html = (
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        "</head><body><script>"
+        f"window.location.replace({json.dumps(url)})"
+        "</script></body></html>"
+    )
+    return HTMLResponse(content=html)
+
+
 # ── FastAPI dependencies ─────────────────────────────────────────────────────
 
 
@@ -118,14 +129,14 @@ async def google_login():
         "prompt": "select_account",
     }
     qs = "&".join(f"{k}={v}" for k, v in params.items())
-    return RedirectResponse(f"{_GOOGLE_AUTH_URL}?{qs}")
+    return _redirect_replace(f"{_GOOGLE_AUTH_URL}?{qs}")
 
 
 @router.get("/google/callback")
 async def google_callback(code: str = "", error: str = ""):
     if error or not code:
         logger.warning("Google OAuth error: %s", error)
-        return RedirectResponse("/?auth_error=google")
+        return _redirect_replace("/?auth_error=google")
 
     import httpx
 
@@ -146,7 +157,7 @@ async def google_callback(code: str = "", error: str = ""):
 
             if "access_token" not in token_data:
                 logger.error("Google token exchange failed: %s", token_data)
-                return RedirectResponse("/?auth_error=token")
+                return _redirect_replace("/?auth_error=token")
 
             userinfo_resp = await client.get(
                 _GOOGLE_USERINFO_URL,
@@ -155,19 +166,19 @@ async def google_callback(code: str = "", error: str = ""):
             userinfo = userinfo_resp.json()
     except Exception as exc:
         logger.error("Google OAuth exchange failed: %s", exc)
-        return RedirectResponse("/?auth_error=exchange")
+        return _redirect_replace("/?auth_error=exchange")
 
     email = userinfo.get("email", "")
     name = userinfo.get("name", "")
     picture = userinfo.get("picture", "")
 
     if not email:
-        return RedirectResponse("/?auth_error=no_email")
+        return _redirect_replace("/?auth_error=no_email")
 
     user = upsert_user(email, name, picture)
     token = _create_jwt(user)
 
-    response = RedirectResponse("/")
+    response = _redirect_replace("/")
     _set_auth_cookie(response, token)
     return response
 
@@ -221,19 +232,19 @@ async def magic_request(request: Request):
 @router.get("/magic/verify")
 async def magic_verify(token: str = ""):
     if not token:
-        return RedirectResponse("/?auth_error=no_token")
+        return _redirect_replace("/?auth_error=no_token")
 
     try:
         email = _serializer.loads(token, salt="magic-link", max_age=MAGIC_LINK_MAX_AGE)
     except SignatureExpired:
-        return RedirectResponse("/?auth_error=expired")
+        return _redirect_replace("/?auth_error=expired")
     except BadSignature:
-        return RedirectResponse("/?auth_error=invalid")
+        return _redirect_replace("/?auth_error=invalid")
 
     user = upsert_user(email)
     jwt_token = _create_jwt(user)
 
-    response = RedirectResponse("/")
+    response = _redirect_replace("/")
     _set_auth_cookie(response, jwt_token)
     return response
 

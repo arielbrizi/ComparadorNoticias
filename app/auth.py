@@ -8,7 +8,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from jose import JWTError, jwt
@@ -50,6 +50,7 @@ def _create_jwt(user: dict) -> str:
 
 def _set_auth_cookie(response, token: str):
     is_prod = BASE_URL.startswith("https")
+    expire_dt = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS)
     response.set_cookie(
         _COOKIE_NAME,
         token,
@@ -57,6 +58,7 @@ def _set_auth_cookie(response, token: str):
         samesite="lax",
         secure=is_prod,
         max_age=JWT_EXPIRE_HOURS * 3600,
+        expires=expire_dt,
         path="/",
     )
 
@@ -253,9 +255,11 @@ async def magic_verify(token: str = ""):
 
 
 @router.get("/me")
-async def me(user: dict | None = Depends(get_current_user)):
+async def me(response: Response, user: dict | None = Depends(get_current_user)):
     if not user:
         return {"user": None}
+    token = _create_jwt(user)
+    _set_auth_cookie(response, token)
     return {
         "user": {
             "id": user["id"],

@@ -6,8 +6,10 @@ Agrega noticias de medios argentinos y permite compararlas.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,7 +20,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.article_grouper import group_articles, is_event_expired
@@ -89,6 +91,47 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = str(BASE_DIR / "static")
 
 ART = timezone(timedelta(hours=-3))
+
+
+# ── Asset cache busting ──────────────────────────────────────────────────────
+
+_ASSET_HASHES: dict[str, str] = {}
+_HTML_CACHE: dict[str, str] = {}
+_BUST_RE = re.compile(r'(/static/(?:css|js)/[^"?\s]+)\?v=\d+')
+
+
+def _compute_asset_hashes() -> dict[str, str]:
+    """Build a map of static asset paths to short content hashes."""
+    assets = {}
+    static = Path(STATIC_DIR)
+    for pattern in ("css/*.css", "js/*.js"):
+        for filepath in static.glob(pattern):
+            rel = filepath.relative_to(static).as_posix()
+            digest = hashlib.md5(filepath.read_bytes()).hexdigest()[:10]
+            assets[rel] = digest
+    return assets
+
+
+def _bust_cache(html: str) -> str:
+    """Replace manual ?v=N query strings with content-based hashes."""
+    def _replace(m: re.Match) -> str:
+        path = m.group(1)
+        rel = path[len("/static/"):]
+        h = _ASSET_HASHES.get(rel, "")
+        return f"{path}?h={h}" if h else m.group(0)
+    return _BUST_RE.sub(_replace, html)
+
+
+def _serve_html(filename: str) -> HTMLResponse:
+    """Serve an HTML file with cache-busted asset URLs."""
+    if filename not in _HTML_CACHE:
+        filepath = os.path.join(STATIC_DIR, filename)
+        raw = Path(filepath).read_text(encoding="utf-8")
+        _HTML_CACHE[filename] = _bust_cache(raw) if _ASSET_HASHES else raw
+    return HTMLResponse(_HTML_CACHE[filename])
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 
 def _ensure_aware(dt: datetime) -> datetime:
@@ -271,7 +314,10 @@ scheduler = AsyncIOScheduler(timezone=ART)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _articles, _groups
+    global _articles, _groups, _ASSET_HASHES, _HTML_CACHE
+    _ASSET_HASHES = _compute_asset_hashes()
+    logger.info("Asset hashes computed: %s", _ASSET_HASHES)
+    _HTML_CACHE.clear()
     try:
         init_db()
     except Exception as exc:
@@ -543,7 +589,6 @@ async def weekly_summary():
     week_start, week_end = _current_week_bounds()
 
     _articles_db, groups = load_groups_from_db(desde=week_start, hasta=week_end)
-    # Limitar contexto para que la IA responda a tiempo
     if len(groups) > 200:
         groups = groups[:200]
     return await ai_weekly_summary(groups, week_start, week_end)
@@ -867,30 +912,33 @@ async def health():
     return JSONResponse({"status": "ok"})
 
 
-# ── Admin page ───────────────────────────────────────────────────────────────
+# ── Page helpers ──────────────────────────────────────────────────────────
+
+
+# ── Admin page ───────────────────────────────────────────────────────────
 
 @app.get("/admin")
 async def admin_page(user: dict | None = Depends(get_current_user)):
     if not user or user.get("role") != "admin":
         return RedirectResponse("/")
-    return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
+    return _serve_html("admin.html")
 
 
 @app.get("/privacy")
 async def privacy_page():
-    return FileResponse(os.path.join(STATIC_DIR, "privacy.html"))
+    return _serve_html("privacy.html")
 
 
 @app.get("/terms")
 async def terms_page():
-    return FileResponse(os.path.join(STATIC_DIR, "terms.html"))
+    return _serve_html("terms.html")
 
 
-# ── Static files ─────────────────────────────────────────────────────────────
+# ── Static files ─────────────────────────────────────────────────────────
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/")
 async def index():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return _serve_html("index.html")

@@ -10,7 +10,7 @@ import os
 ADMIN_EMAILS = [e.strip() for e in os.environ.get("ADMIN_EMAILS", "arielbrizi@gmail.com").split(",")]
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-change-me")
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_HOURS = 72
+JWT_EXPIRE_HOURS = 24 * 365  # ~1 year; sliding window in /auth/me renews on each visit
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")

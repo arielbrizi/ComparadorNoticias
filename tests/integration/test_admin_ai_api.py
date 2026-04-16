@@ -1,4 +1,4 @@
-"""Integration tests for /api/admin/ai-cost and /api/admin/ai-config endpoints."""
+"""Integration tests for /api/admin/ai-cost, /api/admin/ai-config and /api/admin/scheduler-config endpoints."""
 
 from __future__ import annotations
 
@@ -9,7 +9,16 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
 
-from app.ai_store import init_ai_tables, load_last_good_topics, log_ai_usage, save_last_good_topics
+from app.ai_store import (
+    get_scheduler_config,
+    init_ai_tables,
+    load_last_good_topics,
+    log_ai_usage,
+    save_last_good_topics,
+    set_scheduler_interval,
+    SCHEDULER_DEFAULTS,
+    VALID_SCHEDULER_INTERVALS,
+)
 from app.config import JWT_ALGORITHM, JWT_SECRET
 from app.models import Article, ArticleGroup
 from app.tracking_store import init_tracking_table
@@ -330,3 +339,115 @@ class TestLastGoodTopicsPersistence:
         save_last_good_topics([], "Gemini", "2026-04-13T10:00:00+00:00")
         loaded = load_last_good_topics()
         assert loaded is None
+
+
+class TestSchedulerConfigStore:
+    async def test_defaults_returned_when_no_db_rows(self, temp_db):
+        init_ai_tables()
+        config = get_scheduler_config()
+        assert config["refresh_news"] == SCHEDULER_DEFAULTS["refresh_news"]
+        assert config["prefetch_topics"] == SCHEDULER_DEFAULTS["prefetch_topics"]
+
+    async def test_set_and_get_interval(self, temp_db):
+        init_ai_tables()
+        ok = set_scheduler_interval("refresh_news", 30)
+        assert ok is True
+        config = get_scheduler_config()
+        assert config["refresh_news"] == 30
+
+    async def test_set_invalid_job_key(self, temp_db):
+        init_ai_tables()
+        ok = set_scheduler_interval("nonexistent_job", 10)
+        assert ok is False
+
+    async def test_set_invalid_interval(self, temp_db):
+        init_ai_tables()
+        ok = set_scheduler_interval("refresh_news", 999)
+        assert ok is False
+
+    async def test_overwrite_interval(self, temp_db):
+        init_ai_tables()
+        set_scheduler_interval("prefetch_topics", 120)
+        set_scheduler_interval("prefetch_topics", 240)
+        config = get_scheduler_config()
+        assert config["prefetch_topics"] == 240
+
+
+class TestSchedulerConfigEndpoint:
+    async def test_get_requires_admin(self, client):
+        resp = await client.get("/api/admin/scheduler-config")
+        assert resp.status_code == 403
+
+    async def test_post_requires_admin(self, client):
+        resp = await client.post("/api/admin/scheduler-config", json={
+            "job_key": "refresh_news", "interval_minutes": 30,
+        })
+        assert resp.status_code == 403
+
+    async def test_get_returns_config(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.get("/api/admin/scheduler-config", cookies={"vs_token": token})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "config" in data
+        assert "defaults" in data
+        assert "valid_intervals" in data
+        assert data["config"]["refresh_news"] == SCHEDULER_DEFAULTS["refresh_news"]
+
+    async def test_set_updates_interval(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/scheduler-config",
+            json={"job_key": "refresh_news", "interval_minutes": 30},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        resp = await client.get("/api/admin/scheduler-config", cookies={"vs_token": token})
+        assert resp.json()["config"]["refresh_news"] == 30
+
+    async def test_set_invalid_job_key(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/scheduler-config",
+            json={"job_key": "invalid_job", "interval_minutes": 10},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+    async def test_set_invalid_interval(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/scheduler-config",
+            json={"job_key": "refresh_news", "interval_minutes": 999},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+    async def test_set_topics_interval(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/scheduler-config",
+            json={"job_key": "prefetch_topics", "interval_minutes": 120},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+
+        resp = await client.get("/api/admin/scheduler-config", cookies={"vs_token": token})
+        assert resp.json()["config"]["prefetch_topics"] == 120

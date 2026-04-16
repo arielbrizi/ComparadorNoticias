@@ -103,6 +103,17 @@ def init_ai_tables() -> None:
             """,
         )
 
+        execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_config (
+                job_key          TEXT PRIMARY KEY,
+                interval_minutes INTEGER NOT NULL,
+                updated_at       TEXT NOT NULL
+            )
+            """,
+        )
+
         if is_postgres():
             execute(
                 conn,
@@ -537,6 +548,90 @@ def save_last_good_topics(
         logger.info("Last good topics saved (%d topics, provider=%s)", len(topics), ai_provider)
     except Exception as exc:
         logger.warning("Failed to save last good topics: %s", exc)
+
+
+# ── Scheduler config (dynamic intervals) ─────────────────────────────────────
+
+SCHEDULER_DEFAULTS: dict[str, int] = {
+    "refresh_news": 10,
+    "prefetch_topics": 60,
+}
+
+VALID_SCHEDULER_INTERVALS: dict[str, list[int]] = {
+    "refresh_news": [5, 10, 15, 20, 30, 60],
+    "prefetch_topics": [30, 60, 120, 180, 240, 360],
+}
+
+_scheduler_cache: dict[str, int] = {}
+_scheduler_cache_ts: float = 0
+_SCHEDULER_CACHE_TTL = 30
+
+
+def get_scheduler_config() -> dict[str, int]:
+    """Return {job_key: interval_minutes} for all scheduler jobs."""
+    global _scheduler_cache, _scheduler_cache_ts
+    now = time.time()
+    if _scheduler_cache and (now - _scheduler_cache_ts) < _SCHEDULER_CACHE_TTL:
+        return dict(_scheduler_cache)
+
+    result = dict(SCHEDULER_DEFAULTS)
+    try:
+        with get_conn() as conn:
+            rows = query(conn, "SELECT job_key, interval_minutes FROM scheduler_config").fetchall()
+        for r in rows:
+            result[r["job_key"]] = r["interval_minutes"]
+        _scheduler_cache = result
+        _scheduler_cache_ts = now
+    except Exception as exc:
+        logger.warning("Failed to read scheduler config: %s", exc)
+        if not _scheduler_cache:
+            _scheduler_cache = dict(SCHEDULER_DEFAULTS)
+            _scheduler_cache_ts = now
+
+    return dict(_scheduler_cache)
+
+
+def set_scheduler_interval(job_key: str, interval_minutes: int) -> bool:
+    """Update the interval for a scheduler job. Returns True on success."""
+    global _scheduler_cache_ts
+    if job_key not in VALID_SCHEDULER_INTERVALS:
+        return False
+    if interval_minutes not in VALID_SCHEDULER_INTERVALS[job_key]:
+        return False
+
+    now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        with get_conn() as conn:
+            if is_postgres():
+                execute(
+                    conn,
+                    """
+                    INSERT INTO scheduler_config (job_key, interval_minutes, updated_at)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (job_key) DO UPDATE SET
+                        interval_minutes = EXCLUDED.interval_minutes,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (job_key, interval_minutes, now_iso),
+                )
+            else:
+                execute(
+                    conn,
+                    """
+                    INSERT INTO scheduler_config (job_key, interval_minutes, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(job_key) DO UPDATE SET
+                        interval_minutes = excluded.interval_minutes,
+                        updated_at = excluded.updated_at
+                    """,
+                    (job_key, interval_minutes, now_iso),
+                )
+        _scheduler_cache_ts = 0
+        logger.info("Scheduler config updated: %s → %d min", job_key, interval_minutes)
+        return True
+    except Exception as exc:
+        logger.error("Failed to update scheduler config: %s", exc)
+        return False
 
 
 def load_last_good_topics() -> dict | None:

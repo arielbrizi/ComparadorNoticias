@@ -38,13 +38,17 @@ from app.ai_search import (
 from app.ai_store import (
     get_provider_config,
     get_schedule_config,
+    get_scheduler_config,
     init_ai_tables,
     query_ai_cost_summary,
     query_ai_daily_cost,
     set_provider_config,
     set_schedule_config,
+    set_scheduler_interval,
+    SCHEDULER_DEFAULTS,
     VALID_EVENT_TYPES,
     VALID_PROVIDERS,
+    VALID_SCHEDULER_INTERVALS,
 )
 from app.wordcloud import build_wordcloud
 from app.metrics_store import init_db, query_metrics, save_group_metrics
@@ -307,10 +311,15 @@ async def lifespan(_app: FastAPI):
 
     asyncio.create_task(refresh_news())
     asyncio.create_task(_startup_prefetch())
-    scheduler.add_job(refresh_news, "interval", minutes=10)
+
+    sched_cfg = get_scheduler_config()
+    news_min = sched_cfg.get("refresh_news", SCHEDULER_DEFAULTS["refresh_news"])
+    topics_min = sched_cfg.get("prefetch_topics", SCHEDULER_DEFAULTS["prefetch_topics"])
+
+    scheduler.add_job(refresh_news, "interval", minutes=news_min, id="refresh_news", replace_existing=True)
     scheduler.add_job(refresh_wordcloud, "interval", hours=2)
     scheduler.add_job(prefetch_top_story, "interval", hours=3)
-    scheduler.add_job(prefetch_topics, "interval", hours=1)
+    scheduler.add_job(prefetch_topics, "interval", minutes=topics_min, id="prefetch_topics", replace_existing=True)
     scheduler.add_job(prefetch_weekly_summary, "cron", hour=9, minute=15)
     scheduler.add_job(prefetch_weekly_summary, "cron", hour=18, minute=0)
     scheduler.add_job(purge_old_news, "cron", hour=7, minute=0)
@@ -800,6 +809,55 @@ async def admin_ai_schedule_set(
     if not ok:
         return JSONResponse({"error": "Invalid schedule values"}, status_code=400)
     return {"ok": True, "event_type": event_type, "quiet_start": quiet_start, "quiet_end": quiet_end}
+
+
+@app.get("/api/admin/scheduler-config")
+async def admin_scheduler_config_get(_admin: dict = Depends(require_admin)):
+    """Return current scheduler interval configuration."""
+    config = get_scheduler_config()
+    return {
+        "config": config,
+        "defaults": SCHEDULER_DEFAULTS,
+        "valid_intervals": {k: v for k, v in VALID_SCHEDULER_INTERVALS.items()},
+    }
+
+
+@app.post("/api/admin/scheduler-config")
+async def admin_scheduler_config_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Update a scheduler job interval and reschedule the running job."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    job_key = body.get("job_key", "")
+    interval_minutes = body.get("interval_minutes")
+
+    if job_key not in VALID_SCHEDULER_INTERVALS:
+        return JSONResponse(
+            {"error": f"Invalid job_key. Valid: {sorted(VALID_SCHEDULER_INTERVALS)}"},
+            status_code=400,
+        )
+    if not isinstance(interval_minutes, int) or interval_minutes not in VALID_SCHEDULER_INTERVALS[job_key]:
+        return JSONResponse(
+            {"error": f"Invalid interval. Valid: {VALID_SCHEDULER_INTERVALS[job_key]}"},
+            status_code=400,
+        )
+
+    ok = set_scheduler_interval(job_key, interval_minutes)
+    if not ok:
+        return JSONResponse({"error": "Failed to update"}, status_code=500)
+
+    try:
+        scheduler.reschedule_job(job_key, trigger="interval", minutes=interval_minutes)
+        logger.info("Rescheduled job %s to every %d minutes", job_key, interval_minutes)
+    except Exception as exc:
+        logger.warning("Failed to reschedule job %s: %s", job_key, exc)
+
+    return {"ok": True, "job_key": job_key, "interval_minutes": interval_minutes}
 
 
 # ── Health check ─────────────────────────────────────────────────────────────

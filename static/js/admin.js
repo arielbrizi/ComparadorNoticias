@@ -112,6 +112,7 @@ function loadAll() {
     } else if (_activeTab === "ai") {
         loadAIDashboard(desde, hasta);
         loadAIConfig();
+        loadSchedulerConfig();
     } else {
         loadAnonymousDashboard(desde, hasta);
     }
@@ -731,6 +732,93 @@ function renderAIConfig(config, validProviders, validEventTypes, schedule) {
                     status.textContent = qStart && qEnd ? `Desactivado de ${qStart} a ${qEnd}` : "Sin restricción";
                     status.style.color = "#0d9488";
                     setTimeout(() => { status.textContent = ""; }, 3000);
+                } else {
+                    const err = await resp.json();
+                    status.textContent = err.error || "Error";
+                    status.style.color = "#ea580c";
+                }
+            } catch (err) {
+                status.textContent = "Error de red";
+                status.style.color = "#ea580c";
+            }
+        });
+    });
+}
+
+// ── Scheduler config ────────────────────────────────────────────────────
+
+const _schedulerLabels = {
+    refresh_news: "Actualización de RSS",
+    prefetch_topics: "Regenerar temas del día",
+};
+
+const _schedulerDescs = {
+    refresh_news: "Cada cuántos minutos se buscan noticias nuevas en los feeds RSS",
+    prefetch_topics: "Cada cuántos minutos se regeneran los 6 temas destacados con IA",
+};
+
+function _fmtInterval(minutes) {
+    if (minutes < 60) return `${minutes} min`;
+    const h = minutes / 60;
+    return h === 1 ? "1 h" : `${h} h`;
+}
+
+async function loadSchedulerConfig() {
+    try {
+        const resp = await fetch("/api/admin/scheduler-config");
+        if (resp.status === 403) return;
+        const data = await resp.json();
+        renderSchedulerConfig(data.config, data.valid_intervals);
+    } catch (err) {
+        console.error("Scheduler config load failed:", err);
+        const container = $("#scheduler-config-wrap");
+        if (container) container.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error de red</div>`;
+    }
+}
+
+function renderSchedulerConfig(config, validIntervals) {
+    const container = $("#scheduler-config-wrap");
+    if (!validIntervals || !Object.keys(validIntervals).length) {
+        container.innerHTML = `<div class="admin-empty">No hay configuración disponible</div>`;
+        return;
+    }
+
+    const cards = Object.keys(validIntervals).map(jobKey => {
+        const current = config[jobKey] || 10;
+        const options = validIntervals[jobKey].map(v =>
+            `<option value="${v}" ${v === current ? "selected" : ""}>${_fmtInterval(v)}</option>`
+        ).join("");
+
+        const desc = _schedulerDescs[jobKey] || "";
+
+        return `
+            <div class="admin-eng-card" style="flex-direction:column;align-items:stretch;gap:0.4rem;flex:1;min-width:220px">
+                <div style="font-size:0.82rem;font-weight:600;color:var(--text)">${escHtml(_schedulerLabels[jobKey] || jobKey)}</div>
+                <div style="font-size:0.68rem;color:var(--text-dim);margin-bottom:0.2rem">${escHtml(desc)}</div>
+                <select class="ai-config-select scheduler-interval-select" data-job="${jobKey}">${options}</select>
+                <div class="scheduler-interval-status" data-job="${jobKey}" style="font-size:0.65rem;min-height:1rem;color:var(--text-dim)"></div>
+            </div>`;
+    }).join("");
+
+    container.innerHTML = `<div class="admin-engagement">${cards}</div>`;
+
+    $$(".scheduler-interval-select").forEach(sel => {
+        sel.addEventListener("change", async () => {
+            const jobKey = sel.dataset.job;
+            const intervalMinutes = parseInt(sel.value, 10);
+            const status = $(`.scheduler-interval-status[data-job="${jobKey}"]`);
+            status.textContent = "Guardando...";
+            status.style.color = "var(--text-dim)";
+            try {
+                const resp = await fetch("/api/admin/scheduler-config", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ job_key: jobKey, interval_minutes: intervalMinutes }),
+                });
+                if (resp.ok) {
+                    status.textContent = "Guardado";
+                    status.style.color = "#0d9488";
+                    setTimeout(() => { status.textContent = ""; }, 2000);
                 } else {
                     const err = await resp.json();
                     status.textContent = err.error || "Error";

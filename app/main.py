@@ -128,7 +128,10 @@ def _serve_html(filename: str) -> HTMLResponse:
         filepath = os.path.join(STATIC_DIR, filename)
         raw = Path(filepath).read_text(encoding="utf-8")
         _HTML_CACHE[filename] = _bust_cache(raw) if _ASSET_HASHES else raw
-    return HTMLResponse(_HTML_CACHE[filename])
+    return HTMLResponse(
+        _HTML_CACHE[filename],
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -936,7 +939,30 @@ async def terms_page():
 
 # ── Static files ─────────────────────────────────────────────────────────
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+_STATIC_CACHE_HEADER = b"public, max-age=31536000, immutable"
+
+
+class _CacheStaticMiddleware:
+    """Wrap StaticFiles to add aggressive Cache-Control for hashed assets."""
+
+    def __init__(self, app_inner):
+        self.app_inner = app_inner
+
+    async def __call__(self, scope, receive, send):
+        async def send_with_cache(message):
+            if message["type"] == "http.response.start":
+                headers = [
+                    (k, v) for k, v in message.get("headers", [])
+                    if k.lower() != b"cache-control"
+                ]
+                headers.append((b"cache-control", _STATIC_CACHE_HEADER))
+                message = {**message, "headers": headers}
+            await send(message)
+        await self.app_inner(scope, receive, send_with_cache)
+
+
+_static_app = StaticFiles(directory=STATIC_DIR)
+app.mount("/static", _CacheStaticMiddleware(_static_app), name="static")
 
 
 @app.get("/")

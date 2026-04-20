@@ -279,6 +279,113 @@ class TestCallAiFallback:
         assert provider == "Gemini"
 
 
+class TestCallAiErrorLogging:
+    """Both provider paths MUST persist errors to ai_usage_log.
+
+    Regression: the final Groq call in the fallback arm was not wrapped
+    in try/except, so 429 / quota errors silently bubbled up without
+    leaving a row in ``ai_usage_log`` and the admin monitor kept showing
+    Groq as "Operativo" with 100% success.
+    """
+
+    def _capture_log(self, monkeypatch):
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "app.ai_search.log_ai_usage", lambda **kw: calls.append(kw),
+        )
+        return calls
+
+    async def test_logs_groq_error_when_used_as_gemini_fallback(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.ai_search.get_provider_config",
+            lambda: {et: "gemini_fallback_groq" for et in
+                     ("search", "search_prefetch", "topics", "weekly_summary", "top_story")},
+        )
+        calls = self._capture_log(monkeypatch)
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+
+        async def _gemini_fail(*a, **kw):
+            raise RuntimeError("Gemini down")
+
+        mock_gemini = MagicMock()
+        mock_gemini.aio.models.generate_content = _gemini_fail
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        mock_groq = AsyncMock()
+        mock_groq.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("429 rate limit exceeded"),
+        )
+        monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
+
+        with pytest.raises(RuntimeError, match="429 rate limit"):
+            await _call_ai("test prompt", event_type="topics")
+
+        providers_logged = [(c["provider"], c["success"]) for c in calls]
+        assert ("gemini", False) in providers_logged
+        assert ("groq", False) in providers_logged
+        groq_err = next(
+            c for c in calls if c["provider"] == "groq" and c["success"] is False
+        )
+        assert "429" in (groq_err.get("error_message") or "")
+
+    async def test_logs_groq_error_when_groq_only_mode(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.ai_search.get_provider_config",
+            lambda: {et: "groq" for et in
+                     ("search", "search_prefetch", "topics", "weekly_summary", "top_story")},
+        )
+        calls = self._capture_log(monkeypatch)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr("app.ai_search._gemini_client", None)
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+
+        mock_groq = AsyncMock()
+        mock_groq.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("429 tokens per day exceeded"),
+        )
+        monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
+
+        with pytest.raises(RuntimeError, match="429"):
+            await _call_ai("test prompt", event_type="topics")
+
+        groq_errors = [c for c in calls if c["provider"] == "groq" and c["success"] is False]
+        assert len(groq_errors) == 1
+        assert "429" in (groq_errors[0].get("error_message") or "")
+
+    async def test_logs_gemini_error_when_used_as_groq_fallback(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.ai_search.get_provider_config",
+            lambda: {et: "groq_fallback_gemini" for et in
+                     ("search", "search_prefetch", "topics", "weekly_summary", "top_story")},
+        )
+        calls = self._capture_log(monkeypatch)
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+
+        mock_groq = AsyncMock()
+        mock_groq.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("Groq primary down"),
+        )
+        monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
+
+        async def _gemini_fail(*a, **kw):
+            raise RuntimeError("Gemini fallback also down")
+
+        mock_gemini = MagicMock()
+        mock_gemini.aio.models.generate_content = _gemini_fail
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        with pytest.raises(RuntimeError):
+            await _call_ai("test prompt", event_type="topics")
+
+        providers_logged = [(c["provider"], c["success"]) for c in calls]
+        assert ("groq", False) in providers_logged
+        assert ("gemini", False) in providers_logged
+
+
 class TestAiNewsSearch:
     async def test_returns_unavailable_without_api_key(self, sample_groups, monkeypatch):
         _no_ai(monkeypatch)

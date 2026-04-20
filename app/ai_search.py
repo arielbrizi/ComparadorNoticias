@@ -42,6 +42,12 @@ GEMINI_TIMEOUT = 30
 _rate_limit_until: float = 0
 
 
+def get_rate_limit_state() -> dict:
+    """Return current Gemini rate-limit cooldown state."""
+    remaining = max(0.0, _rate_limit_until - time.time())
+    return {"active": remaining > 0, "seconds_remaining": int(remaining)}
+
+
 def _get_gemini_client() -> genai.Client | None:
     global _gemini_client
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -264,9 +270,13 @@ async def _call_ai(
             logger.warning("Groq failed (%s), falling back to Gemini", exc)
             t0 = time.time()
 
-        text, in_tok, out_tok = await _call_gemini(prompt, timeout=timeout)
-        _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
-        return text, "Gemini"
+        try:
+            text, in_tok, out_tok = await _call_gemini(prompt, timeout=timeout)
+            _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
+            return text, "Gemini"
+        except Exception as exc:
+            _log_error(event_type, "gemini", GEMINI_MODEL, t0, exc)
+            raise
 
     if use_gemini:
         try:
@@ -280,9 +290,13 @@ async def _call_ai(
             logger.warning("Gemini failed (%s), falling back to Groq", exc)
             t0 = time.time()
 
-    text, in_tok, out_tok = await _call_groq(prompt, timeout=min(timeout, 60))
-    _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
-    return text, "Groq"
+    try:
+        text, in_tok, out_tok = await _call_groq(prompt, timeout=min(timeout, 60))
+        _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
+        return text, "Groq"
+    except Exception as exc:
+        _log_error(event_type, "groq", GROQ_MODEL, t0, exc)
+        raise
 
 
 def _log_success(
@@ -455,9 +469,13 @@ async def _call_ai_search(
             logger.warning("Groq failed (%s), falling back to Gemini", exc)
             t0 = time.time()
 
-        text, in_tok, out_tok = await _call_gemini(prompt, timeout=GEMINI_TIMEOUT)
-        _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
-        return text, "Gemini"
+        try:
+            text, in_tok, out_tok = await _call_gemini(prompt, timeout=GEMINI_TIMEOUT)
+            _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
+            return text, "Gemini"
+        except Exception as exc:
+            _log_error(event_type, "gemini", GEMINI_MODEL, t0, exc)
+            raise
 
     if use_gemini:
         try:
@@ -471,9 +489,13 @@ async def _call_ai_search(
             logger.warning("Gemini failed (%s), falling back to Groq", exc)
             t0 = time.time()
 
-    text, in_tok, out_tok = await _call_groq(_build_groq_prompt(), timeout=60)
-    _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
-    return text, "Groq"
+    try:
+        text, in_tok, out_tok = await _call_groq(_build_groq_prompt(), timeout=60)
+        _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
+        return text, "Groq"
+    except Exception as exc:
+        _log_error(event_type, "groq", GROQ_MODEL, t0, exc)
+        raise
 
 
 # ── Trending topics ──────────────────────────────────────────────────────

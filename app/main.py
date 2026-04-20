@@ -33,6 +33,9 @@ from app.ai_search import (
     ai_topics,
     ai_top_story,
     ai_weekly_summary,
+    get_rate_limit_state,
+    GEMINI_MODEL,
+    GROQ_MODEL,
     is_public_topic_query,
     is_topstory_cache_valid,
     is_topics_cache_valid,
@@ -45,6 +48,8 @@ from app.ai_store import (
     init_ai_tables,
     query_ai_cost_summary,
     query_ai_daily_cost,
+    query_provider_health,
+    query_recent_ai_calls,
     set_provider_config,
     set_schedule_config,
     set_scheduler_interval,
@@ -825,6 +830,77 @@ async def admin_ai_config_get(_admin: dict = Depends(require_admin)):
         "schedule": schedule,
         "valid_providers": sorted(VALID_PROVIDERS),
         "valid_event_types": sorted(VALID_EVENT_TYPES),
+    }
+
+
+def _build_provider_status(provider_key: str, model: str) -> dict:
+    """Build a health snapshot for a single AI provider.
+
+    Combines env-var presence, the in-memory Gemini rate-limit cooldown
+    and recent rows from ``ai_usage_log`` to derive a traffic-light status.
+    """
+    env_key = "GEMINI_API_KEY" if provider_key == "gemini" else "GROQ_API_KEY"
+    configured = bool(os.environ.get(env_key))
+    health = query_provider_health(provider_key)
+
+    rate_limit = {"active": False, "seconds_remaining": 0}
+    if provider_key == "gemini":
+        rate_limit = get_rate_limit_state()
+
+    last_success = health.get("last_success")
+    last_error = health.get("last_error")
+    recent_calls = health.get("recent_calls", 0) or 0
+    recent_success = health.get("recent_success_count", 0) or 0
+    success_rate = (recent_success / recent_calls) if recent_calls else None
+    errors_last_window = health.get("errors_last_window", 0) or 0
+
+    def _is_newer(a: dict | None, b: dict | None) -> bool:
+        if not a:
+            return False
+        if not b:
+            return True
+        return (a.get("created_at") or "") > (b.get("created_at") or "")
+
+    last_call_was_error = _is_newer(last_error, last_success)
+
+    if not configured:
+        status = "red"
+    elif rate_limit["active"]:
+        status = "red"
+    elif last_call_was_error:
+        status = "red"
+    elif success_rate is not None and success_rate < 0.8:
+        status = "amber"
+    elif errors_last_window > 0:
+        status = "amber"
+    else:
+        status = "green"
+
+    return {
+        "provider": provider_key,
+        "model": model,
+        "configured": configured,
+        "status": status,
+        "rate_limit_active": rate_limit["active"],
+        "rate_limit_seconds_remaining": rate_limit["seconds_remaining"],
+        "last_success": last_success,
+        "last_error": last_error,
+        "recent_calls": recent_calls,
+        "recent_success_count": recent_success,
+        "success_rate": round(success_rate, 4) if success_rate is not None else None,
+        "errors_last_window": errors_last_window,
+    }
+
+
+@app.get("/api/admin/ai-monitor")
+async def admin_ai_monitor(_admin: dict = Depends(require_admin)):
+    """Live AI-provider health snapshot plus the 5 most recent invocations."""
+    return {
+        "providers": [
+            _build_provider_status("gemini", GEMINI_MODEL),
+            _build_provider_status("groq", GROQ_MODEL),
+        ],
+        "recent_calls": query_recent_ai_calls(limit=5),
     }
 
 

@@ -24,6 +24,7 @@ const _barColors = ["blue", "teal", "purple", "orange", "pink"];
 
 let _dateRange = "7d";
 let _activeTab = "general";
+let _aiMonitorTimer = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
     const resp = await fetch("/auth/me");
@@ -115,6 +116,17 @@ function loadAll() {
         loadSchedulerConfig();
     } else {
         loadAnonymousDashboard(desde, hasta);
+    }
+    updateAIMonitorTimer();
+}
+
+function updateAIMonitorTimer() {
+    if (_aiMonitorTimer) {
+        clearInterval(_aiMonitorTimer);
+        _aiMonitorTimer = null;
+    }
+    if (_activeTab === "ai") {
+        _aiMonitorTimer = setInterval(loadAIMonitor, 20000);
     }
 }
 
@@ -480,6 +492,7 @@ function fmtTokens(n) {
 }
 
 async function loadAIDashboard(desde, hasta) {
+    loadAIMonitor();
     try {
         const now = new Date();
         const mesDesde = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
@@ -832,6 +845,146 @@ function renderSchedulerConfig(config, validIntervals) {
     });
 }
 
+// ── AI monitor (provider status + recent calls) ─────────────────────────
+
+const _providerDisplayNames = {
+    gemini: "Gemini",
+    groq: "Groq",
+};
+
+const _statusLabels = {
+    green: "Operativo",
+    amber: "Con avisos",
+    red: "Con problemas",
+};
+
+async function loadAIMonitor() {
+    try {
+        const resp = await fetch("/api/admin/ai-monitor");
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderAIMonitorProviders(data.providers || []);
+        renderAIMonitorRecent(data.recent_calls || []);
+    } catch (err) {
+        console.error("AI monitor load failed:", err);
+        const providers = $("#ai-monitor-providers");
+        if (providers) {
+            providers.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error al cargar estado de proveedores</div>`;
+        }
+    }
+}
+
+function renderAIMonitorProviders(providers) {
+    const container = $("#ai-monitor-providers");
+    if (!container) return;
+    if (!providers.length) {
+        container.innerHTML = `<div class="admin-empty">Sin proveedores configurados</div>`;
+        return;
+    }
+
+    container.innerHTML = providers.map(p => {
+        const name = _providerDisplayNames[p.provider] || p.provider;
+        const statusClass = p.status || "amber";
+        const statusLabel = _statusLabels[statusClass] || statusClass;
+
+        const rows = [];
+
+        if (!p.configured) {
+            rows.push(_row("API key", "No configurada", "#dc2626"));
+        } else {
+            rows.push(_row("API key", "Configurada"));
+        }
+
+        if (p.rate_limit_active) {
+            rows.push(_row("Rate limit", `Cooldown ${p.rate_limit_seconds_remaining}s`, "#dc2626"));
+        }
+
+        if (p.recent_calls > 0) {
+            const rate = p.success_rate != null ? `${Math.round(p.success_rate * 100)}%` : "—";
+            rows.push(_row("Éxito reciente", `${rate} (${p.recent_success_count}/${p.recent_calls})`));
+        } else {
+            rows.push(_row("Éxito reciente", "Sin datos"));
+        }
+
+        if (p.errors_last_window > 0) {
+            rows.push(_row("Errores 24h", String(p.errors_last_window), "#dc2626"));
+        }
+
+        if (p.last_success) {
+            const when = formatDatetimeART(p.last_success.created_at);
+            const ev = _eventLabels[p.last_success.event_type] || p.last_success.event_type;
+            rows.push(_row("Último OK", `${when} · ${ev}`));
+        } else {
+            rows.push(_row("Último OK", "Nunca"));
+        }
+
+        let errorBlock = "";
+        if (p.last_error) {
+            const when = formatDatetimeART(p.last_error.created_at);
+            const ev = _eventLabels[p.last_error.event_type] || p.last_error.event_type;
+            const msg = escHtml(p.last_error.error_message || "(sin mensaje)");
+            errorBlock = `
+                <div class="admin-provider-error" title="${msg}">
+                    <div style="font-weight:600;margin-bottom:0.2rem">Último error · ${escHtml(when)} · ${escHtml(ev)}</div>
+                    <div>${msg}</div>
+                </div>`;
+        } else if (p.configured) {
+            errorBlock = `<div class="admin-provider-ok">Sin errores registrados</div>`;
+        }
+
+        return `
+            <div class="admin-provider-card">
+                <div class="admin-provider-head">
+                    <div>
+                        <div class="admin-provider-name">${escHtml(name)}</div>
+                        <div class="admin-provider-model">${escHtml(p.model || "")}</div>
+                    </div>
+                    <span class="admin-provider-pill ${statusClass}">${escHtml(statusLabel)}</span>
+                </div>
+                ${rows.join("")}
+                ${errorBlock}
+            </div>`;
+    }).join("");
+}
+
+function _row(label, value, valueColor) {
+    const style = valueColor ? ` style="color:${valueColor}"` : "";
+    return `<div class="admin-provider-row"><span class="label">${escHtml(label)}</span><span class="value"${style}>${escHtml(value)}</span></div>`;
+}
+
+function renderAIMonitorRecent(calls) {
+    const container = $("#ai-monitor-recent");
+    if (!container) return;
+    if (!calls.length) {
+        container.innerHTML = `<div class="admin-empty">No se registraron invocaciones todavía</div>`;
+        return;
+    }
+    const rows = calls.map(c => {
+        const ev = _eventLabels[c.event_type] || c.event_type;
+        const statusCell = c.success
+            ? `<span class="admin-badge admin-badge-admin" style="background:rgba(13,148,136,0.15);color:#0d9488">OK</span>`
+            : `<span class="admin-badge" style="background:rgba(220,38,38,0.15);color:#dc2626">ERROR</span>`;
+        const detail = c.success
+            ? `${fmtTokens(c.input_tokens)} → ${fmtTokens(c.output_tokens)} · ${c.latency_ms || 0}ms`
+            : escHtml((c.error_message || "(sin mensaje)")).slice(0, 200);
+        return `
+            <tr>
+                <td style="white-space:nowrap">${escHtml(formatDatetimeART(c.created_at))}</td>
+                <td>${escHtml(ev)}</td>
+                <td><span class="admin-badge ${c.provider === "gemini" ? "admin-badge-admin" : "admin-badge-user"}">${escHtml(c.provider)}</span></td>
+                <td>${statusCell}</td>
+                <td style="font-size:0.72rem;color:var(--text-dim);word-break:break-word">${detail}</td>
+            </tr>`;
+    }).join("");
+
+    container.innerHTML = `
+        <table class="admin-table">
+            <thead><tr><th>Cuándo</th><th>Evento</th><th>Provider</th><th>Estado</th><th>Detalle</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+}
+
 // ── Shared rendering ────────────────────────────────────────────────────
 
 function renderBarChart(containerId, items, colorClass) {
@@ -874,13 +1027,40 @@ function formatDay(iso) {
     }
 }
 
+// ARG tz is forced in render options so the admin panel shows the same time
+// regardless of the browser's local timezone (e.g. UTC on a remote dev box).
+const _ARG_TZ = "America/Argentina/Buenos_Aires";
+const _FMT_OPTS = {
+    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+    timeZone: _ARG_TZ,
+};
+
+// For timestamps stored as UTC-naive (user_store, tracking_store): append "Z"
+// so the JS Date parses as UTC, then render in ARG.
 function formatDatetime(iso) {
     if (!iso) return "-";
     try {
         const raw = iso.includes("T") && !iso.includes("Z") && !iso.includes("+") ? iso + "Z" : iso;
         const d = new Date(raw);
         if (isNaN(d.getTime())) return iso;
-        return d.toLocaleString("es-AR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+        return d.toLocaleString("es-AR", _FMT_OPTS);
+    } catch {
+        return iso;
+    }
+}
+
+// For timestamps stored as ARG-naive (ai_store uses datetime.now(ART)):
+// append the ARG offset so JS parses them correctly, then render in ARG.
+function formatDatetimeART(iso) {
+    if (!iso) return "-";
+    try {
+        let raw = iso;
+        if (iso.includes("T") && !iso.includes("Z") && !/[+-]\d{2}:?\d{2}$/.test(iso)) {
+            raw = iso + "-03:00";
+        }
+        const d = new Date(raw);
+        if (isNaN(d.getTime())) return iso;
+        return d.toLocaleString("es-AR", _FMT_OPTS);
     } catch {
         return iso;
     }

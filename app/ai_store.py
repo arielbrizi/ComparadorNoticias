@@ -387,6 +387,123 @@ def _date_expr() -> str:
     return "LEFT(created_at, 10)" if is_postgres() else "SUBSTR(created_at, 1, 10)"
 
 
+def query_recent_ai_calls(limit: int = 5) -> list[dict]:
+    """Return the most recent ``limit`` rows from ``ai_usage_log``.
+
+    Used by the admin "AI monitor" panel to show the last invocations
+    (event, provider, tokens, latency, success/error) at a glance.
+    """
+    limit = max(1, min(limit, 50))
+    try:
+        with get_conn() as conn:
+            rows = query(
+                conn,
+                """SELECT id, event_type, provider, model, input_tokens, output_tokens,
+                          cost_total, latency_ms, success, error_message, created_at
+                     FROM ai_usage_log
+                     ORDER BY id DESC
+                     LIMIT ?""",
+                (limit,),
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("query_recent_ai_calls failed: %s", exc)
+        return []
+
+    return [
+        {
+            "id": r["id"],
+            "event_type": r["event_type"],
+            "provider": r["provider"],
+            "model": r["model"],
+            "input_tokens": r["input_tokens"],
+            "output_tokens": r["output_tokens"],
+            "cost_total": round(r["cost_total"], 6),
+            "latency_ms": r["latency_ms"],
+            "success": bool(r["success"]),
+            "error_message": r["error_message"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
+
+
+def query_provider_health(
+    provider: str, window_hours: int = 24, recent_n: int = 20,
+) -> dict:
+    """Return health snapshot for a single provider.
+
+    - ``last_success`` / ``last_error``: most recent timestamps and context.
+    - ``recent_calls`` / ``recent_success_count``: success rate across the
+      last ``recent_n`` calls (regardless of window).
+    - ``errors_last_window``: error count in the last ``window_hours`` hours.
+    """
+    cutoff = (datetime.now(ART) - timedelta(hours=window_hours)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    try:
+        with get_conn() as conn:
+            last_success = query(
+                conn,
+                """SELECT event_type, created_at FROM ai_usage_log
+                    WHERE provider = ? AND success = 1
+                    ORDER BY id DESC LIMIT 1""",
+                (provider,),
+            ).fetchone()
+
+            last_error = query(
+                conn,
+                """SELECT event_type, error_message, created_at FROM ai_usage_log
+                    WHERE provider = ? AND success = 0
+                    ORDER BY id DESC LIMIT 1""",
+                (provider,),
+            ).fetchone()
+
+            recent_rows = query(
+                conn,
+                """SELECT success FROM ai_usage_log
+                    WHERE provider = ?
+                    ORDER BY id DESC LIMIT ?""",
+                (provider, recent_n),
+            ).fetchall()
+
+            errors_window = query(
+                conn,
+                """SELECT COUNT(*) as c FROM ai_usage_log
+                    WHERE provider = ? AND success = 0 AND created_at >= ?""",
+                (provider, cutoff),
+            ).fetchone()
+    except Exception as exc:
+        logger.warning("query_provider_health(%s) failed: %s", provider, exc)
+        return {
+            "last_success": None,
+            "last_error": None,
+            "recent_calls": 0,
+            "recent_success_count": 0,
+            "errors_last_window": 0,
+        }
+
+    recent_calls = len(recent_rows)
+    success_count = sum(1 for r in recent_rows if r["success"])
+
+    return {
+        "last_success": (
+            {"event_type": last_success["event_type"], "created_at": last_success["created_at"]}
+            if last_success else None
+        ),
+        "last_error": (
+            {
+                "event_type": last_error["event_type"],
+                "error_message": (last_error["error_message"] or "")[:240],
+                "created_at": last_error["created_at"],
+            }
+            if last_error else None
+        ),
+        "recent_calls": recent_calls,
+        "recent_success_count": success_count,
+        "errors_last_window": errors_window["c"] if errors_window else 0,
+    }
+
+
 def query_ai_cost_summary(
     desde: str | None = None, hasta: str | None = None,
 ) -> dict:

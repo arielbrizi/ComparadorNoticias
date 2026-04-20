@@ -145,6 +145,44 @@
         .admin-kpi-ratio.high { background: rgba(234,88,12,0.15); color: #ea580c; }
         .admin-kpi-ratio.mid  { background: rgba(13,148,136,0.15); color: #0d9488; }
         .admin-kpi-ratio.low  { background: rgba(64,136,199,0.15); color: #4088c7; }
+
+        /* AI monitor: provider cards + traffic light */
+        .admin-monitor-providers {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.9rem;
+        }
+        .admin-provider-card {
+            background: rgba(255,255,255,0.02); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 0.9rem 1rem;
+            display: flex; flex-direction: column; gap: 0.45rem;
+        }
+        .admin-provider-head {
+            display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+        }
+        .admin-provider-name { font-size: 0.9rem; font-weight: 600; color: var(--text); }
+        .admin-provider-model { font-size: 0.7rem; color: var(--text-dim); font-family: ui-monospace, monospace; }
+        .admin-provider-pill {
+            font-size: 0.68rem; font-weight: 600; padding: 0.18rem 0.55rem; border-radius: 999px;
+            display: inline-flex; align-items: center; gap: 0.35rem;
+        }
+        .admin-provider-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+        .admin-provider-pill.green { background: rgba(13,148,136,0.15); color: #0d9488; }
+        .admin-provider-pill.green::before { background: #0d9488; box-shadow: 0 0 8px rgba(13,148,136,0.5); }
+        .admin-provider-pill.amber { background: rgba(234,179,8,0.15); color: #eab308; }
+        .admin-provider-pill.amber::before { background: #eab308; box-shadow: 0 0 8px rgba(234,179,8,0.5); }
+        .admin-provider-pill.red   { background: rgba(220,38,38,0.15); color: #dc2626; }
+        .admin-provider-pill.red::before { background: #dc2626; box-shadow: 0 0 8px rgba(220,38,38,0.5); }
+
+        .admin-provider-row { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.75rem; }
+        .admin-provider-row .label { color: var(--text-dim); }
+        .admin-provider-row .value { color: var(--text); text-align: right; max-width: 65%; word-break: break-word; }
+        .admin-provider-error {
+            font-size: 0.7rem; color: #fca5a5; background: rgba(220,38,38,0.08);
+            border: 1px solid rgba(220,38,38,0.25); border-radius: 6px; padding: 0.4rem 0.55rem;
+            line-height: 1.35; word-break: break-word;
+        }
+        .admin-provider-ok {
+            font-size: 0.7rem; color: var(--text-dim);
+        }
     </style>
 </head>
 <body>
@@ -482,6 +520,30 @@
             </h3>
             <p class="admin-card-desc">Cada cuánto se actualizan los RSS y se regeneran los temas.</p>
             <div id="scheduler-config-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
+    <!-- Provider status monitor -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                Estado de proveedores IA
+            </h3>
+            <p class="admin-card-desc">Si un proveedor quedó sin cupo, con cooldown por rate-limit o sin API key, lo vas a ver acá. Se refresca cada 20s.</p>
+            <div id="ai-monitor-providers" class="admin-monitor-providers"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
+    <!-- Recent AI invocations -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                Últimas invocaciones IA
+            </h3>
+            <p class="admin-card-desc">Últimas 5 llamadas a los proveedores, con tokens, latencia y el error exacto si falló.</p>
+            <div id="ai-monitor-recent"><div class="admin-loading"><div class="spinner"></div></div></div>
         </div>
     </div>
 

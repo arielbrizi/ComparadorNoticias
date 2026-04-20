@@ -414,7 +414,7 @@ class TestAiTopics:
         assert result["ai_available"] is False
 
     async def test_successful_generation_saves_last_good(self, sample_groups, monkeypatch):
-        """Successful topic generation should update _last_good_topics."""
+        """Successful topic generation with enough items should update _last_good_topics."""
         monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0, "generated_at": ""})
         monkeypatch.setattr("app.ai_search._search_cache", {})
         monkeypatch.setattr("app.ai_search._last_good_topics", {
@@ -422,7 +422,14 @@ class TestAiTopics:
         })
         monkeypatch.setattr("app.ai_search.save_last_good_topics", lambda *a, **kw: None)
 
-        topics_json = '{"topics":[{"label":"Dólar","emoji":"💵"},{"label":"Inflación","emoji":"📈"}]}'
+        topics_json = (
+            '{"topics":['
+            '{"label":"Dólar","emoji":"💵"},'
+            '{"label":"Inflación","emoji":"📈"},'
+            '{"label":"Elecciones","emoji":"🗳️"},'
+            '{"label":"Energía","emoji":"⚡"}'
+            ']}'
+        )
         _setup_ai_mock(monkeypatch, topics_json)
 
         created_tasks = []
@@ -437,10 +444,61 @@ class TestAiTopics:
         result = await ai_topics(sample_groups)
 
         assert result["ai_available"] is True
-        assert len(result["topics"]) == 2
+        assert len(result["topics"]) == 4
         assert mod._last_good_topics["topics"] == result["topics"]
         assert mod._last_good_topics["ai_provider"] == "Gemini"
         assert mod._last_good_topics["generated_at"] == result["generated_at"]
+
+        for task in created_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def test_degraded_run_does_not_overwrite_last_good(self, sample_groups, monkeypatch):
+        """If AI returns fewer than MIN_LAST_GOOD_TOPICS, keep the previous
+        last-good cache so a single bad run doesn't lock in a degraded fallback."""
+        monkeypatch.setattr("app.ai_search._topics_cache", {"topics": [], "ts": 0, "generated_at": ""})
+        monkeypatch.setattr("app.ai_search._search_cache", {})
+
+        previous_good = [
+            {"label": "Dólar", "emoji": "💵"},
+            {"label": "Inflación", "emoji": "📈"},
+            {"label": "Elecciones", "emoji": "🗳️"},
+            {"label": "Energía", "emoji": "⚡"},
+        ]
+        monkeypatch.setattr("app.ai_search._last_good_topics", {
+            "topics": list(previous_good),
+            "ai_provider": "Gemini",
+            "generated_at": "2026-04-13T10:00:00+00:00",
+        })
+
+        saved_calls = []
+        monkeypatch.setattr(
+            "app.ai_search.save_last_good_topics",
+            lambda topics, provider, generated_at: saved_calls.append(topics),
+        )
+
+        degraded_json = '{"topics":[{"label":"Solo","emoji":"1️⃣"},{"label":"Dos","emoji":"2️⃣"}]}'
+        _setup_ai_mock(monkeypatch, degraded_json)
+
+        created_tasks = []
+        original_create_task = asyncio.create_task
+        def _spy(coro):
+            task = original_create_task(coro)
+            created_tasks.append(task)
+            return task
+        monkeypatch.setattr("app.ai_search.asyncio.create_task", _spy)
+
+        import app.ai_search as mod
+        result = await ai_topics(sample_groups)
+
+        assert len(result["topics"]) == 2
+        assert mod._last_good_topics["topics"] == previous_good
+        assert mod._last_good_topics["ai_provider"] == "Gemini"
+        assert mod._last_good_topics["generated_at"] == "2026-04-13T10:00:00+00:00"
+        assert saved_calls == []
 
         for task in created_tasks:
             task.cancel()

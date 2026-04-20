@@ -93,12 +93,63 @@ async def client(tmp_path, monkeypatch):
         yield c
 
 
-class TestApiSearchNoAI:
-    async def test_search_without_api_keys(self, client):
-        resp = await client.get("/api/search?q=inflación")
+@pytest_asyncio.fixture
+async def auth_client(client):
+    """Client fixture with a logged-in user injected via dependency_overrides.
+
+    Search endpoints require login for free-form queries; use this client
+    whenever a test needs to bypass the paywall as an authenticated user.
+    """
+    from app import main
+    from app.auth import get_current_user
+
+    fake_user = {
+        "id": "u-test",
+        "email": "tester@vsnews.io",
+        "name": "Tester",
+        "picture": "",
+        "role": "user",
+    }
+    main.app.dependency_overrides[get_current_user] = lambda: fake_user
+    try:
+        yield client
+    finally:
+        main.app.dependency_overrides.pop(get_current_user, None)
+
+
+class TestApiSearchPaywall:
+    """Free-form /api/search requires login; topic-label queries stay public."""
+
+    async def test_anon_freeform_returns_401(self, client, monkeypatch):
+        from app import main
+
+        monkeypatch.setattr(main, "is_public_topic_query", lambda q: False)
+
+        resp = await client.get("/api/search?q=algún tema libre")
+        assert resp.status_code == 401
+        data = resp.json()
+        assert data.get("error") == "login_required"
+        assert data.get("ai_available") is False
+
+    async def test_anon_topic_query_allowed(self, client, monkeypatch):
+        from app import main
+
+        monkeypatch.setattr(main, "is_public_topic_query", lambda q: True)
+
+        resp = await client.get("/api/search?q=Dólar y mercados")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["ai_available"] is False
+        assert data.get("ai_available") is False
+
+    async def test_logged_in_bypasses_paywall(self, auth_client, monkeypatch):
+        from app import main
+
+        monkeypatch.setattr(main, "is_public_topic_query", lambda q: False)
+
+        resp = await auth_client.get("/api/search?q=cualquier tema libre")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("ai_available") is False
 
     async def test_search_query_too_short(self, client):
         resp = await client.get("/api/search?q=a")
@@ -111,7 +162,7 @@ class TestApiSearchFallbackSummary:
     one based on the matched article titles."""
 
     async def test_overrides_summary_when_ai_says_no_but_db_finds_matches(
-        self, client, monkeypatch,
+        self, auth_client, monkeypatch,
     ):
         from app import main
         from app.news_store import save_articles_and_groups
@@ -129,7 +180,7 @@ class TestApiSearchFallbackSummary:
 
         monkeypatch.setattr(main, "ai_news_search", _ai_says_nothing)
 
-        resp = await client.get("/api/search?q=dame los últimos detalles de la inflación")
+        resp = await auth_client.get("/api/search?q=dame los últimos detalles de la inflación")
         assert resp.status_code == 200
         data = resp.json()
 
@@ -141,7 +192,7 @@ class TestApiSearchFallbackSummary:
                    for g in data["matched_groups"])
 
     async def test_preserves_ai_summary_when_ai_finds_results(
-        self, client, monkeypatch,
+        self, auth_client, monkeypatch,
     ):
         from app import main
         from app.news_store import save_articles_and_groups
@@ -159,7 +210,7 @@ class TestApiSearchFallbackSummary:
 
         monkeypatch.setattr(main, "ai_news_search", _ai_says_yes)
 
-        resp = await client.get("/api/search?q=inflación")
+        resp = await auth_client.get("/api/search?q=inflación")
         data = resp.json()
         assert data["has_results"] is True
         assert "INDEC" in data["summary"]

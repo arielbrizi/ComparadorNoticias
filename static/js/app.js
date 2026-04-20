@@ -41,6 +41,8 @@ let state = {
         relevantIds: [],
         active: false,
         hasResults: true,
+        paywall: false,
+        pendingQuery: "",
     },
 };
 
@@ -882,7 +884,20 @@ function renderTopicChips() {
     }
 }
 
+function _isKnownTopicLabel(query) {
+    if (!_topicsCache || !query) return false;
+    const q = query.trim().toLowerCase();
+    return _topicsCache.some(t => (t.label || "").trim().toLowerCase() === q);
+}
+
 async function performAISearch(query) {
+    // Paywall: free-form queries require login. Curated "Temas del día"
+    // labels are public (the backend allows them too).
+    if (!state.user && !_isKnownTopicLabel(query)) {
+        _triggerSearchPaywall(query);
+        return;
+    }
+
     track("ai_search", { query });
     if (_aiSearchController) _aiSearchController.abort();
     _aiSearchController = new AbortController();
@@ -892,6 +907,7 @@ async function performAISearch(query) {
     state.aiSearch.loading = true;
     state.aiSearch.loadingHistory = false;
     state.aiSearch.active = false;
+    state.aiSearch.paywall = false;
     renderAIStatus();
     renderAISummary();
     renderGroups();
@@ -901,9 +917,17 @@ async function performAISearch(query) {
 
     try {
         const resp = await fetch(searchUrl, { signal });
-        const data = await resp.json();
 
         if (signal.aborted) return;
+
+        if (resp.status === 401) {
+            state.aiSearch.loading = false;
+            _aiSearchController = null;
+            _triggerSearchPaywall(query);
+            return;
+        }
+
+        const data = await resp.json();
 
         if (data.ai_available) {
             state.aiSearch.available = true;
@@ -940,6 +964,26 @@ async function performAISearch(query) {
     renderGroups();
 }
 
+function _triggerSearchPaywall(query) {
+    track("search_paywall_shown", { query });
+    if (_aiSearchController) { _aiSearchController.abort(); _aiSearchController = null; }
+
+    try { localStorage.setItem("pending_search", query); } catch { /* storage full or disabled */ }
+
+    state.searchQuery = (query || "").toLowerCase();
+    state.aiSearch.loading = false;
+    state.aiSearch.active = false;
+    state.aiSearch.available = null;
+    state.aiSearch.summary = "";
+    state.aiSearch.relevantIds = [];
+    state.aiSearch.paywall = true;
+    state.aiSearch.pendingQuery = query || "";
+
+    renderAIStatus();
+    renderAISummary();
+    renderSearchPaywall();
+}
+
 function _mergeMatchedGroups(matchedGroups) {
     const existingIds = new Set(state.groups.map(g => g.group_id));
     for (const g of matchedGroups) {
@@ -952,9 +996,105 @@ function _mergeMatchedGroups(matchedGroups) {
 
 function clearAISearch() {
     if (_aiSearchController) { _aiSearchController.abort(); _aiSearchController = null; }
-    state.aiSearch = { loading: false, loadingHistory: false, available: null, summary: "", relevantIds: [], active: false, hasResults: true, provider: "" };
+    state.aiSearch = {
+        loading: false, loadingHistory: false, available: null, summary: "",
+        relevantIds: [], active: false, hasResults: true, provider: "",
+        paywall: false, pendingQuery: "",
+    };
+    hideSearchPaywall();
     renderAIStatus();
     renderAISummary();
+}
+
+// ── Search paywall ──────────────────────────────────────────────────────
+function renderSearchPaywall() {
+    const grid = $("#news-grid");
+    if (!grid) return;
+
+    const query = state.aiSearch.pendingQuery || "";
+    const ghostCount = 6;
+    const ghostCards = Array.from({ length: ghostCount }).map((_, i) => `
+        <div class="news-card news-card-ghost" aria-hidden="true">
+            <div class="ghost-image"></div>
+            <div class="ghost-body">
+                <div class="ghost-badges">
+                    <span class="ghost-badge"></span>
+                    <span class="ghost-badge"></span>
+                    <span class="ghost-badge"></span>
+                </div>
+                <div class="ghost-line ghost-line-xl"></div>
+                <div class="ghost-line ghost-line-lg"></div>
+                <div class="ghost-line ghost-line-md"></div>
+                <div class="ghost-line ghost-line-sm"></div>
+            </div>
+        </div>
+    `).join("");
+
+    const paywallHtml = `
+        <div id="search-paywall" class="search-paywall" role="dialog" aria-labelledby="search-paywall-title">
+            <div class="search-paywall-card">
+                <div class="search-paywall-icon">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                    </svg>
+                    <span class="search-paywall-ai-badge">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l2 5.5L20 9l-5.5 2L12 17l-2.5-6L4 9l6-1.5z"/></svg>
+                        IA
+                    </span>
+                </div>
+                <h3 id="search-paywall-title" class="search-paywall-title">Iniciá sesión para ver los resultados</h3>
+                <p class="search-paywall-subtitle">
+                    La búsqueda con IA está disponible para usuarios registrados.
+                    <span class="search-paywall-free">Es gratis y toma 10 segundos.</span>
+                </p>
+                ${query ? `<div class="search-paywall-query">Tu búsqueda: <strong>${escHtml(query)}</strong></div>` : ""}
+                <a href="/auth/google/login" class="search-paywall-google" id="search-paywall-google">
+                    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+                    Continuar con Google
+                </a>
+                <button type="button" class="search-paywall-magic" id="search-paywall-magic">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                    Recibí un link por email
+                </button>
+                <p class="search-paywall-hint">Tu búsqueda se va a ejecutar automáticamente después de iniciar sesión.</p>
+            </div>
+        </div>
+    `;
+
+    grid.classList.add("news-grid-paywall");
+    grid.innerHTML = ghostCards + paywallHtml;
+
+    const googleBtn = $("#search-paywall-google");
+    if (googleBtn) {
+        googleBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            track("search_paywall_cta", { method: "google" });
+            try { localStorage.setItem("pending_search", state.aiSearch.pendingQuery || ""); } catch {}
+            window.location.replace("/auth/google/login");
+        });
+    }
+
+    const magicBtn = $("#search-paywall-magic");
+    if (magicBtn) {
+        magicBtn.addEventListener("click", () => {
+            track("search_paywall_cta", { method: "magic" });
+            try { localStorage.setItem("pending_search", state.aiSearch.pendingQuery || ""); } catch {}
+            openLoginModal();
+            setTimeout(() => {
+                const emailInput = $("#magic-email");
+                if (emailInput) emailInput.focus();
+            }, 50);
+        });
+    }
+}
+
+function hideSearchPaywall() {
+    const grid = $("#news-grid");
+    if (grid) grid.classList.remove("news-grid-paywall");
+    const el = $("#search-paywall");
+    if (el) el.remove();
+    $$(".news-card-ghost").forEach(c => c.remove());
 }
 
 function renderAISummary() {
@@ -1114,6 +1254,10 @@ function showToast(msg) {
 // ── Render Groups ─────────────────────────────────────────────────────────
 function renderGroups() {
     const grid = $("#news-grid");
+    if (state.aiSearch.paywall) {
+        renderSearchPaywall();
+        return;
+    }
     let groups = [...state.groups];
 
     if (state.category) {
@@ -1982,6 +2126,34 @@ async function initAuth() {
             localStorage.removeItem("pending_view");
             switchView(pending);
         }
+        const pendingSearch = localStorage.getItem("pending_search");
+        if (pendingSearch) {
+            localStorage.removeItem("pending_search");
+            const input = $("#hero-search-input");
+            if (input) {
+                input.value = pendingSearch;
+                const clearBtn = $("#hero-search-clear");
+                if (clearBtn) clearBtn.hidden = false;
+            }
+            performAISearch(pendingSearch);
+        }
+    } else {
+        // Anon user: if the input already has text (eg. typed before auth
+        // finished loading), keep the paywall state consistent.
+        updateSearchInputHint();
+    }
+}
+
+function updateSearchInputHint() {
+    const input = $("#hero-search-input");
+    const wrap = input?.closest(".hero-input-wrap");
+    if (!input || !wrap) return;
+    if (state.user) {
+        wrap.classList.remove("hero-input-wrap-locked");
+        input.placeholder = "Buscar temas, palabras clave, medios…";
+    } else {
+        wrap.classList.add("hero-input-wrap-locked");
+        input.placeholder = "Buscar con IA (iniciá sesión para buscar libremente)";
     }
 }
 
@@ -2092,6 +2264,7 @@ function renderAuthUI() {
         if (adminCard) adminCard.hidden = true;
         if (adminLink) adminLink.hidden = true;
     }
+    updateSearchInputHint();
 }
 
 function openLoginModal() {

@@ -33,6 +33,7 @@ from app.ai_search import (
     ai_topics,
     ai_top_story,
     ai_weekly_summary,
+    is_public_topic_query,
     is_topstory_cache_valid,
     is_topics_cache_valid,
     restore_last_good_topics,
@@ -530,12 +531,27 @@ async def get_metricas(
 @app.get("/api/search")
 async def ai_search(
     q: str = Query(..., min_length=2, description="Search query"),
+    user: dict | None = Depends(get_current_user),
 ):
     """Semantic search powered by AI (Gemini/Groq).
+
+    Free-form queries require a logged-in user. Anonymous requests are only
+    allowed when the query matches one of the day's curated topic labels
+    (the chips/suggestions UI), which are public by design.
 
     Searches ALL in-memory groups regardless of date so the AI can find
     articles from any day within the retention window.
     """
+    if not user and not is_public_topic_query(q):
+        return JSONResponse(
+            {
+                "error": "login_required",
+                "message": "Iniciá sesión para buscar",
+                "ai_available": False,
+            },
+            status_code=401,
+        )
+
     async with _lock:
         grps = list(_groups)
 

@@ -2774,7 +2774,106 @@ a.brand { text-decoration: none; color: inherit; cursor: pointer; }
     border: 1px dashed rgba(255,255,255,0.2);
 }
 
+/* ── Contact modal ─────────────────────────────────────────────────── */
+
+.contact-modal-content {
+    max-width: 420px;
+    padding: 2.2rem 1.8rem 1.8rem;
+    text-align: center;
+}
+
+.contact-modal-body { display: flex; flex-direction: column; align-items: center; }
+
+.contact-icon {
+    width: 56px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: rgba(88,166,255,0.12);
+    color: var(--accent);
+    margin-bottom: 1rem;
+}
+
+.contact-modal-title {
+    font-family: var(--font-serif);
+    font-size: 1.4rem;
+    font-weight: 700;
+    margin: 0 0 0.3rem;
+}
+
+.contact-modal-subtitle {
+    font-size: 0.88rem;
+    color: var(--text-dim);
+    margin: 0 0 1.4rem;
+    line-height: 1.5;
+}
+
+.contact-email-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.5rem;
+    width: 100%;
+    margin-bottom: 0.9rem;
+}
+
+.contact-email {
+    flex: 1;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text);
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    text-decoration: none;
+    text-align: center;
+    transition: border-color 0.2s, background 0.2s;
+    word-break: break-all;
+}
+.contact-email:hover { border-color: var(--accent); background: rgba(88,166,255,0.08); }
+
+.contact-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0 0.85rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-dim);
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+.contact-copy-btn:hover { color: var(--text); border-color: var(--accent); background: rgba(88,166,255,0.08); }
+.contact-copy-btn.copied { color: #6ecf96; border-color: rgba(45,106,79,0.4); background: rgba(45,106,79,0.12); }
+
+.contact-send-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.7rem 1.2rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--accent);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    text-decoration: none;
+    transition: opacity 0.2s;
+}
+.contact-send-btn:hover { opacity: 0.9; }
+
 @media (max-width: 600px) {
     .user-name { display: none; }
     .login-modal-content { padding: 2rem 1.2rem 1.5rem; }
+    .contact-modal-content { padding: 1.8rem 1.2rem 1.4rem; }
+    .contact-email-row { flex-direction: column; }
+    .contact-copy-btn { padding: 0.6rem 0.85rem; justify-content: center; }
 }

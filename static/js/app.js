@@ -53,6 +53,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupModal();
     setupHeroSearch();
     setupAuth();
+    setupContact();
     initAuth();
     loadDolarTicker();
     track("page_view", { view: initialView, initial: true });
@@ -2109,6 +2110,65 @@ function closeLoginModal() {
     }
     const statusEl = $("#magic-link-status");
     if (statusEl) statusEl.hidden = true;
+}
+
+// ── Contact modal ────────────────────────────────────────────────────────
+const CONTACT_EMAIL = "info@vsnews.io";
+
+function openContactModal() {
+    const modal = $("#contact-modal");
+    if (modal) {
+        modal.hidden = false;
+        document.body.style.overflow = "hidden";
+        track("contact_open", {});
+    }
+}
+
+function closeContactModal() {
+    const modal = $("#contact-modal");
+    if (modal) {
+        modal.hidden = true;
+        document.body.style.overflow = "";
+    }
+    const btn = $("#contact-copy-btn");
+    const label = $("#contact-copy-label");
+    if (btn) btn.classList.remove("copied");
+    if (label) label.textContent = "Copiar";
+}
+
+function setupContact() {
+    const link = $("#footer-contact-link");
+    const modal = $("#contact-modal");
+    const closeBtn = $("#contact-modal-close");
+    const copyBtn = $("#contact-copy-btn");
+    const copyLabel = $("#contact-copy-label");
+
+    if (link) link.addEventListener("click", (e) => {
+        e.preventDefault();
+        openContactModal();
+    });
+    if (closeBtn) closeBtn.addEventListener("click", () => closeContactModal());
+    if (modal) modal.addEventListener("click", (e) => {
+        if (e.target === modal) closeContactModal();
+    });
+
+    if (copyBtn) copyBtn.addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(CONTACT_EMAIL);
+            copyBtn.classList.add("copied");
+            if (copyLabel) copyLabel.textContent = "¡Copiado!";
+            setTimeout(() => {
+                copyBtn.classList.remove("copied");
+                if (copyLabel) copyLabel.textContent = "Copiar";
+            }, 1800);
+        } catch {
+            if (copyLabel) copyLabel.textContent = "Error";
+        }
+    });
+
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && modal && !modal.hidden) closeContactModal();
+    });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

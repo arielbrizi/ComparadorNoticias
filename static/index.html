@@ -363,8 +363,33 @@
 <footer class="site-footer">
     <p>Vs News — Datos obtenidos de feeds RSS públicos</p>
     <p class="footer-sources" id="footer-sources"></p>
-    <p class="footer-legal"><a href="https://www.vsnews.io/static/privacy.html">Política de Privacidad</a> · <a href="https://www.vsnews.io/static/terms.html">Términos de Servicio</a></p>
+    <p class="footer-legal"><a href="https://www.vsnews.io/static/privacy.html">Política de Privacidad</a> · <a href="https://www.vsnews.io/static/terms.html">Términos de Servicio</a> · <a href="#" id="footer-contact-link">Contacto</a></p>
 </footer>
+
+<!-- ── Contact Modal ──────────────────────────────────────────────────── -->
+<div id="contact-modal" class="modal-overlay" hidden>
+    <div class="modal-content contact-modal-content">
+        <button class="modal-close" id="contact-modal-close">&times;</button>
+        <div class="contact-modal-body">
+            <div class="contact-icon">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            </div>
+            <h2 class="contact-modal-title">Contactanos</h2>
+            <p class="contact-modal-subtitle">¿Consultas, sugerencias o reportes? Escribinos, te respondemos lo antes posible.</p>
+            <div class="contact-email-row">
+                <a href="mailto:info@vsnews.io" class="contact-email" id="contact-email">info@vsnews.io</a>
+                <button type="button" class="contact-copy-btn" id="contact-copy-btn" title="Copiar email">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    <span id="contact-copy-label">Copiar</span>
+                </button>
+            </div>
+            <a href="mailto:info@vsnews.io?subject=Consulta%20Vs%20News" class="contact-send-btn" id="contact-send-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                Enviar email
+            </a>
+        </div>
+    </div>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/wordcloud2.js/1.2.2/wordcloud2.min.js"></script>
 <script src="/static/js/app.js?v=22"></script>

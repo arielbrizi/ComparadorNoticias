@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from app.article_grouper import sort_groups
 from app.db import get_conn, query, execute, is_postgres
 from app.models import Article, ArticleGroup
+from app.search_utils import extract_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -307,33 +308,53 @@ def text_search_groups(
 ) -> list[ArticleGroup]:
     """Search articles/groups by title and summary using SQL LIKE.
 
-    Returns reconstructed ArticleGroup objects for matches, sorted by
-    source_count desc then published desc.
+    Extracts content-bearing keywords from the raw query (drops Spanish
+    stopwords like "de", "la", "últimos", "detalles", "dame"...) so natural
+    phrasings like "últimos detalles de la guerra" still match articles
+    containing "guerra". Groups are ranked by the number of keywords that
+    matched, descending.
     """
-    tokens = [t.strip() for t in search_text.split() if len(t.strip()) >= 2]
+    tokens = extract_keywords(search_text)
     if not tokens:
         return []
 
-    like_clauses: list[str] = []
-    params: list[str] = []
-    placeholder = "?" if not is_postgres() else "%s"
-    for token in tokens:
-        like_clauses.append(
+    placeholder = "?"
+    patterns = [f"%{t}%" for t in tokens]
+
+    score_exprs: list[str] = []
+    or_exprs: list[str] = []
+    for _ in tokens:
+        score_exprs.append(
+            f"MAX(CASE WHEN a.title LIKE {placeholder} "
+            f"OR a.summary LIKE {placeholder} THEN 1 ELSE 0 END)"
+        )
+        or_exprs.append(
             f"(a.title LIKE {placeholder} OR a.summary LIKE {placeholder})"
         )
-        pat = f"%{token}%"
-        params.extend([pat, pat])
 
-    where_sql = " AND ".join(like_clauses)
+    score_sql = " + ".join(score_exprs)
+    or_sql = " OR ".join(or_exprs)
+
+    params: list[str] = []
+    for p in patterns:
+        params.extend([p, p])
+    for p in patterns:
+        params.extend([p, p])
 
     with get_conn() as conn:
         rows = query(conn, f"""
-            SELECT DISTINCT a.group_id
+            SELECT a.group_id AS group_id,
+                   ({score_sql}) AS score,
+                   MAX(a.published) AS latest_pub
             FROM articles a
-            WHERE {where_sql} AND a.group_id IS NOT NULL AND a.group_id != ''
+            WHERE ({or_sql})
+              AND a.group_id IS NOT NULL
+              AND a.group_id != ''
+            GROUP BY a.group_id
+            ORDER BY score DESC, latest_pub DESC
         """, params).fetchall()
 
-    group_ids = [r["group_id"] for r in rows]
+    group_ids = [r["group_id"] for r in rows if r["score"] and int(r["score"]) > 0]
     if not group_ids:
         return []
 
@@ -401,7 +422,6 @@ def text_search_groups(
             articles=sorted(members, key=lambda a: a.source),
         ))
 
-    sort_groups(result)
     return result[:limit]
 
 

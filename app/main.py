@@ -52,6 +52,7 @@ from app.ai_store import (
     VALID_PROVIDERS,
     VALID_SCHEDULER_INTERVALS,
 )
+from app.search_utils import build_fallback_summary, extract_keywords
 from app.wordcloud import build_wordcloud
 from app.metrics_store import init_db, query_metrics, save_group_metrics
 from app.models import Article, ArticleGroup, FeedStatus
@@ -541,6 +542,7 @@ async def ai_search(
     by_id = {g.group_id: g for g in grps}
 
     result = await ai_news_search(q, grps)
+    ai_had_results = bool(result.get("has_results", False))
     ids = set(result.get("relevant_group_ids", []))
 
     if ids:
@@ -556,8 +558,17 @@ async def ai_search(
                 g.model_dump(mode="json")
             )
             result.setdefault("relevant_group_ids", []).append(g.group_id)
-    if result.get("matched_groups") and not result.get("has_results", False):
+
+    matched_groups = result.get("matched_groups", [])
+    if matched_groups and not ai_had_results:
         result["has_results"] = True
+        titles = [g.get("representative_title", "") for g in matched_groups]
+        fallback = build_fallback_summary(
+            titles, extract_keywords(q), total=len(matched_groups),
+        )
+        if fallback:
+            result["summary"] = fallback
+            result["summary_fallback"] = True
 
     return result
 

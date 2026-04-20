@@ -24,6 +24,11 @@ from app.ai_store import (
     save_last_good_topics,
 )
 from app.models import ArticleGroup
+from app.search_utils import (
+    extract_keywords,
+    normalized_query_key,
+    prioritize_groups_by_keywords,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +319,7 @@ def _log_error(
 
 SEARCH_PROMPT = """Sos un asistente de un comparador de noticias argentino llamado "Vs News".
 El usuario busca: "{query}"
+Palabras clave detectadas (ignorá stopwords como "últimos", "detalles", "dame", "status"): {keywords}
 
 Respondé ÚNICAMENTE con JSON válido (sin markdown, sin bloques de código), con este formato:
 {{
@@ -323,7 +329,9 @@ Respondé ÚNICAMENTE con JSON válido (sin markdown, sin bloques de código), c
 }}
 
 Reglas:
-- Incluí TODOS los grupos semánticamente relevantes, no solo los que mencionan las palabras exactas.
+- Tratá la consulta como lenguaje natural: lo que importa son las palabras clave, no la frase exacta.
+  Ejemplos: "últimos detalles de la guerra" → buscá "guerra"; "dame el status del dólar hoy" → buscá "dólar".
+- Incluí TODOS los grupos semánticamente relevantes a las palabras clave, aunque el título no las mencione literalmente.
 - Si la búsqueda es un nombre de medio (ej: "Clarín"), incluí todos los grupos donde aparece como fuente.
 - Si es un tema amplio (ej: "economía"), incluí todo lo relacionado.
 - El resumen debe ser informativo, neutral y basado SOLO en los títulos disponibles.
@@ -332,6 +340,13 @@ Reglas:
 
 Noticias disponibles:
 {context}"""
+
+
+def _format_keywords(query: str) -> str:
+    kws = extract_keywords(query)
+    if not kws:
+        return "(ninguna — usá la consulta tal cual)"
+    return ", ".join(kws)
 
 
 async def ai_news_search(
@@ -345,27 +360,38 @@ async def ai_news_search(
         return {"ai_available": False, "error": "API key not configured"}
 
     cache_key = query.strip().lower()
-    is_topic = cache_key in _get_cached_topic_labels()
+    norm_key = normalized_query_key(query)
+    topic_labels = _get_cached_topic_labels()
+    is_topic = cache_key in topic_labels or norm_key in topic_labels
 
-    if is_topic and cache_key in _search_cache:
-        cached = _search_cache[cache_key]
-        cached_ids = set(cached.get("relevant_group_ids", []))
-        if cached_ids:
-            current_ids = {g.group_id for g in groups}
-            if cached_ids & current_ids:
+    for lookup in (cache_key, norm_key):
+        if is_topic and lookup in _search_cache:
+            cached = _search_cache[lookup]
+            cached_ids = set(cached.get("relevant_group_ids", []))
+            if cached_ids:
+                current_ids = {g.group_id for g in groups}
+                if cached_ids & current_ids:
+                    logger.info("Search cache hit for topic: %s", query)
+                    return cached
+                logger.info(
+                    "Search cache stale for topic: %s (0/%d IDs match), refreshing",
+                    query, len(cached_ids),
+                )
+                del _search_cache[lookup]
+            else:
                 logger.info("Search cache hit for topic: %s", query)
                 return cached
-            logger.info("Search cache stale for topic: %s (0/%d IDs match), refreshing", query, len(cached_ids))
-            del _search_cache[cache_key]
-        else:
-            logger.info("Search cache hit for topic: %s", query)
-            return cached
 
-    context = _build_context(groups, max_groups=150)
-    prompt = SEARCH_PROMPT.format(query=query, context=context)
+    keywords = extract_keywords(query)
+    keywords_str = _format_keywords(query)
+    prioritized = prioritize_groups_by_keywords(groups, keywords)
+    context = _build_context(prioritized, max_groups=150)
+    prompt = SEARCH_PROMPT.format(query=query, keywords=keywords_str, context=context)
 
     try:
-        raw, provider = await _call_ai_search(prompt, query, groups, event_type=event_type)
+        raw, provider = await _call_ai_search(
+            prompt, query, prioritized, event_type=event_type,
+        )
         text = _clean_json_response(raw)
         result = json.loads(text)
         result["ai_available"] = True
@@ -405,12 +431,17 @@ async def _call_ai_search(
     t0 = time.time()
 
     def _build_groq_prompt() -> str:
-        prompt_overhead = len(SEARCH_PROMPT.format(query=query, context=""))
+        keywords_str = _format_keywords(query)
+        prompt_overhead = len(
+            SEARCH_PROMPT.format(query=query, keywords=keywords_str, context="")
+        )
         groq_context_budget = GROQ_MAX_PROMPT_CHARS - prompt_overhead - 100
         groq_context = _build_context(
             groups, max_groups=150, max_chars=max(groq_context_budget, 2000),
         )
-        return SEARCH_PROMPT.format(query=query, context=groq_context)
+        return SEARCH_PROMPT.format(
+            query=query, keywords=keywords_str, context=groq_context,
+        )
 
     if mode == "groq_fallback_gemini" and use_groq:
         try:

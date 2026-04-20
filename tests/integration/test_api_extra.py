@@ -105,6 +105,67 @@ class TestApiSearchNoAI:
         assert resp.status_code == 422
 
 
+class TestApiSearchFallbackSummary:
+    """When the AI says has_results=false but DB text search rescues matches,
+    the endpoint must overwrite the AI's negative summary with a templated
+    one based on the matched article titles."""
+
+    async def test_overrides_summary_when_ai_says_no_but_db_finds_matches(
+        self, client, monkeypatch,
+    ):
+        from app import main
+        from app.news_store import save_articles_and_groups
+
+        save_articles_and_groups(main._articles, main._groups)
+
+        async def _ai_says_nothing(query, groups, **kwargs):
+            return {
+                "ai_available": True,
+                "ai_provider": "Groq",
+                "summary": "No se encontraron resultados relevantes.",
+                "relevant_group_ids": [],
+                "has_results": False,
+            }
+
+        monkeypatch.setattr(main, "ai_news_search", _ai_says_nothing)
+
+        resp = await client.get("/api/search?q=dame los últimos detalles de la inflación")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["has_results"] is True
+        assert data.get("summary_fallback") is True
+        assert "No se encontraron" not in data["summary"]
+        assert "inflación" in data["summary"].lower()
+        assert any("inflación" in g["representative_title"].lower()
+                   for g in data["matched_groups"])
+
+    async def test_preserves_ai_summary_when_ai_finds_results(
+        self, client, monkeypatch,
+    ):
+        from app import main
+        from app.news_store import save_articles_and_groups
+
+        save_articles_and_groups(main._articles, main._groups)
+
+        async def _ai_says_yes(query, groups, **kwargs):
+            return {
+                "ai_available": True,
+                "ai_provider": "Gemini",
+                "summary": "El INDEC publicó la inflación mensual con suba del 3,5%.",
+                "relevant_group_ids": ["grp001"],
+                "has_results": True,
+            }
+
+        monkeypatch.setattr(main, "ai_news_search", _ai_says_yes)
+
+        resp = await client.get("/api/search?q=inflación")
+        data = resp.json()
+        assert data["has_results"] is True
+        assert "INDEC" in data["summary"]
+        assert data.get("summary_fallback") is not True
+
+
 class TestApiTopicsNoAI:
     async def test_topics_without_api_keys(self, client):
         resp = await client.get("/api/topics")

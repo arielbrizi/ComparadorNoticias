@@ -97,3 +97,48 @@ class TestNewsStore:
         save_articles_and_groups(sample_articles, sample_groups)
         results = text_search_groups("inflación", limit=1)
         assert len(results) <= 1
+
+    def test_text_search_strips_stopwords_in_phrase(
+        self, sample_articles, sample_groups,
+    ):
+        """Natural-language phrases must match on content-bearing keywords.
+
+        Before the fix, the SQL ANDed every token (incl. stopwords like
+        "de", "la", "últimos", "detalles") so phrases returned nothing.
+        """
+        save_articles_and_groups(sample_articles, sample_groups)
+        results = text_search_groups("dame los últimos detalles de la inflación")
+        assert len(results) >= 1
+        assert any("inflación" in g.representative_title.lower() for g in results)
+
+    def test_text_search_ignores_conversational_prefix(
+        self, sample_articles, sample_groups,
+    ):
+        save_articles_and_groups(sample_articles, sample_groups)
+        results = text_search_groups("qué pasó con el dólar")
+        assert len(results) >= 1
+        assert any("dólar" in g.representative_title.lower() for g in results)
+
+    def test_text_search_ranks_by_keyword_matches(
+        self, sample_articles, sample_groups,
+    ):
+        """Groups matching more keywords rank above groups matching fewer."""
+        save_articles_and_groups(sample_articles, sample_groups)
+        # "River" matches the Superclásico group; "inflación" matches the
+        # inflation group; a query mentioning both should surface both,
+        # with the one matching both (if any) first. With these fixtures
+        # neither group matches both, so just verify both appear.
+        results = text_search_groups("River inflación")
+        titles = [g.representative_title.lower() for g in results]
+        assert any("river" in t for t in titles)
+        assert any("inflación" in t for t in titles)
+
+    def test_text_search_all_stopwords_falls_back(
+        self, sample_articles, sample_groups,
+    ):
+        """Query of only stopwords/short words should not crash; may return [].
+        """
+        save_articles_and_groups(sample_articles, sample_groups)
+        # "de la" — all tokens are stopwords and short
+        results = text_search_groups("de la")
+        assert isinstance(results, list)

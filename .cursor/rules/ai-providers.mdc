@@ -6,7 +6,10 @@ alwaysApply: false
 
 # AI Provider Constraints
 
-This project uses **Gemini** (primary) and **Groq/Llama** (fallback). They have very different limits.
+This project supports **three** providers: **Gemini** (Google), **Groq** (Llama)
+and **Ollama** (self-hosted, typically on Railway). Each event type picks a
+mode from the admin panel; valid modes live in
+`app.ai_store.VALID_PROVIDERS`.
 
 ## Groq limits
 
@@ -21,10 +24,29 @@ This project uses **Gemini** (primary) and **Groq/Llama** (fallback). They have 
 - It's safe to send 150+ groups to Gemini without truncation
 - Gemini does NOT enforce JSON output format — rely on prompt instructions
 
+## Ollama limits
+
+- `OLLAMA_MAX_PROMPT_CHARS = 12000` — treat like Groq: build compact context
+- `OLLAMA_TIMEOUT = 120` — first call after idle can take 15–40s (cold start);
+  keep `OLLAMA_KEEP_ALIVE=10m` on the Railway service
+- Uses Ollama's native `/api/chat` with `format: "json"` to constrain output
+- Default model is `qwen3:8b` (override via `OLLAMA_MODEL` env var)
+- Self-hosted → cost per token is 0; tracked in `MODEL_PRICING` as free
+- Requires `OLLAMA_BASE_URL` env var (e.g. `http://ollama.railway.internal:11434`)
+
+## Provider routing
+
+- `_provider_chain(mode)` returns the ordered list of providers for a mode
+  (`"gemini_fallback_ollama"` → `["gemini", "ollama"]`)
+- `_run_provider_chain(...)` walks the chain, logging every attempt to
+  `ai_usage_log` so the admin monitor always reflects the real state
+- Filter by `_available_providers()` before trying — missing credentials
+  skip the provider and fall through to the next
+
 ## When changing search or topic prompts
 
-1. Check that `max_groups` and `max_chars` are appropriate for BOTH providers
-2. If increasing context size, verify Groq still receives a well-formed prompt (not truncated mid-line)
+1. Check that `max_groups` and `max_chars` are appropriate for ALL THREE providers
+2. If increasing context size, verify Groq and Ollama still receive well-formed prompts (not truncated mid-line)
 3. Use `_call_ai_search()` for search (builds separate prompts per provider) instead of generic `_call_ai()`
 4. Test with `py -m pytest tests/unit/test_ai_search.py -q` after changes
 
@@ -32,6 +54,6 @@ This project uses **Gemini** (primary) and **Groq/Llama** (fallback). They have 
 
 ```python
 prompt_overhead = len(TEMPLATE.format(query=query, context=""))
-groq_budget = GROQ_MAX_PROMPT_CHARS - prompt_overhead - 100  # safety margin
-groq_context = _build_context(groups, max_groups=150, max_chars=max(groq_budget, 2000))
+budget = MAX_PROMPT_CHARS - prompt_overhead - 100  # safety margin
+context = _build_context(groups, max_groups=150, max_chars=max(budget, 2000))
 ```

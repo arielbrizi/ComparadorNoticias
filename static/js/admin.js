@@ -475,9 +475,26 @@ const _eventDescs = {
 const _providerLabels = {
     gemini: "Gemini",
     groq: "Groq",
+    ollama: "Ollama",
     gemini_fallback_groq: "Gemini (fallback Groq)",
     groq_fallback_gemini: "Groq (fallback Gemini)",
+    gemini_fallback_ollama: "Gemini (fallback Ollama)",
+    ollama_fallback_gemini: "Ollama (fallback Gemini)",
+    groq_fallback_ollama: "Groq (fallback Ollama)",
+    ollama_fallback_groq: "Ollama (fallback Groq)",
 };
+
+const _providerColors = {
+    gemini: { bar: "#4088c7", bg: "rgba(64,136,199,0.12)" },
+    groq: { bar: "#0d9488", bg: "rgba(13,148,136,0.12)" },
+    ollama: { bar: "#a855f7", bg: "rgba(168,85,247,0.12)" },
+};
+
+function _providerBadgeClass(provider) {
+    if (provider === "gemini") return "admin-badge-admin";
+    if (provider === "ollama") return "admin-badge-ollama";
+    return "admin-badge-user";
+}
 
 function fmtUSD(v) {
     if (v == null) return "$0.00";
@@ -524,8 +541,9 @@ async function loadAIDashboard(desde, hasta) {
         const strip = $("#ai-providers-strip");
         if (s.by_provider.length) {
             strip.innerHTML = s.by_provider.map(p => {
-                const color = p.provider === "gemini" ? "#4088c7" : "#0d9488";
-                const bg = p.provider === "gemini" ? "rgba(64,136,199,0.12)" : "rgba(13,148,136,0.12)";
+                const scheme = _providerColors[p.provider] || { bar: "#64748b", bg: "rgba(100,116,139,0.12)" };
+                const color = scheme.bar;
+                const bg = scheme.bg;
                 return `
                 <div class="admin-eng-card">
                     <div class="admin-eng-icon" style="background:${bg}">
@@ -573,7 +591,7 @@ function renderAIEventTable(events) {
                 <div>${escHtml(_eventLabels[e.event_type] || e.event_type)}</div>
                 <div class="admin-cell-desc">${escHtml(desc)}</div>
             </td>
-            <td><span class="admin-badge ${e.provider === "gemini" ? "admin-badge-admin" : "admin-badge-user"}">${escHtml(e.provider)}</span></td>
+            <td><span class="admin-badge ${_providerBadgeClass(e.provider)}">${escHtml(e.provider)}</span></td>
             <td>${e.calls}</td>
             <td>${fmtTokens(e.input_tokens)}</td>
             <td>${fmtTokens(e.output_tokens)}</td>
@@ -850,6 +868,7 @@ function renderSchedulerConfig(config, validIntervals) {
 const _providerDisplayNames = {
     gemini: "Gemini",
     groq: "Groq",
+    ollama: "Ollama",
 };
 
 const _statusLabels = {
@@ -890,10 +909,11 @@ function renderAIMonitorProviders(providers) {
 
         const rows = [];
 
+        const credLabel = p.provider === "ollama" ? "Base URL" : "API key";
         if (!p.configured) {
-            rows.push(_row("API key", "No configurada", "#dc2626"));
+            rows.push(_row(credLabel, "No configurada", "#dc2626"));
         } else {
-            rows.push(_row("API key", "Configurada"));
+            rows.push(_row(credLabel, "Configurada"));
         }
 
         if (p.rate_limit_active) {
@@ -972,7 +992,7 @@ function renderAIMonitorRecent(calls) {
             <tr>
                 <td style="white-space:nowrap">${escHtml(formatDatetimeART(c.created_at))}</td>
                 <td>${escHtml(ev)}</td>
-                <td><span class="admin-badge ${c.provider === "gemini" ? "admin-badge-admin" : "admin-badge-user"}">${escHtml(c.provider)}</span></td>
+                <td><span class="admin-badge ${_providerBadgeClass(c.provider)}">${escHtml(c.provider)}</span></td>
                 <td>${statusCell}</td>
                 <td style="font-size:0.72rem;color:var(--text-dim);word-break:break-word">${detail}</td>
             </tr>`;

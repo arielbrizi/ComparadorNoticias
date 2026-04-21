@@ -5,13 +5,16 @@ import pytest
 
 from app.ai_search import (
     GEMINI_TIMEOUT,
+    OLLAMA_MAX_PROMPT_CHARS,
     _build_context,
     _call_ai,
     _call_gemini,
     _call_groq,
+    _call_ollama,
     _clean_json_response,
     _last_good_topics,
     _prefetch_topic_searches,
+    _provider_chain,
     ai_top_story,
     _parse_retry_seconds,
     ai_news_search,
@@ -22,11 +25,13 @@ from app.ai_search import (
 
 
 def _no_ai(monkeypatch):
-    """Helper: disable both AI providers."""
+    """Helper: disable all AI providers."""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.setattr("app.ai_search._gemini_client", None)
     monkeypatch.setattr("app.ai_search._groq_client", None)
+    monkeypatch.setattr("app.ai_search._ollama_client", None)
 
 
 def _mock_ai_store(monkeypatch, provider="gemini_fallback_groq"):
@@ -942,3 +947,237 @@ class TestPrefetchTopicSearches:
                 await task
             except asyncio.CancelledError:
                 pass
+
+
+# ── Ollama provider ──────────────────────────────────────────────────────
+
+
+def _mock_ollama_response(content: str, prompt_tokens: int = 120, eval_tokens: int = 40):
+    """Build a MagicMock httpx.Response that _call_ollama can consume."""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {
+        "message": {"role": "assistant", "content": content},
+        "prompt_eval_count": prompt_tokens,
+        "eval_count": eval_tokens,
+    }
+    return resp
+
+
+class TestCallOllama:
+    async def test_successful_call(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=_mock_ollama_response('{"answer":"ok"}', 100, 25),
+        )
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+
+        text, in_tok, out_tok = await _call_ollama("hola")
+        assert text == '{"answer":"ok"}'
+        assert in_tok == 100
+        assert out_tok == 25
+        mock_client.post.assert_awaited_once()
+        call_args = mock_client.post.call_args
+        assert call_args.args[0] == "/api/chat"
+        body = call_args.kwargs["json"]
+        assert body["stream"] is False
+        assert body["format"] == "json"
+        assert body["messages"][-1]["content"] == "hola"
+
+    async def test_raises_when_not_configured(self, monkeypatch):
+        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+        monkeypatch.setattr("app.ai_search._ollama_client", None)
+        with pytest.raises(RuntimeError, match="Ollama client not available"):
+            await _call_ollama("hola")
+
+    async def test_raises_on_http_error(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+        error_resp = MagicMock()
+        error_resp.status_code = 500
+        error_resp.text = "internal error"
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=error_resp)
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            await _call_ollama("hola")
+
+    async def test_raises_on_empty_response(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=_mock_ollama_response("", 10, 0))
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+        with pytest.raises(RuntimeError, match="empty response"):
+            await _call_ollama("hola")
+
+    async def test_timeout_raises_runtime_error(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+
+        async def _hang(*a, **kw):
+            await asyncio.sleep(5)
+
+        mock_client = MagicMock()
+        mock_client.post = _hang
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+        with pytest.raises(RuntimeError, match="timed out"):
+            await _call_ollama("hola", timeout=0.05)
+
+    async def test_truncates_long_prompt(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=_mock_ollama_response('{"ok":true}'),
+        )
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+
+        huge = "x" * (OLLAMA_MAX_PROMPT_CHARS + 500)
+        await _call_ollama(huge)
+        sent = mock_client.post.call_args.kwargs["json"]["messages"][-1]["content"]
+        assert len(sent) < len(huge)
+        assert "[contexto truncado" in sent
+
+
+class TestProviderChain:
+    def test_single_provider_modes(self):
+        assert _provider_chain("gemini") == ["gemini"]
+        assert _provider_chain("groq") == ["groq"]
+        assert _provider_chain("ollama") == ["ollama"]
+
+    def test_fallback_modes(self):
+        assert _provider_chain("gemini_fallback_groq") == ["gemini", "groq"]
+        assert _provider_chain("groq_fallback_gemini") == ["groq", "gemini"]
+        assert _provider_chain("gemini_fallback_ollama") == ["gemini", "ollama"]
+        assert _provider_chain("ollama_fallback_gemini") == ["ollama", "gemini"]
+        assert _provider_chain("groq_fallback_ollama") == ["groq", "ollama"]
+        assert _provider_chain("ollama_fallback_groq") == ["ollama", "groq"]
+
+    def test_unknown_mode_defaults_to_gemini_groq(self):
+        assert _provider_chain("bogus") == ["gemini", "groq"]
+        assert _provider_chain("gemini_fallback_bogus") == ["gemini", "groq"]
+
+
+class TestCallAiOllamaRouting:
+    """Routing tests that cover the new Ollama-aware fallback modes."""
+
+    async def test_ollama_only_mode(self, monkeypatch):
+        _mock_ai_store(monkeypatch, provider="ollama")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setattr("app.ai_search._gemini_client", None)
+        monkeypatch.setattr("app.ai_search._groq_client", None)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=_mock_ollama_response('{"result":"from ollama"}'),
+        )
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"result":"from ollama"}'
+        assert provider == "Ollama"
+
+    async def test_gemini_fallback_ollama_falls_back(self, monkeypatch):
+        _mock_ai_store(monkeypatch, provider="gemini_fallback_ollama")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+
+        async def _gemini_fail(*a, **kw):
+            raise RuntimeError("Gemini down")
+
+        mock_gemini = MagicMock()
+        mock_gemini.aio.models.generate_content = _gemini_fail
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        mock_ollama = AsyncMock()
+        mock_ollama.post = AsyncMock(
+            return_value=_mock_ollama_response('{"result":"from ollama"}'),
+        )
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_ollama)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"result":"from ollama"}'
+        assert provider == "Ollama"
+
+    async def test_ollama_fallback_gemini_uses_ollama_first(self, monkeypatch):
+        _mock_ai_store(monkeypatch, provider="ollama_fallback_gemini")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+
+        mock_ollama = AsyncMock()
+        mock_ollama.post = AsyncMock(
+            return_value=_mock_ollama_response('{"result":"ollama primary"}'),
+        )
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_ollama)
+
+        mock_gemini = MagicMock()
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"result":"ollama primary"}'
+        assert provider == "Ollama"
+        mock_gemini.aio.models.generate_content.assert_not_called()
+
+    async def test_ollama_unavailable_uses_fallback(self, monkeypatch):
+        """mode=ollama_fallback_groq without OLLAMA_BASE_URL should go straight to Groq."""
+        _mock_ai_store(monkeypatch, provider="ollama_fallback_groq")
+        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+        monkeypatch.setattr("app.ai_search._ollama_client", None)
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 50
+        mock_usage.completion_tokens = 25
+        mock_choice = MagicMock()
+        mock_choice.message.content = '{"result":"groq only"}'
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = mock_usage
+        mock_groq = AsyncMock()
+        mock_groq.chat.completions.create = AsyncMock(return_value=mock_resp)
+        monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"result":"groq only"}'
+        assert provider == "Groq"
+
+    async def test_no_providers_available_raises(self, monkeypatch):
+        _mock_ai_store(monkeypatch, provider="gemini_fallback_ollama")
+        _no_ai(monkeypatch)
+        with pytest.raises(RuntimeError, match="No AI provider"):
+            await _call_ai("test prompt", event_type="topics")
+
+    async def test_both_fail_logs_both_errors(self, monkeypatch):
+        """Regression: when Gemini and Ollama both fail, both must be logged
+        to ai_usage_log — otherwise the admin monitor shows stale status.
+        """
+        _mock_ai_store(monkeypatch, provider="gemini_fallback_ollama")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "app.ai_search.log_ai_usage",
+            lambda **kw: calls.append(kw),
+        )
+
+        async def _gemini_fail(*a, **kw):
+            raise RuntimeError("Gemini down")
+
+        mock_gemini = MagicMock()
+        mock_gemini.aio.models.generate_content = _gemini_fail
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        mock_ollama = AsyncMock()
+        mock_ollama.post = AsyncMock(side_effect=RuntimeError("Ollama 503"))
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_ollama)
+
+        with pytest.raises(RuntimeError, match="Ollama 503"):
+            await _call_ai("test prompt", event_type="topics")
+
+        logged = [(c["provider"], c["success"]) for c in calls]
+        assert ("gemini", False) in logged
+        assert ("ollama", False) in logged

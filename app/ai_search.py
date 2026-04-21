@@ -1,6 +1,8 @@
 """AI-powered semantic search and topic extraction for news groups.
 
-Uses Google Gemini as primary provider and Groq (Llama) as fallback.
+Supports three providers: Gemini (Google), Groq (Llama) and Ollama
+(self-hosted, typically on Railway). Each event type can pick its own
+provider + fallback from the admin panel.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import re
 import time
 from datetime import datetime, timezone
 
+import httpx
 from google import genai
 from groq import AsyncGroq
 
@@ -75,9 +78,42 @@ def _get_groq_client() -> AsyncGroq | None:
     return _groq_client
 
 
+# ── Ollama (self-hosted) ─────────────────────────────────────────────────
+
+_ollama_client: httpx.AsyncClient | None = None
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_MAX_PROMPT_CHARS = 12000
+OLLAMA_TIMEOUT = 120
+OLLAMA_NUM_CTX = 8192
+
+
+def _get_ollama_base_url() -> str | None:
+    """Return normalized Ollama base URL from env, or None if unconfigured."""
+    url = os.environ.get("OLLAMA_BASE_URL")
+    if not url:
+        return None
+    return url.rstrip("/")
+
+
+def _get_ollama_client() -> httpx.AsyncClient | None:
+    global _ollama_client
+    base_url = _get_ollama_base_url()
+    if not base_url:
+        return None
+    if _ollama_client is None:
+        _ollama_client = httpx.AsyncClient(
+            base_url=base_url, timeout=OLLAMA_TIMEOUT,
+        )
+    return _ollama_client
+
+
 def _ai_available() -> bool:
     """True if at least one AI provider is configured."""
-    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GROQ_API_KEY"))
+    return bool(
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GROQ_API_KEY")
+        or os.environ.get("OLLAMA_BASE_URL")
+    )
 
 
 def _build_context(
@@ -187,10 +223,12 @@ async def _call_gemini(
     raise last_exc  # unreachable, but keeps type-checkers happy
 
 
-GROQ_SYSTEM_MSG = (
+JSON_SYSTEM_MSG = (
     "Respondé ÚNICAMENTE con JSON válido. "
     "Sin texto explicativo, sin markdown, sin bloques de código. Solo el objeto JSON."
 )
+# Kept as alias for backward compatibility with code/tests that import it.
+GROQ_SYSTEM_MSG = JSON_SYSTEM_MSG
 
 
 async def _call_groq(
@@ -212,7 +250,7 @@ async def _call_groq(
         client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": GROQ_SYSTEM_MSG},
+                {"role": "system", "content": JSON_SYSTEM_MSG},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
@@ -229,74 +267,190 @@ async def _call_groq(
     return text, in_tok, out_tok
 
 
+async def _call_ollama(
+    prompt: str, timeout: float = OLLAMA_TIMEOUT,
+) -> tuple[str, int, int]:
+    """Call self-hosted Ollama via its native /api/chat endpoint.
+
+    Uses ``format: "json"`` to constrain output, mirrors Groq's JSON system
+    prompt, and truncates inputs that exceed ``OLLAMA_MAX_PROMPT_CHARS`` to
+    avoid blowing the model's context window.
+
+    Returns (text, input_tokens, output_tokens).
+    """
+    client = _get_ollama_client()
+    if not client:
+        raise RuntimeError("Ollama client not available")
+
+    if len(prompt) > OLLAMA_MAX_PROMPT_CHARS:
+        logger.info(
+            "Truncating prompt for Ollama (%d → %d chars)",
+            len(prompt), OLLAMA_MAX_PROMPT_CHARS,
+        )
+        prompt = (
+            prompt[:OLLAMA_MAX_PROMPT_CHARS]
+            + "\n\n[contexto truncado por límite del modelo]"
+        )
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": JSON_SYSTEM_MSG},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.3, "num_ctx": OLLAMA_NUM_CTX},
+    }
+
+    try:
+        response = await asyncio.wait_for(
+            client.post("/api/chat", json=payload),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"Ollama call timed out after {timeout}s")
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Ollama HTTP error: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Ollama returned HTTP {response.status_code}: {response.text[:200]}"
+        )
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"Ollama returned non-JSON body: {exc}") from exc
+
+    text = ((data.get("message") or {}).get("content") or "").strip()
+    if not text:
+        raise RuntimeError("Ollama returned empty response")
+
+    in_tok = int(data.get("prompt_eval_count") or 0)
+    out_tok = int(data.get("eval_count") or 0)
+    return text, in_tok, out_tok
+
+
+# ── Provider routing ────────────────────────────────────────────────────
+
+_PROVIDER_MODELS: dict[str, str] = {
+    "gemini": GEMINI_MODEL,
+    "groq": GROQ_MODEL,
+    "ollama": OLLAMA_MODEL,
+}
+
+_PROVIDER_DISPLAY: dict[str, str] = {
+    "gemini": "Gemini",
+    "groq": "Groq",
+    "ollama": "Ollama",
+}
+
+
+def _provider_chain(mode: str) -> list[str]:
+    """Return the ordered list of providers to try for *mode*.
+
+    Single-provider modes (``gemini``, ``groq``, ``ollama``) yield a
+    one-element list. Fallback modes (``X_fallback_Y``) yield ``[X, Y]``.
+    Unknown modes fall back to Gemini→Groq to stay safe.
+    """
+    if "_fallback_" in mode:
+        primary, _, secondary = mode.partition("_fallback_")
+        if primary in _PROVIDER_MODELS and secondary in _PROVIDER_MODELS:
+            return [primary, secondary]
+    if mode in _PROVIDER_MODELS:
+        return [mode]
+    return ["gemini", "groq"]
+
+
+def _available_providers() -> dict[str, bool]:
+    """Snapshot of which providers have credentials/URL configured right now."""
+    return {
+        "gemini": _get_gemini_client() is not None,
+        "groq": _get_groq_client() is not None,
+        "ollama": _get_ollama_client() is not None,
+    }
+
+
+async def _invoke_provider(
+    provider: str, prompt: str, timeout: float,
+) -> tuple[str, int, int]:
+    """Dispatch a single provider call. Raises RuntimeError if unknown."""
+    if provider == "gemini":
+        return await _call_gemini(prompt, timeout=timeout)
+    if provider == "groq":
+        return await _call_groq(prompt, timeout=min(timeout, 60))
+    if provider == "ollama":
+        return await _call_ollama(prompt, timeout=max(timeout, OLLAMA_TIMEOUT))
+    raise RuntimeError(f"Unknown provider: {provider}")
+
+
+async def _run_provider_chain(
+    event_type: str,
+    chain: list[str],
+    prompt_for: "callable[[str], str]",
+    timeout: float,
+) -> tuple[str, str]:
+    """Walk *chain* in order, logging every attempt. Returns (text, display).
+
+    - ``prompt_for(provider)`` returns the prompt tailored to that provider
+      (Groq/Ollama typically get a shorter one to fit their context budget).
+    - On success, logs via ``_log_success`` and returns immediately.
+    - On failure, logs via ``_log_error`` and falls through to the next
+      provider. Re-raises the last exception if every provider fails.
+    """
+    available = _available_providers()
+    filtered = [p for p in chain if available.get(p)]
+
+    if not filtered:
+        raise RuntimeError(
+            "No AI provider configured for mode "
+            f"'{'_fallback_'.join(chain) if len(chain) > 1 else chain[0]}'"
+        )
+
+    last_exc: Exception | None = None
+    for idx, provider in enumerate(filtered):
+        t0 = time.time()
+        model = _PROVIDER_MODELS[provider]
+        try:
+            text, in_tok, out_tok = await _invoke_provider(
+                provider, prompt_for(provider), timeout,
+            )
+            _log_success(event_type, provider, model, in_tok, out_tok, t0)
+            return text, _PROVIDER_DISPLAY[provider]
+        except Exception as exc:
+            last_exc = exc
+            _log_error(event_type, provider, model, t0, exc)
+            if idx + 1 < len(filtered):
+                logger.warning(
+                    "%s failed (%s), falling back to %s",
+                    _PROVIDER_DISPLAY[provider], exc,
+                    _PROVIDER_DISPLAY[filtered[idx + 1]],
+                )
+                continue
+            raise
+
+    assert last_exc is not None
+    raise last_exc
+
+
 async def _call_ai(
     prompt: str,
     timeout: float = GEMINI_TIMEOUT,
     event_type: str = "unknown",
 ) -> tuple[str, str]:
-    """Call the AI provider configured for *event_type*.
+    """Call the AI provider(s) configured for *event_type*.
 
     Returns (response_text, provider_name).
     """
-    config = get_provider_config()
-    mode = config.get(event_type, "gemini_fallback_groq")
-
-    gemini_ok = _get_gemini_client() is not None
-    groq_ok = _get_groq_client() is not None
-
-    if not gemini_ok and not groq_ok:
+    if not _ai_available():
         raise RuntimeError("No AI provider configured")
 
-    use_gemini = gemini_ok and mode in ("gemini", "gemini_fallback_groq", "groq_fallback_gemini")
-    use_groq = groq_ok and mode in ("groq", "gemini_fallback_groq", "groq_fallback_gemini")
-
-    if not use_gemini and not use_groq:
-        if mode in ("gemini", "groq_fallback_gemini") and not gemini_ok:
-            raise RuntimeError("Gemini configured but API key missing")
-        if mode in ("groq", "gemini_fallback_groq") and not groq_ok:
-            raise RuntimeError("Groq configured but API key missing")
-
-    t0 = time.time()
-
-    if mode == "groq_fallback_gemini" and use_groq:
-        try:
-            text, in_tok, out_tok = await _call_groq(prompt, timeout=min(timeout, 60))
-            _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
-            return text, "Groq"
-        except Exception as exc:
-            _log_error(event_type, "groq", GROQ_MODEL, t0, exc)
-            if not use_gemini:
-                raise
-            logger.warning("Groq failed (%s), falling back to Gemini", exc)
-            t0 = time.time()
-
-        try:
-            text, in_tok, out_tok = await _call_gemini(prompt, timeout=timeout)
-            _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
-            return text, "Gemini"
-        except Exception as exc:
-            _log_error(event_type, "gemini", GEMINI_MODEL, t0, exc)
-            raise
-
-    if use_gemini:
-        try:
-            text, in_tok, out_tok = await _call_gemini(prompt, timeout=timeout)
-            _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
-            return text, "Gemini"
-        except Exception as exc:
-            _log_error(event_type, "gemini", GEMINI_MODEL, t0, exc)
-            if not use_groq:
-                raise
-            logger.warning("Gemini failed (%s), falling back to Groq", exc)
-            t0 = time.time()
-
-    try:
-        text, in_tok, out_tok = await _call_groq(prompt, timeout=min(timeout, 60))
-        _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
-        return text, "Groq"
-    except Exception as exc:
-        _log_error(event_type, "groq", GROQ_MODEL, t0, exc)
-        raise
+    mode = get_provider_config().get(event_type, "gemini_fallback_groq")
+    chain = _provider_chain(mode)
+    return await _run_provider_chain(
+        event_type, chain, lambda _p: prompt, timeout,
+    )
 
 
 def _log_success(
@@ -429,73 +583,42 @@ async def _call_ai_search(
     prompt: str, query: str, groups: list[ArticleGroup],
     *, event_type: str = "search",
 ) -> tuple[str, str]:
-    """Try primary provider with appropriate context; fall back if configured."""
-    config = get_provider_config()
-    mode = config.get(event_type, "gemini_fallback_groq")
+    """Try primary provider with appropriate context; fall back if configured.
 
-    gemini_ok = _get_gemini_client() is not None
-    groq_ok = _get_groq_client() is not None
-
-    if not gemini_ok and not groq_ok:
+    Gemini receives the full precomputed prompt (big context budget).
+    Groq and Ollama get a per-provider prompt rebuilt to fit their own
+    ``*_MAX_PROMPT_CHARS`` budget, so we avoid mid-line truncation.
+    """
+    if not _ai_available():
         raise RuntimeError("No AI provider configured")
 
-    use_gemini = gemini_ok and mode in ("gemini", "gemini_fallback_groq", "groq_fallback_gemini")
-    use_groq = groq_ok and mode in ("groq", "gemini_fallback_groq", "groq_fallback_gemini")
+    mode = get_provider_config().get(event_type, "gemini_fallback_groq")
+    chain = _provider_chain(mode)
 
-    t0 = time.time()
+    keywords_str = _format_keywords(query)
+    prompt_overhead = len(
+        SEARCH_PROMPT.format(query=query, keywords=keywords_str, context="")
+    )
 
-    def _build_groq_prompt() -> str:
-        keywords_str = _format_keywords(query)
-        prompt_overhead = len(
-            SEARCH_PROMPT.format(query=query, keywords=keywords_str, context="")
-        )
-        groq_context_budget = GROQ_MAX_PROMPT_CHARS - prompt_overhead - 100
-        groq_context = _build_context(
-            groups, max_groups=150, max_chars=max(groq_context_budget, 2000),
+    def _compact_prompt(max_prompt_chars: int) -> str:
+        budget = max_prompt_chars - prompt_overhead - 100
+        context = _build_context(
+            groups, max_groups=150, max_chars=max(budget, 2000),
         )
         return SEARCH_PROMPT.format(
-            query=query, keywords=keywords_str, context=groq_context,
+            query=query, keywords=keywords_str, context=context,
         )
 
-    if mode == "groq_fallback_gemini" and use_groq:
-        try:
-            text, in_tok, out_tok = await _call_groq(_build_groq_prompt(), timeout=60)
-            _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
-            return text, "Groq"
-        except Exception as exc:
-            _log_error(event_type, "groq", GROQ_MODEL, t0, exc)
-            if not use_gemini:
-                raise
-            logger.warning("Groq failed (%s), falling back to Gemini", exc)
-            t0 = time.time()
+    def _prompt_for(provider: str) -> str:
+        if provider == "groq":
+            return _compact_prompt(GROQ_MAX_PROMPT_CHARS)
+        if provider == "ollama":
+            return _compact_prompt(OLLAMA_MAX_PROMPT_CHARS)
+        return prompt
 
-        try:
-            text, in_tok, out_tok = await _call_gemini(prompt, timeout=GEMINI_TIMEOUT)
-            _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
-            return text, "Gemini"
-        except Exception as exc:
-            _log_error(event_type, "gemini", GEMINI_MODEL, t0, exc)
-            raise
-
-    if use_gemini:
-        try:
-            text, in_tok, out_tok = await _call_gemini(prompt, timeout=GEMINI_TIMEOUT)
-            _log_success(event_type, "gemini", GEMINI_MODEL, in_tok, out_tok, t0)
-            return text, "Gemini"
-        except Exception as exc:
-            _log_error(event_type, "gemini", GEMINI_MODEL, t0, exc)
-            if not use_groq:
-                raise
-            logger.warning("Gemini failed (%s), falling back to Groq", exc)
-            t0 = time.time()
-
-    try:
-        text, in_tok, out_tok = await _call_groq(_build_groq_prompt(), timeout=60)
-        _log_success(event_type, "groq", GROQ_MODEL, in_tok, out_tok, t0)
-        return text, "Groq"
-    except Exception as exc:
-        _log_error(event_type, "groq", GROQ_MODEL, t0, exc)
-        raise
+    return await _run_provider_chain(
+        event_type, chain, _prompt_for, GEMINI_TIMEOUT,
+    )
 
 
 # ── Trending topics ──────────────────────────────────────────────────────

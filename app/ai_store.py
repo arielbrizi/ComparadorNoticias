@@ -20,12 +20,25 @@ ART = timezone(timedelta(hours=-3))
 MODEL_PRICING: dict[str, dict[str, float]] = {
     "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
     "llama-3.3-70b-versatile": {"input": 0.00, "output": 0.00},
+    # Ollama is self-hosted → no per-token cost. Keys cover the common
+    # defaults so the pricing lookup doesn't fall through to the 0 default
+    # for every new install.
+    "qwen3:8b": {"input": 0.00, "output": 0.00},
+    "qwen2.5:7b-instruct": {"input": 0.00, "output": 0.00},
+    "llama3.1:8b": {"input": 0.00, "output": 0.00},
+    "llama3.2:3b": {"input": 0.00, "output": 0.00},
+    "mistral:7b-instruct": {"input": 0.00, "output": 0.00},
 }
 
 VALID_EVENT_TYPES = frozenset(
     {"search", "search_prefetch", "topics", "weekly_summary", "top_story"}
 )
-VALID_PROVIDERS = frozenset({"gemini", "groq", "gemini_fallback_groq", "groq_fallback_gemini"})
+VALID_PROVIDERS = frozenset({
+    "gemini", "groq", "ollama",
+    "gemini_fallback_groq", "groq_fallback_gemini",
+    "gemini_fallback_ollama", "ollama_fallback_gemini",
+    "groq_fallback_ollama", "ollama_fallback_groq",
+})
 
 # ── Table init ────────────────────────────────────────────────────────────────
 

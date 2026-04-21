@@ -36,6 +36,7 @@ from app.ai_search import (
     get_rate_limit_state,
     GEMINI_MODEL,
     GROQ_MODEL,
+    OLLAMA_MODEL,
     is_public_topic_query,
     is_topstory_cache_valid,
     is_topics_cache_valid,
@@ -833,14 +834,21 @@ async def admin_ai_config_get(_admin: dict = Depends(require_admin)):
     }
 
 
+_PROVIDER_ENV_KEYS: dict[str, str] = {
+    "gemini": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "ollama": "OLLAMA_BASE_URL",
+}
+
+
 def _build_provider_status(provider_key: str, model: str) -> dict:
     """Build a health snapshot for a single AI provider.
 
     Combines env-var presence, the in-memory Gemini rate-limit cooldown
     and recent rows from ``ai_usage_log`` to derive a traffic-light status.
     """
-    env_key = "GEMINI_API_KEY" if provider_key == "gemini" else "GROQ_API_KEY"
-    configured = bool(os.environ.get(env_key))
+    env_key = _PROVIDER_ENV_KEYS.get(provider_key, "")
+    configured = bool(os.environ.get(env_key)) if env_key else False
     health = query_provider_health(provider_key)
 
     rate_limit = {"active": False, "seconds_remaining": 0}
@@ -899,6 +907,7 @@ async def admin_ai_monitor(_admin: dict = Depends(require_admin)):
         "providers": [
             _build_provider_status("gemini", GEMINI_MODEL),
             _build_provider_status("groq", GROQ_MODEL),
+            _build_provider_status("ollama", OLLAMA_MODEL),
         ],
         "recent_calls": query_recent_ai_calls(limit=5),
     }

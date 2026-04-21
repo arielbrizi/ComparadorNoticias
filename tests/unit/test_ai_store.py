@@ -43,6 +43,12 @@ class TestComputeCost:
         assert cost_in == 0.0
         assert cost_out == 0.0
 
+    def test_ollama_models_are_free(self):
+        for model in ("qwen3:8b", "qwen2.5:7b-instruct", "llama3.1:8b", "llama3.2:3b"):
+            cost_in, cost_out = compute_cost(model, 500_000, 200_000)
+            assert cost_in == 0.0, model
+            assert cost_out == 0.0, model
+
     def test_zero_tokens(self):
         cost_in, cost_out = compute_cost("gemini-3-flash-preview", 0, 0)
         assert cost_in == 0.0
@@ -182,6 +188,33 @@ class TestProviderConfig:
         assert ok is True
         config = get_provider_config()
         assert config["topics"] == "groq_fallback_gemini"
+
+    def test_set_ollama_provider(self):
+        ok = set_provider_config("topics", "ollama")
+        assert ok is True
+        config = get_provider_config()
+        assert config["topics"] == "ollama"
+
+    def test_set_ollama_fallback_modes(self):
+        for mode in (
+            "gemini_fallback_ollama",
+            "ollama_fallback_gemini",
+            "groq_fallback_ollama",
+            "ollama_fallback_groq",
+        ):
+            ok = set_provider_config("topics", mode)
+            assert ok is True, mode
+            config = get_provider_config()
+            assert config["topics"] == mode
+
+    def test_valid_providers_contains_ollama_modes(self):
+        expected = {
+            "gemini", "groq", "ollama",
+            "gemini_fallback_groq", "groq_fallback_gemini",
+            "gemini_fallback_ollama", "ollama_fallback_gemini",
+            "groq_fallback_ollama", "ollama_fallback_groq",
+        }
+        assert expected.issubset(VALID_PROVIDERS)
 
 
 class TestScheduleConfig:

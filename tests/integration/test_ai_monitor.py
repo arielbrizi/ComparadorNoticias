@@ -24,6 +24,7 @@ async def client(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
 
     from app.metrics_store import init_db
     from app.news_store import init_news_tables
@@ -85,9 +86,9 @@ class TestAIMonitorEndpoint:
         data = resp.json()
 
         assert data["recent_calls"] == []
-        assert len(data["providers"]) == 2
+        assert len(data["providers"]) == 3
         names = {p["provider"] for p in data["providers"]}
-        assert names == {"gemini", "groq"}
+        assert names == {"gemini", "groq", "ollama"}
 
         for p in data["providers"]:
             assert p["configured"] is False

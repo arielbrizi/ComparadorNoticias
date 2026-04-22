@@ -427,3 +427,81 @@ class TestPreviews:
         rows = query_ai_invocations()
         assert rows[0]["prompt_preview"] is None
         assert rows[0]["response_preview"] is None
+
+
+class TestOllamaErrorPromptPersistence:
+    """Prompt preview is force-persisted on failed Ollama calls even when the
+    global AI_LOG_PREVIEWS flag is off, so timeouts can be diagnosed without
+    flipping it for every invocation."""
+
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db, monkeypatch):
+        init_ai_tables()
+        monkeypatch.setattr("app.ai_store._AI_LOG_PREVIEWS", False)
+
+    def test_ollama_error_persists_prompt(self):
+        log_ai_usage(
+            event_type="search", provider="ollama",
+            model="qwen3:8b", input_tokens=0, output_tokens=0,
+            latency_ms=120000, success=False,
+            error_message="Ollama read timeout after 120s",
+            prompt_preview="prompt que se envio a ollama",
+            response_preview="should be dropped",
+        )
+        rows = query_ai_invocations()
+        assert rows[0]["prompt_preview"] == "prompt que se envio a ollama"
+        assert rows[0]["response_preview"] is None
+
+    def test_ollama_success_does_not_persist_prompt(self):
+        log_ai_usage(
+            event_type="search", provider="ollama",
+            model="qwen3:8b", input_tokens=100, output_tokens=50,
+            latency_ms=2000,
+            prompt_preview="prompt feliz",
+            response_preview="respuesta feliz",
+        )
+        rows = query_ai_invocations()
+        assert rows[0]["prompt_preview"] is None
+        assert rows[0]["response_preview"] is None
+
+    def test_gemini_error_does_not_persist_prompt(self):
+        log_ai_usage(
+            event_type="search", provider="gemini",
+            model="gemini-3-flash-preview", input_tokens=0, output_tokens=0,
+            latency_ms=500, success=False,
+            error_message="Rate limited",
+            prompt_preview="prompt gemini",
+        )
+        rows = query_ai_invocations()
+        assert rows[0]["prompt_preview"] is None
+
+    def test_fallback_provider_with_ollama_persists_prompt(self):
+        for mode in (
+            "gemini_fallback_ollama",
+            "ollama_fallback_gemini",
+            "groq_fallback_ollama",
+            "ollama_fallback_groq",
+        ):
+            log_ai_usage(
+                event_type="search", provider=mode,
+                model="qwen3:8b", input_tokens=0, output_tokens=0,
+                latency_ms=120000, success=False,
+                error_message="timeout",
+                prompt_preview=f"prompt via {mode}",
+            )
+        rows = query_ai_invocations()
+        assert len(rows) == 4
+        for r in rows:
+            assert r["prompt_preview"] == f"prompt via {r['provider']}", r["provider"]
+
+    def test_ollama_error_prompt_truncated_to_2000(self):
+        huge = "x" * 5000
+        log_ai_usage(
+            event_type="search", provider="ollama",
+            model="qwen3:8b", input_tokens=0, output_tokens=0,
+            latency_ms=120000, success=False,
+            error_message="timeout",
+            prompt_preview=huge,
+        )
+        rows = query_ai_invocations()
+        assert len(rows[0]["prompt_preview"]) == 2000

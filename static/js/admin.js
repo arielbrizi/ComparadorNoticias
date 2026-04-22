@@ -1216,7 +1216,7 @@ function openInvocationModal(item) {
         ? `<div style="font-size:0.78rem;color:#fca5a5;margin-top:0.8rem;text-transform:uppercase;letter-spacing:0.04em">Error</div><pre style="color:#fecaca;background:rgba(127,29,29,0.25);border:1px solid rgba(220,38,38,0.35);white-space:pre-wrap;word-break:break-word">${escHtml(item.error_message)}</pre>`
         : "";
     const noPreviewHint = (!promptHtml && !responseHtml && !errorHtml && !technicalHtml)
-        ? `<div class="admin-empty" style="margin-top:0.8rem">Sin preview disponible. Habilitá <code>AI_LOG_PREVIEWS=1</code> para registrar previews.</div>`
+        ? `<div class="admin-empty" style="margin-top:0.8rem">Sin preview disponible. Los errores de Ollama guardan el prompt automáticamente; para el resto habilitá <code>AI_LOG_PREVIEWS=1</code>.</div>`
         : "";
 
     host.innerHTML = `

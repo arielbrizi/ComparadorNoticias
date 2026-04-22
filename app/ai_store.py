@@ -24,6 +24,20 @@ def previews_enabled() -> bool:
     """Whether AI prompt/response previews should be persisted."""
     return _AI_LOG_PREVIEWS
 
+
+def _should_persist_prompt_on_error(provider: str) -> bool:
+    """Whether to persist ``prompt_preview`` on a failed call even when
+    ``AI_LOG_PREVIEWS`` is off.
+
+    Ollama timeouts are the main case we need to debug post-mortem (was the
+    prompt too long? did the model actually receive it?), and unlike cloud
+    providers the payload is local so the PII exposure is already bounded to
+    our own DB. We extend this to any provider string that involves Ollama
+    (including fallback combinations) so the preview survives regardless of
+    which side ended up being the one that failed.
+    """
+    return "ollama" in (provider or "").lower()
+
 # ── Pricing (USD per 1M tokens) ──────────────────────────────────────────────
 
 MODEL_PRICING: dict[str, dict[str, float]] = {
@@ -279,6 +293,12 @@ def log_ai_usage(
     ``AI_LOG_PREVIEWS=1`` is set; otherwise the caller may pass them but
     they're dropped (limits storage and PII risk by default).
 
+    Exception: on a failed call involving Ollama (``success=False`` and the
+    provider string contains ``ollama``), ``prompt_preview`` is always
+    persisted (truncated to ``_PREVIEW_MAX_CHARS``) so timeouts can be
+    diagnosed without flipping the global flag. ``response_preview`` is
+    still gated because on errors there's typically no useful response body.
+
     ``error_type``/``error_phase``/``http_status``/``request_sent_at`` are
     optional structured diagnostics (today populated by ``OllamaCallError``)
     that let the admin panel tell a connect-timeout from a read-timeout.
@@ -289,6 +309,9 @@ def log_ai_usage(
     if _AI_LOG_PREVIEWS:
         pp = (prompt_preview or "")[:_PREVIEW_MAX_CHARS] or None
         rp = (response_preview or "")[:_PREVIEW_MAX_CHARS] or None
+    elif not success and _should_persist_prompt_on_error(provider):
+        pp = (prompt_preview or "")[:_PREVIEW_MAX_CHARS] or None
+        rp = None
     else:
         pp = None
         rp = None

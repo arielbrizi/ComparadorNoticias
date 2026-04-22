@@ -57,3 +57,27 @@ prompt_overhead = len(TEMPLATE.format(query=query, context=""))
 budget = MAX_PROMPT_CHARS - prompt_overhead - 100  # safety margin
 context = _build_context(groups, max_groups=150, max_chars=max(budget, 2000))
 ```
+
+## Debugging Ollama timeouts
+
+When an invocation fails with `error_phase=read` ("Ollama read timeout"),
+`httpx` already guarantees the request was fully delivered before the
+timeout fired. To confirm end-to-end and inspect what the model is doing,
+cross-check against Ollama's own surfaces:
+
+- `journalctl -u ollama -f --since "5 min ago"` (systemd) or
+  `docker logs -f ollama --since 5m` (docker/Railway) — confirms the
+  incoming HTTP request and shows prompt tokenization / model load lines.
+- `curl http://<host>:11434/api/ps` — lists models currently resident in
+  VRAM/RAM with their idle time. If the target model isn't listed (or was
+  evicted), the timeout is explained by a cold load.
+- `curl http://<host>:11434/api/tags` — sanity check that Ollama itself is
+  up and reachable from where you're testing.
+- Correlate the `request_sent_at` field shown in the admin modal with the
+  timestamp of the incoming request line in Ollama's logs to prove arrival.
+
+The `prompt_preview` column in `ai_usage_log` is persisted automatically
+on any failed call whose provider string contains `ollama` (including
+fallback combinations), even when `AI_LOG_PREVIEWS=0`. That lets you open
+the failed invocation in the admin panel and inspect the actual prompt
+that reached the model without flipping the global flag.

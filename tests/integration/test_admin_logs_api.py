@@ -240,3 +240,56 @@ class TestInfraCostsEndpoint:
         assert data["total_usd_month"] == pytest.approx(6.0)
         assert len(data["services"]) == 2
         assert "history" in data
+
+
+class TestInfraCostsRefreshEndpoint:
+    async def test_requires_admin(self, client):
+        resp = await client.post("/api/admin/infra-costs/refresh")
+        assert resp.status_code == 403
+
+    async def test_not_available_without_token(self, client, monkeypatch):
+        cookies = await _admin_cookies(monkeypatch)
+        resp = await client.post("/api/admin/infra-costs/refresh", cookies=cookies)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["available"] is False
+        assert data["reason"] == "no_token"
+        assert data["saved_rows"] == 0
+
+    async def test_saves_snapshot_on_success(self, client, monkeypatch):
+        cookies = await _admin_cookies(monkeypatch)
+        monkeypatch.setenv("RAILWAY_API_TOKEN", "t")
+        monkeypatch.setenv("RAILWAY_PROJECT_ID", "p")
+
+        fake_result = {
+            "available": True,
+            "services": [
+                {"service_name": "web", "service_id": "s1", "usd_month": 2.0, "raw": {}},
+            ],
+            "total_usd_month": 2.0,
+        }
+        monkeypatch.setattr("app.railway_client.fetch_usage", lambda *a, **k: fake_result)
+
+        resp = await client.post("/api/admin/infra-costs/refresh", cookies=cookies)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["available"] is True
+        assert data["saved_rows"] == 1
+
+        # The snapshot should now be visible via the regular GET endpoint
+        resp2 = await client.get("/api/admin/infra-costs", cookies=cookies)
+        assert resp2.json()["total_usd_month"] == pytest.approx(2.0)
+
+    async def test_propagates_reason_on_failure(self, client, monkeypatch):
+        cookies = await _admin_cookies(monkeypatch)
+        monkeypatch.setenv("RAILWAY_API_TOKEN", "t")
+        monkeypatch.setenv("RAILWAY_PROJECT_ID", "p")
+        monkeypatch.setattr(
+            "app.railway_client.fetch_usage",
+            lambda *a, **k: {"available": False, "reason": "http_401"},
+        )
+        resp = await client.post("/api/admin/infra-costs/refresh", cookies=cookies)
+        data = resp.json()
+        assert data["available"] is False
+        assert data["reason"] == "http_401"
+        assert data["saved_rows"] == 0

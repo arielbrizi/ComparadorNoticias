@@ -1129,6 +1129,53 @@ async def admin_infra_costs(_admin: dict = Depends(require_admin)):
     }
 
 
+@app.post("/api/admin/infra-costs/refresh")
+async def admin_infra_costs_refresh(_admin: dict = Depends(require_admin)):
+    """Force an immediate fetch from Railway and persist a snapshot.
+
+    Returns the raw result from `railway_client.fetch_usage`, plus the number
+    of rows saved. Useful as a diagnostic tool from the admin panel to see
+    the real reason when the scheduled refresh isn't producing snapshots.
+    """
+    if not railway_client.is_configured():
+        return {"available": False, "reason": "no_token", "saved_rows": 0}
+
+    try:
+        result = await asyncio.to_thread(railway_client.fetch_usage)
+    except Exception as exc:
+        logger.warning("manual infra refresh failed: %s", exc)
+        return {"available": False, "reason": f"error: {exc}", "saved_rows": 0}
+
+    saved_rows = 0
+    if result.get("available"):
+        services = result.get("services") or []
+        saved_rows = save_infra_snapshot(services)
+        logger.info("Manual infra snapshot saved: %d rows", saved_rows)
+        try:
+            log_process_event(
+                component="railway",
+                event_type="manual_refresh",
+                status="ok",
+                details={"saved_rows": saved_rows, "services": len(services)},
+            )
+        except Exception:
+            pass
+    else:
+        logger.info("Manual infra refresh skipped (not available: %s)", result.get("reason"))
+        try:
+            log_process_event(
+                component="railway",
+                event_type="manual_refresh",
+                status="warning",
+                message=f"Railway unavailable: {result.get('reason')}",
+                details={"reason": result.get("reason")},
+            )
+        except Exception:
+            pass
+
+    return {**result, "saved_rows": saved_rows}
+
+
 @app.get("/api/admin/process-events")
 async def admin_process_events(
     desde: str | None = None,

@@ -43,8 +43,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupSubtabs();
     setupDateFilters();
     setupLogFilters();
+    setupInfraCostsRefresh();
     loadAll();
 });
+
+function setupInfraCostsRefresh() {
+    const btn = $("#infra-costs-refresh");
+    if (btn) btn.addEventListener("click", refreshInfraCostsNow);
+}
 
 function setupTabs() {
     $$("#admin-tabs .admin-tab").forEach(tab => {
@@ -1307,22 +1313,36 @@ async function loadInfraCosts() {
     }
 }
 
+function _reasonMessage(reason) {
+    const r = String(reason || "").toLowerCase();
+    if (r === "no_token") return "Integración no configurada. Definí <code>RAILWAY_API_TOKEN</code> y <code>RAILWAY_PROJECT_ID</code> para ver el consumo.";
+    if (r === "http_401" || r === "http_403") return "Railway rechazó el token (401/403). Asegurate de usar un <b>Account/Team Token</b>, no un Project Token, y que tenga acceso al proyecto configurado.";
+    if (r === "http_404") return "Railway devolvió 404. Revisá que <code>RAILWAY_PROJECT_ID</code> sea correcto (UUID del proyecto).";
+    if (r === "http_400") return "Railway devolvió 400. Probablemente cambió el schema GraphQL; hay que actualizar la query en <code>app/railway_client.py</code>.";
+    if (r === "timeout") return "Railway API timeout. Reintentá en unos segundos.";
+    if (r.startsWith("http_")) return `Railway respondió con un error HTTP (${escHtml(reason)}).`;
+    if (r.startsWith("error")) return `Error al llamar a Railway: ${escHtml(reason)}`;
+    return `No disponible: ${escHtml(reason)}`;
+}
+
 function renderInfraCosts(data) {
     const wrap = $("#infra-costs-wrap");
     if (!wrap) return;
 
     if (!data.available) {
-        const reason = data.reason || "no_token";
-        const msg = reason === "no_token"
-            ? "Integración no configurada. Definí <code>RAILWAY_API_TOKEN</code> y <code>RAILWAY_PROJECT_ID</code> para ver el consumo."
-            : `No disponible: ${escHtml(reason)}`;
-        wrap.innerHTML = `<div class="admin-empty">${msg}</div>`;
+        wrap.innerHTML = `<div class="admin-empty">${_reasonMessage(data.reason)}</div>`;
         return;
     }
 
     const services = data.services || [];
     const totalMonth = services.reduce((a, s) => a + (s.estimated_usd_month || 0), 0);
     const fetchedAt = data.fetched_at ? formatDatetimeART(data.fetched_at) : "—";
+
+    const emptySnapshotWarning = (!services.length && !data.fetched_at)
+        ? `<div class="admin-empty" style="margin-bottom:0.8rem;background:rgba(234,88,12,0.12);color:#ea580c;border-radius:6px;padding:0.6rem 0.8rem">
+             Configurado pero sin snapshot todavía. El refresh automático corre cada hora; probá <b>Actualizar ahora</b> para ver el motivo si hay un error.
+           </div>`
+        : "";
 
     const serviceRows = services.length
         ? services.map(s => `
@@ -1344,6 +1364,7 @@ function renderInfraCosts(data) {
         : "";
 
     wrap.innerHTML = `
+        ${emptySnapshotWarning}
         <div class="admin-kpis" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:0.8rem">
             <div class="admin-kpi">
                 <div class="admin-kpi-value">${fmtUSD(totalMonth)}</div>
@@ -1361,6 +1382,45 @@ function renderInfraCosts(data) {
             <tbody>${serviceRows}</tbody>
         </table>
         ${historyHtml}`;
+}
+
+async function refreshInfraCostsNow() {
+    const btn = $("#infra-costs-refresh");
+    const wrap = $("#infra-costs-wrap");
+    if (!btn || !wrap) return;
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Consultando Railway…";
+    try {
+        const resp = await fetch("/api/admin/infra-costs/refresh", { method: "POST" });
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        if (!data.available) {
+            wrap.innerHTML = `
+                <div class="admin-empty" style="color:#ea580c">
+                    <div style="margin-bottom:0.4rem"><b>El fetch a Railway falló.</b></div>
+                    ${_reasonMessage(data.reason)}
+                </div>`;
+            return;
+        }
+
+        if ((data.saved_rows || 0) > 0) {
+            await loadInfraCosts();
+        } else {
+            wrap.innerHTML = `<div class="admin-empty" style="color:#ea580c">
+                Railway respondió OK pero no devolvió servicios para guardar. Revisá el <code>RAILWAY_PROJECT_ID</code>.
+            </div>`;
+        }
+    } catch (err) {
+        console.error("Infra costs manual refresh failed:", err);
+        wrap.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error de red: ${escHtml(err.message || err)}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
 }
 
 // ── Pagination helper ───────────────────────────────────────────────────

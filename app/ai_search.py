@@ -20,6 +20,7 @@ from google import genai
 from groq import AsyncGroq
 
 from app.ai_store import (
+    ART,
     get_provider_config,
     is_in_quiet_hours,
     load_last_good_topics,
@@ -101,10 +102,45 @@ def _get_ollama_client() -> httpx.AsyncClient | None:
     if not base_url:
         return None
     if _ollama_client is None:
+        # Granular timeouts so we can distinguish connect vs read failures.
+        # ``read`` is set slightly above OLLAMA_TIMEOUT so httpx always raises
+        # ReadTimeout (a concrete httpx exception carrying phase info) rather
+        # than having asyncio kill the coroutine with a generic TimeoutError.
         _ollama_client = httpx.AsyncClient(
-            base_url=base_url, timeout=OLLAMA_TIMEOUT,
+            base_url=base_url,
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=OLLAMA_TIMEOUT + 5.0,
+                write=30.0,
+                pool=5.0,
+            ),
         )
     return _ollama_client
+
+
+class OllamaCallError(RuntimeError):
+    """Structured Ollama failure.
+
+    Carries enough metadata (``error_type``, ``phase``, ``http_status``,
+    ``request_sent_at``) so the caller can persist it for later diagnosis
+    in the admin panel, including whether the request actually reached
+    Ollama or failed before being sent.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str,
+        phase: str,
+        http_status: int | None = None,
+        request_sent_at: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.phase = phase
+        self.http_status = http_status
+        self.request_sent_at = request_sent_at
 
 
 def _ai_available() -> bool:
@@ -303,29 +339,125 @@ async def _call_ollama(
         "options": {"temperature": 0.3, "num_ctx": OLLAMA_NUM_CTX},
     }
 
-    try:
-        response = await asyncio.wait_for(
-            client.post("/api/chat", json=payload),
-            timeout=timeout,
-        )
-    except asyncio.TimeoutError:
-        raise RuntimeError(f"Ollama call timed out after {timeout}s")
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"Ollama HTTP error: {exc}") from exc
+    base_url = _get_ollama_base_url() or "(unset)"
+    request_sent_at = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+    logger.info(
+        "ollama call start base=%s model=%s prompt_chars=%d timeout=%.0fs",
+        base_url, OLLAMA_MODEL, len(prompt), timeout,
+    )
 
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"Ollama returned HTTP {response.status_code}: {response.text[:200]}"
+    # We intentionally do NOT wrap this in asyncio.wait_for: doing so would
+    # collapse every failure into a bare asyncio.TimeoutError, losing the
+    # fine-grained httpx exceptions that tell us whether the request ever
+    # reached Ollama (connect vs read phase).
+    try:
+        response = await client.post("/api/chat", json=payload)
+    except httpx.ConnectTimeout as exc:
+        logger.warning(
+            "ollama call failed phase=connect error_type=ConnectTimeout base=%s: %s",
+            base_url, exc,
+        )
+        raise OllamaCallError(
+            f"Ollama connect timeout (no TCP handshake in 10s) — base={base_url}",
+            error_type="ConnectTimeout",
+            phase="connect",
+        ) from exc
+    except httpx.ConnectError as exc:
+        logger.warning(
+            "ollama call failed phase=connect error_type=ConnectError base=%s: %s",
+            base_url, exc,
+        )
+        raise OllamaCallError(
+            f"Ollama connect error (service down / wrong URL): {exc}",
+            error_type="ConnectError",
+            phase="connect",
+        ) from exc
+    except httpx.WriteTimeout as exc:
+        logger.warning(
+            "ollama call failed phase=write error_type=WriteTimeout base=%s sent_at=%s",
+            base_url, request_sent_at,
+        )
+        raise OllamaCallError(
+            f"Ollama write timeout (request not fully sent): {exc}",
+            error_type="WriteTimeout",
+            phase="write",
+            request_sent_at=request_sent_at,
+        ) from exc
+    except httpx.ReadTimeout as exc:
+        logger.warning(
+            "ollama call failed phase=read error_type=ReadTimeout base=%s sent_at=%s: "
+            "request reached Ollama but model did not respond within %.0fs",
+            base_url, request_sent_at, timeout,
+        )
+        raise OllamaCallError(
+            f"Ollama read timeout after {timeout}s "
+            f"(request was delivered, model did not respond in time)",
+            error_type="ReadTimeout",
+            phase="read",
+            request_sent_at=request_sent_at,
+        ) from exc
+    except httpx.RemoteProtocolError as exc:
+        logger.warning(
+            "ollama call failed phase=read error_type=RemoteProtocolError base=%s sent_at=%s: %s",
+            base_url, request_sent_at, exc,
+        )
+        raise OllamaCallError(
+            f"Ollama closed the connection mid-response: {exc}",
+            error_type="RemoteProtocolError",
+            phase="read",
+            request_sent_at=request_sent_at,
+        ) from exc
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "ollama call failed phase=unknown error_type=%s base=%s: %s",
+            type(exc).__name__, base_url, exc,
+        )
+        raise OllamaCallError(
+            f"Ollama HTTP error: {exc}",
+            error_type=type(exc).__name__,
+            phase="unknown",
+            request_sent_at=request_sent_at,
+        ) from exc
+
+    http_status = response.status_code
+    if http_status >= 400:
+        body_snippet = response.text[:200] if response.text else ""
+        logger.warning(
+            "ollama call failed phase=response http_status=%d base=%s: %s",
+            http_status, base_url, body_snippet,
+        )
+        raise OllamaCallError(
+            f"Ollama returned HTTP {http_status}: {body_snippet}",
+            error_type="HTTPStatusError",
+            phase="response",
+            http_status=http_status,
+            request_sent_at=request_sent_at,
         )
 
     try:
         data = response.json()
     except ValueError as exc:
-        raise RuntimeError(f"Ollama returned non-JSON body: {exc}") from exc
+        logger.warning(
+            "ollama call failed phase=response error_type=InvalidJSON http_status=%d: %s",
+            http_status, exc,
+        )
+        raise OllamaCallError(
+            f"Ollama returned non-JSON body: {exc}",
+            error_type="InvalidJSON",
+            phase="response",
+            http_status=http_status,
+            request_sent_at=request_sent_at,
+        ) from exc
 
     text = ((data.get("message") or {}).get("content") or "").strip()
     if not text:
-        raise RuntimeError("Ollama returned empty response")
+        raise OllamaCallError(
+            "Ollama returned empty response",
+            error_type="EmptyResponse",
+            phase="response",
+            http_status=http_status,
+            request_sent_at=request_sent_at,
+        )
 
     in_tok = int(data.get("prompt_eval_count") or 0)
     out_tok = int(data.get("eval_count") or 0)
@@ -479,6 +611,15 @@ def _log_error(
     t0: float, exc: Exception,
     *, prompt: str | None = None,
 ) -> None:
+    error_type: str | None = None
+    error_phase: str | None = None
+    http_status: int | None = None
+    request_sent_at: str | None = None
+    if isinstance(exc, OllamaCallError):
+        error_type = exc.error_type
+        error_phase = exc.phase
+        http_status = exc.http_status
+        request_sent_at = exc.request_sent_at
     log_ai_usage(
         event_type=event_type,
         provider=provider,
@@ -489,6 +630,10 @@ def _log_error(
         success=False,
         error_message=str(exc)[:500],
         prompt_preview=prompt,
+        error_type=error_type,
+        error_phase=error_phase,
+        http_status=http_status,
+        request_sent_at=request_sent_at,
     )
 
 

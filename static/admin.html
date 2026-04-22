@@ -665,6 +665,29 @@
         </div>
     </div>
 
+    <!-- Ollama service logs (Railway) -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>
+                Logs del servicio Ollama (Railway)
+            </h3>
+            <p class="admin-card-desc">Últimas líneas del container de Ollama traídas vía la Railway GraphQL API. Útil para cruzar con una invocación con <code>error_phase=read</code> y confirmar si el modelo estaba cargando, descargando o murió por OOM. Nombre del servicio configurable por <code>RAILWAY_OLLAMA_SERVICE_NAME</code> (default <code>ollama</code>).</p>
+            <div class="admin-filter-row" id="ollama-logs-filters">
+                <select id="ollama-logs-limit">
+                    <option value="100">100 líneas</option>
+                    <option value="200" selected>200 líneas</option>
+                    <option value="500">500 líneas</option>
+                    <option value="1000">1000 líneas</option>
+                </select>
+                <input id="ollama-logs-filter" type="text" placeholder="Filtro (opcional, ej: ERROR o GET /api/chat)" style="flex:1;min-width:200px;padding:0.35rem 0.6rem;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text)">
+                <button id="ollama-logs-refresh" class="admin-date-btn active" type="button" style="padding:0.35rem 0.9rem">Recargar</button>
+            </div>
+            <div id="ollama-logs-meta" style="font-size:0.72rem;color:var(--text-dim);margin-top:0.4rem"></div>
+            <div id="ollama-logs-wrap" style="margin-top:0.6rem"><div class="admin-empty">Hacé click en <b>Recargar</b> para traer los logs.</div></div>
+        </div>
+    </div>
+
     <!-- Process events -->
     <div class="admin-section">
         <div class="admin-card">
@@ -695,6 +718,6 @@
     <div id="admin-modal-host"></div>
 </div>
 
-<script src="/static/js/admin.js?v=10"></script>
+<script src="/static/js/admin.js?v=11"></script>
 </body>
 </html>

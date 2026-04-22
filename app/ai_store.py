@@ -74,7 +74,11 @@ def init_ai_tables() -> None:
                     error_message   TEXT,
                     created_at      TEXT NOT NULL,
                     prompt_preview  TEXT,
-                    response_preview TEXT
+                    response_preview TEXT,
+                    error_type      TEXT,
+                    error_phase     TEXT,
+                    http_status     INTEGER,
+                    request_sent_at TEXT
                 )
                 """,
             )
@@ -97,7 +101,11 @@ def init_ai_tables() -> None:
                     error_message   TEXT,
                     created_at      TEXT NOT NULL,
                     prompt_preview  TEXT,
-                    response_preview TEXT
+                    response_preview TEXT,
+                    error_type      TEXT,
+                    error_phase     TEXT,
+                    http_status     INTEGER,
+                    request_sent_at TEXT
                 )
                 """,
             )
@@ -105,6 +113,7 @@ def init_ai_tables() -> None:
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_aul_event ON ai_usage_log(event_type)")
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_aul_provider ON ai_usage_log(provider)")
         _migrate_ai_usage_log_previews(conn)
+        _migrate_ai_usage_log_errors(conn)
 
         execute(
             conn,
@@ -190,6 +199,35 @@ def _migrate_ai_usage_log_previews(conn) -> None:
         logger.warning("ai_usage_log preview migration failed: %s", exc)
 
 
+def _migrate_ai_usage_log_errors(conn) -> None:
+    """Add structured error columns (error_type, error_phase, http_status, request_sent_at).
+
+    These let the admin panel distinguish between "request never reached the
+    provider" (connect phase) and "request was delivered but timed out while
+    waiting for the model" (read phase), which is specially valuable for
+    Ollama timeouts. Pre-existing rows get NULL and the UI must tolerate that.
+    """
+    try:
+        if is_postgres():
+            execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN IF NOT EXISTS error_type TEXT")
+            execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN IF NOT EXISTS error_phase TEXT")
+            execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN IF NOT EXISTS http_status INTEGER")
+            execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN IF NOT EXISTS request_sent_at TEXT")
+        else:
+            cur = query(conn, "PRAGMA table_info(ai_usage_log)")
+            cols = {row["name"] for row in cur.fetchall()}
+            if "error_type" not in cols:
+                execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN error_type TEXT")
+            if "error_phase" not in cols:
+                execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN error_phase TEXT")
+            if "http_status" not in cols:
+                execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN http_status INTEGER")
+            if "request_sent_at" not in cols:
+                execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN request_sent_at TEXT")
+    except Exception as exc:
+        logger.warning("ai_usage_log error-columns migration failed: %s", exc)
+
+
 def _seed_provider_config(conn) -> None:
     """Insert default rows for every known event type if missing."""
     now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
@@ -230,12 +268,20 @@ def log_ai_usage(
     error_message: str | None = None,
     prompt_preview: str | None = None,
     response_preview: str | None = None,
+    error_type: str | None = None,
+    error_phase: str | None = None,
+    http_status: int | None = None,
+    request_sent_at: str | None = None,
 ) -> None:
     """Persist a single AI call record.
 
     Prompt and response previews are only persisted if the env var
     ``AI_LOG_PREVIEWS=1`` is set; otherwise the caller may pass them but
     they're dropped (limits storage and PII risk by default).
+
+    ``error_type``/``error_phase``/``http_status``/``request_sent_at`` are
+    optional structured diagnostics (today populated by ``OllamaCallError``)
+    that let the admin panel tell a connect-timeout from a read-timeout.
     """
     cost_in, cost_out = compute_cost(model, input_tokens, output_tokens)
     now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
@@ -256,8 +302,9 @@ def log_ai_usage(
                     (event_type, provider, model, input_tokens, output_tokens,
                      cost_input, cost_output, cost_total, latency_ms,
                      success, error_message, created_at,
-                     prompt_preview, response_preview)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     prompt_preview, response_preview,
+                     error_type, error_phase, http_status, request_sent_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_type,
@@ -274,6 +321,10 @@ def log_ai_usage(
                     now_iso,
                     pp,
                     rp,
+                    error_type,
+                    error_phase,
+                    http_status,
+                    request_sent_at,
                 ),
             )
     except Exception as exc:
@@ -535,7 +586,8 @@ def query_ai_invocations(
     sql = (
         "SELECT id, event_type, provider, model, input_tokens, output_tokens, "
         "cost_total, latency_ms, success, error_message, created_at, "
-        "prompt_preview, response_preview "
+        "prompt_preview, response_preview, "
+        "error_type, error_phase, http_status, request_sent_at "
         f"FROM ai_usage_log{where} ORDER BY id DESC LIMIT ? OFFSET ?"
     )
     params.extend([int(limit), int(offset)])
@@ -545,6 +597,15 @@ def query_ai_invocations(
     except Exception as exc:
         logger.warning("query_ai_invocations failed: %s", exc)
         return []
+
+    def _col(row, name):
+        # Rows can be sqlite3.Row (supports __getitem__ by name and raises
+        # IndexError for unknown columns) or a psycopg dict-like row. Be
+        # defensive in case the migration hasn't run yet on an older DB.
+        try:
+            return row[name]
+        except (KeyError, IndexError):
+            return None
 
     return [
         {
@@ -561,6 +622,10 @@ def query_ai_invocations(
             "created_at": r["created_at"],
             "prompt_preview": r["prompt_preview"],
             "response_preview": r["response_preview"],
+            "error_type": _col(r, "error_type"),
+            "error_phase": _col(r, "error_phase"),
+            "http_status": _col(r, "http_status"),
+            "request_sent_at": _col(r, "request_sent_at"),
         }
         for r in rows
     ]

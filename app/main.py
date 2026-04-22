@@ -1103,6 +1103,38 @@ async def admin_ai_invocations(
     }
 
 
+@app.get("/api/admin/ollama-logs")
+async def admin_ollama_logs(
+    limit: int = 200,
+    filter: str | None = None,
+    service: str | None = None,
+    _admin: dict = Depends(require_admin),
+):
+    """Return recent log lines from the Railway-hosted Ollama service.
+
+    Backed by Railway's ``deploymentLogs`` GraphQL query. ``service`` lets
+    the caller override the default service name (env
+    ``RAILWAY_OLLAMA_SERVICE_NAME``, default ``"ollama"``) — useful when
+    the team renamed the Railway service. ``filter`` is passed through to
+    Railway (supports substring matches on message text).
+    """
+    if not railway_client.is_configured():
+        return {"available": False, "reason": "no_token"}
+
+    try:
+        result = await asyncio.to_thread(
+            railway_client.fetch_service_logs,
+            service,
+            limit=limit,
+            filter=filter or None,
+        )
+    except Exception as exc:
+        logger.warning("admin_ollama_logs failed: %s", exc)
+        return {"available": False, "reason": f"error: {exc}"}
+
+    return result
+
+
 @app.get("/api/admin/infra-costs")
 async def admin_infra_costs(_admin: dict = Depends(require_admin)):
     """Return the latest Railway cost snapshot plus a short daily history."""

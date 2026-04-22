@@ -1,11 +1,13 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from app.ai_search import (
     GEMINI_TIMEOUT,
     OLLAMA_MAX_PROMPT_CHARS,
+    OllamaCallError,
     _build_context,
     _call_ai,
     _call_gemini,
@@ -999,28 +1001,68 @@ class TestCallOllama:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=error_resp)
         monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
-        with pytest.raises(RuntimeError, match="HTTP 500"):
+        with pytest.raises(OllamaCallError, match="HTTP 500") as exc_info:
             await _call_ollama("hola")
+        assert exc_info.value.error_type == "HTTPStatusError"
+        assert exc_info.value.phase == "response"
+        assert exc_info.value.http_status == 500
 
     async def test_raises_on_empty_response(self, monkeypatch):
         monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=_mock_ollama_response("", 10, 0))
         monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
-        with pytest.raises(RuntimeError, match="empty response"):
+        with pytest.raises(OllamaCallError, match="empty response") as exc_info:
             await _call_ollama("hola")
+        assert exc_info.value.error_type == "EmptyResponse"
+        assert exc_info.value.phase == "response"
 
-    async def test_timeout_raises_runtime_error(self, monkeypatch):
+    async def test_read_timeout_maps_to_read_phase(self, monkeypatch):
+        """A httpx.ReadTimeout means the request reached Ollama but the model
+        didn't respond — surfaced as phase=read with request_sent_at set."""
         monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
 
-        async def _hang(*a, **kw):
-            await asyncio.sleep(5)
+        async def _raise_read_timeout(*a, **kw):
+            raise httpx.ReadTimeout("read timed out")
 
         mock_client = MagicMock()
-        mock_client.post = _hang
+        mock_client.post = _raise_read_timeout
         monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
-        with pytest.raises(RuntimeError, match="timed out"):
+        with pytest.raises(OllamaCallError, match="read timeout") as exc_info:
             await _call_ollama("hola", timeout=0.05)
+        assert exc_info.value.error_type == "ReadTimeout"
+        assert exc_info.value.phase == "read"
+        assert exc_info.value.request_sent_at is not None
+
+    async def test_connect_timeout_maps_to_connect_phase(self, monkeypatch):
+        """A httpx.ConnectTimeout means the request never reached Ollama —
+        surfaced as phase=connect with no request_sent_at timestamp."""
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+
+        async def _raise_connect_timeout(*a, **kw):
+            raise httpx.ConnectTimeout("could not connect")
+
+        mock_client = MagicMock()
+        mock_client.post = _raise_connect_timeout
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+        with pytest.raises(OllamaCallError, match="connect timeout") as exc_info:
+            await _call_ollama("hola")
+        assert exc_info.value.error_type == "ConnectTimeout"
+        assert exc_info.value.phase == "connect"
+
+    async def test_connect_error_maps_to_connect_phase(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+
+        async def _raise_connect_error(*a, **kw):
+            raise httpx.ConnectError("connection refused")
+
+        mock_client = MagicMock()
+        mock_client.post = _raise_connect_error
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+        with pytest.raises(OllamaCallError, match="connect error") as exc_info:
+            await _call_ollama("hola")
+        assert exc_info.value.error_type == "ConnectError"
+        assert exc_info.value.phase == "connect"
 
     async def test_truncates_long_prompt(self, monkeypatch):
         monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")

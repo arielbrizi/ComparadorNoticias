@@ -50,6 +50,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 function setupInfraCostsRefresh() {
     const btn = $("#infra-costs-refresh");
     if (btn) btn.addEventListener("click", refreshInfraCostsNow);
+    const logsBtn = $("#ollama-logs-refresh");
+    if (logsBtn) logsBtn.addEventListener("click", loadOllamaLogs);
+    const logsFilter = $("#ollama-logs-filter");
+    if (logsFilter) {
+        logsFilter.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") loadOllamaLogs();
+        });
+    }
 }
 
 function setupTabs() {
@@ -1122,7 +1130,8 @@ function renderAIInvocations(items, total, page, pageSize) {
             ? `${fmtTokens(c.input_tokens || 0)} → ${fmtTokens(c.output_tokens || 0)} · ${c.latency_ms || 0}ms`
             : escHtml((c.error_message || "(sin mensaje)")).slice(0, 200);
         const hasPreview = c.prompt_preview || c.response_preview;
-        const clickable = hasPreview ? "clickable" : "";
+        const hasErrorDetail = !c.success && (c.error_type || c.error_phase || c.http_status != null || c.error_message);
+        const clickable = (hasPreview || hasErrorDetail) ? "clickable" : "";
         return `
             <tr class="${clickable}" data-idx="${idx}">
                 <td style="white-space:nowrap">${escHtml(formatDatetimeART(c.created_at))}</td>
@@ -1154,6 +1163,14 @@ function renderAIInvocations(items, total, page, pageSize) {
     });
 }
 
+const _phaseHints = {
+    connect: "El request NUNCA llegó a Ollama. El servicio está caído, apagado, o la URL (OLLAMA_BASE_URL) es incorrecta.",
+    write: "Se abrió la conexión pero no se terminó de enviar el request. Probablemente la red se cortó.",
+    read: "El request SÍ llegó a Ollama. El modelo está cargado pero no respondió a tiempo (prompt muy largo, GPU saturada, o el modelo no está cargado en memoria).",
+    response: "Ollama respondió pero con un error HTTP o un payload inválido. Ver error_message para el detalle.",
+    unknown: "Error no clasificado. Revisá error_message y los logs de Ollama en Railway.",
+};
+
 function openInvocationModal(item) {
     const host = $("#admin-modal-host");
     if (!host) return;
@@ -1167,6 +1184,28 @@ function openInvocationModal(item) {
         _modalRow("Latencia", `${item.latency_ms || 0} ms`),
         _modalRow("Costo", fmtUSD(item.cost_total || 0)),
     ].join("");
+
+    // Technical detail block (only for failures, only if the structured
+    // error metadata is present — pre-migration rows may have it all NULL).
+    let technicalHtml = "";
+    if (!item.success && (item.error_type || item.error_phase || item.http_status != null || item.request_sent_at)) {
+        const techRows = [
+            item.error_type ? _modalRow("Tipo de error", item.error_type) : "",
+            item.error_phase ? _modalRow("Fase", item.error_phase) : "",
+            item.http_status != null ? _modalRow("HTTP status", String(item.http_status)) : "",
+            item.request_sent_at ? _modalRow("Request enviado", formatDatetimeART(item.request_sent_at)) : "",
+        ].join("");
+        const hint = item.error_phase && _phaseHints[item.error_phase]
+            ? `<div style="margin-top:0.4rem;padding:0.6rem 0.8rem;background:rgba(234,88,12,0.10);border-radius:6px;font-size:0.78rem;color:#fca5a5">
+                ${escHtml(_phaseHints[item.error_phase])}
+               </div>`
+            : "";
+        technicalHtml = `
+            <div style="font-size:0.78rem;color:var(--text-dim);margin-top:0.8rem">Detalle técnico</div>
+            ${techRows}
+            ${hint}`;
+    }
+
     const promptHtml = item.prompt_preview
         ? `<div style="font-size:0.78rem;color:var(--text-dim);margin-top:0.8rem">Prompt (preview)</div><pre>${escHtml(item.prompt_preview)}</pre>`
         : "";
@@ -1176,7 +1215,7 @@ function openInvocationModal(item) {
     const errorHtml = item.error_message
         ? `<div style="font-size:0.78rem;color:#fca5a5;margin-top:0.8rem">Error</div><pre style="color:#fca5a5">${escHtml(item.error_message)}</pre>`
         : "";
-    const noPreviewHint = (!promptHtml && !responseHtml && !errorHtml)
+    const noPreviewHint = (!promptHtml && !responseHtml && !errorHtml && !technicalHtml)
         ? `<div class="admin-empty" style="margin-top:0.8rem">Sin preview disponible. Habilitá <code>AI_LOG_PREVIEWS=1</code> para registrar previews.</div>`
         : "";
 
@@ -1186,9 +1225,10 @@ function openInvocationModal(item) {
                 <button class="admin-modal-close" id="admin-modal-close">&times;</button>
                 <h3>Invocación IA #${item.id || ""}</h3>
                 ${rowsHtml}
+                ${technicalHtml}
+                ${errorHtml}
                 ${promptHtml}
                 ${responseHtml}
-                ${errorHtml}
                 ${noPreviewHint}
             </div>
         </div>`;
@@ -1420,6 +1460,151 @@ async function refreshInfraCostsNow() {
     } finally {
         btn.disabled = false;
         btn.textContent = originalText;
+    }
+}
+
+// ── Ollama service logs (Railway) ───────────────────────────────────────
+
+function _ollamaLogsReasonMessage(data) {
+    const reason = String(data.reason || "").toLowerCase();
+    if (reason === "no_token") {
+        return "Integración con Railway no configurada. Definí <code>RAILWAY_API_TOKEN</code> y <code>RAILWAY_PROJECT_ID</code> para poder traer los logs.";
+    }
+    if (reason === "service_not_found") {
+        const known = (data.known_services || []).filter(Boolean);
+        const knownHtml = known.length
+            ? `Servicios detectados en el proyecto: ${known.map(n => `<code>${escHtml(n)}</code>`).join(", ")}.`
+            : "No se encontró ningún servicio en el proyecto.";
+        return `No existe un servicio llamado <code>${escHtml(data.service_name || "ollama")}</code>. ${knownHtml} Definí <code>RAILWAY_OLLAMA_SERVICE_NAME</code> con el nombre correcto.`;
+    }
+    if (reason === "no_deployment") {
+        return `El servicio <code>${escHtml(data.service_name || "ollama")}</code> existe pero todavía no tiene deployments.`;
+    }
+    if (reason === "timeout") return "Railway API timeout. Reintentá en unos segundos.";
+    if (reason.startsWith("http_401") || reason.startsWith("http_403")) {
+        return "Railway rechazó el token (401/403). Asegurate de usar un <b>Account/Team Token</b> con acceso al proyecto.";
+    }
+    if (reason.startsWith("http_404")) {
+        return "Railway devolvió 404. Revisá que <code>RAILWAY_PROJECT_ID</code> sea correcto.";
+    }
+    if (reason.startsWith("http_400")) {
+        return "Railway devolvió 400. Probablemente cambió el schema GraphQL; hay que actualizar <code>app/railway_client.py</code>.";
+    }
+    if (reason.startsWith("http_")) return `Railway respondió con un error HTTP (${escHtml(reason)}).`;
+    if (reason.startsWith("error")) return `Error al llamar a Railway: ${escHtml(reason)}`;
+    return `No disponible: ${escHtml(reason || "unknown")}`;
+}
+
+async function loadOllamaLogs() {
+    const wrap = $("#ollama-logs-wrap");
+    const meta = $("#ollama-logs-meta");
+    const btn = $("#ollama-logs-refresh");
+    if (!wrap) return;
+
+    const limit = parseInt(($("#ollama-logs-limit") || {}).value, 10) || 200;
+    const filter = (($("#ollama-logs-filter") || {}).value || "").trim();
+
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+    if (filter) params.set("filter", filter);
+
+    wrap.innerHTML = `<div class="admin-loading"><div class="spinner"></div></div>`;
+    if (meta) meta.textContent = "";
+    if (btn) { btn.disabled = true; btn.textContent = "Consultando Railway…"; }
+
+    try {
+        const resp = await fetch(`/api/admin/ollama-logs?${params}`);
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        if (resp.status === 404) {
+            wrap.innerHTML = `<div class="admin-empty">Endpoint no disponible.</div>`;
+            return;
+        }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderOllamaLogs(data);
+    } catch (err) {
+        console.error("Ollama logs load failed:", err);
+        wrap.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error de red: ${escHtml(err.message || err)}</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = "Recargar"; }
+    }
+}
+
+function renderOllamaLogs(data) {
+    const wrap = $("#ollama-logs-wrap");
+    const meta = $("#ollama-logs-meta");
+    if (!wrap) return;
+
+    if (!data.available) {
+        wrap.innerHTML = `<div class="admin-empty" style="color:#ea580c">${_ollamaLogsReasonMessage(data)}</div>`;
+        if (meta) meta.innerHTML = "";
+        return;
+    }
+
+    const logs = data.logs || [];
+    if (meta) {
+        meta.innerHTML = `Servicio <code>${escHtml(data.service_name || "—")}</code> · deployment <code>${escHtml((data.deployment_id || "—").slice(0, 12))}</code> · ${logs.length} línea${logs.length === 1 ? "" : "s"}`;
+    }
+
+    if (!logs.length) {
+        wrap.innerHTML = `<div class="admin-empty">Sin logs para mostrar (probá sin filtro o con más líneas).</div>`;
+        return;
+    }
+
+    // Render oldest-first so the most recent log line ends up at the bottom,
+    // matching how a `tail -f` looks and what admins expect when diagnosing.
+    const ordered = logs.slice().sort((a, b) => {
+        const ta = a.timestamp || "";
+        const tb = b.timestamp || "";
+        return ta.localeCompare(tb);
+    });
+
+    const lines = ordered.map(l => {
+        const ts = l.timestamp ? _shortLogTime(l.timestamp) : "        ";
+        const sev = (l.severity || "").toUpperCase();
+        const sevColor = _logSeverityColor(sev);
+        const sevLabel = sev ? `<span style="color:${sevColor}">[${escHtml(sev.padEnd(5).slice(0, 5))}]</span>` : "";
+        return `<span style="color:var(--text-dim)">${escHtml(ts)}</span> ${sevLabel} ${escHtml(l.message || "")}`;
+    }).join("\n");
+
+    wrap.innerHTML = `
+        <pre id="ollama-logs-pre" style="max-height:480px;overflow:auto;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:6px;padding:0.8rem;font-size:0.72rem;line-height:1.4;white-space:pre-wrap;word-break:break-word">${lines}</pre>`;
+
+    // Autoscroll to bottom (most recent line).
+    const pre = $("#ollama-logs-pre");
+    if (pre) pre.scrollTop = pre.scrollHeight;
+}
+
+function _shortLogTime(ts) {
+    try {
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return ts.slice(11, 19) || ts.slice(0, 8);
+        const hh = String(d.getHours()).padStart(2, "0");
+        const mm = String(d.getMinutes()).padStart(2, "0");
+        const ss = String(d.getSeconds()).padStart(2, "0");
+        return `${hh}:${mm}:${ss}`;
+    } catch {
+        return ts;
+    }
+}
+
+function _logSeverityColor(sev) {
+    switch (sev) {
+        case "ERROR":
+        case "FATAL":
+        case "CRIT":
+        case "CRITICAL":
+            return "#fca5a5";
+        case "WARN":
+        case "WARNING":
+            return "#fbbf24";
+        case "INFO":
+            return "#93c5fd";
+        case "DEBUG":
+        case "TRACE":
+            return "var(--text-dim)";
+        default:
+            return "var(--text-dim)";
     }
 }
 

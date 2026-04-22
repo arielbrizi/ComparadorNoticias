@@ -44,6 +44,7 @@ from app.ai_search import (
 )
 from app.ai_store import (
     count_ai_invocations,
+    get_ollama_timeout,
     get_provider_config,
     get_schedule_config,
     get_scheduler_config,
@@ -54,9 +55,13 @@ from app.ai_store import (
     query_ai_invocations,
     query_provider_health,
     query_recent_ai_calls,
+    set_ollama_timeout,
     set_provider_config,
     set_schedule_config,
     set_scheduler_interval,
+    OLLAMA_TIMEOUT_DEFAULT,
+    OLLAMA_TIMEOUT_MAX,
+    OLLAMA_TIMEOUT_MIN,
     SCHEDULER_DEFAULTS,
     VALID_EVENT_TYPES,
     VALID_PROVIDERS,
@@ -1349,6 +1354,51 @@ async def admin_scheduler_config_set(
         logger.warning("Failed to reschedule job %s: %s", job_key, exc)
 
     return {"ok": True, "job_key": job_key, "interval_minutes": interval_minutes}
+
+
+@app.get("/api/admin/ollama-config")
+async def admin_ollama_config_get(_admin: dict = Depends(require_admin)):
+    """Return the current Ollama invocation timeout and its allowed bounds."""
+    return {
+        "timeout_seconds": get_ollama_timeout(),
+        "default": OLLAMA_TIMEOUT_DEFAULT,
+        "min": OLLAMA_TIMEOUT_MIN,
+        "max": OLLAMA_TIMEOUT_MAX,
+    }
+
+
+@app.post("/api/admin/ollama-config")
+async def admin_ollama_config_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Update the Ollama invocation timeout (seconds)."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    timeout_seconds = body.get("timeout_seconds")
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool):
+        return JSONResponse(
+            {"error": "timeout_seconds must be an integer"},
+            status_code=400,
+        )
+    if timeout_seconds < OLLAMA_TIMEOUT_MIN or timeout_seconds > OLLAMA_TIMEOUT_MAX:
+        return JSONResponse(
+            {
+                "error": (
+                    f"timeout_seconds out of range "
+                    f"[{OLLAMA_TIMEOUT_MIN}, {OLLAMA_TIMEOUT_MAX}]"
+                )
+            },
+            status_code=400,
+        )
+
+    ok = set_ollama_timeout(timeout_seconds)
+    if not ok:
+        return JSONResponse({"error": "Failed to update"}, status_code=500)
+    return {"ok": True, "timeout_seconds": timeout_seconds}
 
 
 # ── Health check ─────────────────────────────────────────────────────────────

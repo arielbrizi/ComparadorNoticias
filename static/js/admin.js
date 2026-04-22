@@ -168,6 +168,7 @@ function loadAll() {
     } else if (_activeTab === "admin") {
         loadAIConfig();
         loadSchedulerConfig();
+        loadOllamaTimeout();
     } else if (_activeTab === "costs") {
         loadAICosts(desde, hasta);
         loadInfraCosts();
@@ -914,6 +915,82 @@ function renderSchedulerConfig(config, validIntervals) {
                 status.style.color = "#ea580c";
             }
         });
+    });
+}
+
+// ── Ollama invocation timeout ───────────────────────────────────────────
+
+async function loadOllamaTimeout() {
+    try {
+        const resp = await fetch("/api/admin/ollama-config");
+        if (resp.status === 403) return;
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderOllamaTimeout(data);
+    } catch (err) {
+        console.error("Ollama timeout config load failed:", err);
+        const container = $("#ollama-timeout-wrap");
+        if (container) container.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error de red</div>`;
+    }
+}
+
+function renderOllamaTimeout(data) {
+    const container = $("#ollama-timeout-wrap");
+    if (!container) return;
+
+    const current = data.timeout_seconds ?? data.default ?? 120;
+    const min = data.min ?? 30;
+    const max = data.max ?? 900;
+    const def = data.default ?? 120;
+
+    container.innerHTML = `
+        <div class="admin-eng-card" style="flex-direction:column;align-items:stretch;gap:0.4rem;max-width:340px">
+            <div style="font-size:0.68rem;color:var(--text-dim);margin-bottom:0.2rem">
+                Rango permitido: ${min}–${max} segundos (default ${def}s).
+            </div>
+            <div style="display:flex;gap:0.5rem;align-items:center">
+                <input type="number" id="ollama-timeout-input" class="ai-config-select"
+                    min="${min}" max="${max}" step="10" value="${current}"
+                    style="flex:1;max-width:140px">
+                <span style="font-size:0.75rem;color:var(--text-dim)">seg</span>
+                <button id="ollama-timeout-save" class="ai-config-select" style="cursor:pointer">Guardar</button>
+            </div>
+            <div id="ollama-timeout-status" style="font-size:0.65rem;min-height:1rem;color:var(--text-dim)"></div>
+        </div>
+    `;
+
+    const input = $("#ollama-timeout-input");
+    const btn = $("#ollama-timeout-save");
+    const status = $("#ollama-timeout-status");
+
+    btn.addEventListener("click", async () => {
+        const raw = parseInt(input.value, 10);
+        if (!Number.isFinite(raw) || raw < min || raw > max) {
+            status.textContent = `Valor fuera de rango (${min}–${max})`;
+            status.style.color = "#ea580c";
+            return;
+        }
+        status.textContent = "Guardando...";
+        status.style.color = "var(--text-dim)";
+        try {
+            const resp = await fetch("/api/admin/ollama-config", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ timeout_seconds: raw }),
+            });
+            if (resp.ok) {
+                status.textContent = "Guardado";
+                status.style.color = "#0d9488";
+                setTimeout(() => { status.textContent = ""; }, 2000);
+            } else {
+                const err = await resp.json().catch(() => ({}));
+                status.textContent = err.error || "Error";
+                status.style.color = "#ea580c";
+            }
+        } catch (err) {
+            status.textContent = "Error de red";
+            status.style.color = "#ea580c";
+        }
     });
 }
 

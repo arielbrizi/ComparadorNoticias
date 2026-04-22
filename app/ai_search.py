@@ -21,6 +21,7 @@ from groq import AsyncGroq
 
 from app.ai_store import (
     ART,
+    get_ollama_timeout,
     get_provider_config,
     is_in_quiet_hours,
     load_last_good_topics,
@@ -304,7 +305,7 @@ async def _call_groq(
 
 
 async def _call_ollama(
-    prompt: str, timeout: float = OLLAMA_TIMEOUT,
+    prompt: str, timeout: float | None = None,
 ) -> tuple[str, int, int]:
     """Call self-hosted Ollama via its native /api/chat endpoint.
 
@@ -312,11 +313,19 @@ async def _call_ollama(
     prompt, and truncates inputs that exceed ``OLLAMA_MAX_PROMPT_CHARS`` to
     avoid blowing the model's context window.
 
+    When ``timeout`` is ``None`` we read the admin-configurable value from
+    ``ai_runtime_config`` (falls back to ``OLLAMA_TIMEOUT``). The effective
+    timeout is applied per-request via ``httpx.Timeout`` so the cached
+    ``AsyncClient`` does not need to be rebuilt when the admin changes it.
+
     Returns (text, input_tokens, output_tokens).
     """
     client = _get_ollama_client()
     if not client:
         raise RuntimeError("Ollama client not available")
+
+    if timeout is None:
+        timeout = float(get_ollama_timeout())
 
     if len(prompt) > OLLAMA_MAX_PROMPT_CHARS:
         logger.info(
@@ -350,8 +359,18 @@ async def _call_ollama(
     # collapse every failure into a bare asyncio.TimeoutError, losing the
     # fine-grained httpx exceptions that tell us whether the request ever
     # reached Ollama (connect vs read phase).
+    # Per-request timeout overrides the client default so the admin-tuned
+    # value takes effect immediately without rebuilding the AsyncClient.
+    per_request_timeout = httpx.Timeout(
+        connect=10.0,
+        read=timeout + 5.0,
+        write=30.0,
+        pool=5.0,
+    )
     try:
-        response = await client.post("/api/chat", json=payload)
+        response = await client.post(
+            "/api/chat", json=payload, timeout=per_request_timeout,
+        )
     except httpx.ConnectTimeout as exc:
         logger.warning(
             "ollama call failed phase=connect error_type=ConnectTimeout base=%s: %s",
@@ -513,7 +532,7 @@ async def _invoke_provider(
     if provider == "groq":
         return await _call_groq(prompt, timeout=min(timeout, 60))
     if provider == "ollama":
-        return await _call_ollama(prompt, timeout=max(timeout, OLLAMA_TIMEOUT))
+        return await _call_ollama(prompt, timeout=max(timeout, float(get_ollama_timeout())))
     raise RuntimeError(f"Unknown provider: {provider}")
 
 

@@ -27,8 +27,14 @@ mode from the admin panel; valid modes live in
 ## Ollama limits
 
 - `OLLAMA_MAX_PROMPT_CHARS = 12000` — treat like Groq: build compact context
-- `OLLAMA_TIMEOUT = 120` — first call after idle can take 15–40s (cold start);
-  keep `OLLAMA_KEEP_ALIVE=10m` on the Railway service
+- `OLLAMA_TIMEOUT = 120` — **default only**. The effective per-call timeout is
+  read at invocation time from `ai_runtime_config` via
+  `app.ai_store.get_ollama_timeout()` and tunable from the admin panel
+  ("Timeout de invocación Ollama", bounds `OLLAMA_TIMEOUT_MIN`=30 /
+  `OLLAMA_TIMEOUT_MAX`=900). First call after idle can take 15–40s (cold
+  start); keep `OLLAMA_KEEP_ALIVE=10m` on the Railway service. The timeout
+  is applied per-request via `httpx.Timeout`, so the cached `AsyncClient`
+  is NOT rebuilt when the admin changes it.
 - Uses Ollama's native `/api/chat` with `format: "json"` to constrain output
 - Default model is `qwen3:8b` (override via `OLLAMA_MODEL` env var)
 - Self-hosted → cost per token is 0; tracked in `MODEL_PRICING` as free

@@ -164,6 +164,17 @@ def init_ai_tables() -> None:
             """,
         )
 
+        execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS ai_runtime_config (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+        )
+
         if is_postgres():
             execute(
                 conn,
@@ -1009,6 +1020,103 @@ def set_scheduler_interval(job_key: str, interval_minutes: int) -> bool:
     except Exception as exc:
         logger.error("Failed to update scheduler config: %s", exc)
         return False
+
+
+# ── Runtime config (key/value) ───────────────────────────────────────────────
+
+OLLAMA_TIMEOUT_DEFAULT = 120
+OLLAMA_TIMEOUT_MIN = 30
+OLLAMA_TIMEOUT_MAX = 900
+
+_OLLAMA_TIMEOUT_KEY = "ollama_timeout_seconds"
+
+_runtime_cache: dict[str, str] = {}
+_runtime_cache_ts: float = 0
+_RUNTIME_CACHE_TTL = 30
+
+
+def _get_runtime_value(key: str) -> str | None:
+    """Read a single ai_runtime_config value with a 30s cache."""
+    global _runtime_cache, _runtime_cache_ts
+    now = time.time()
+    if _runtime_cache and (now - _runtime_cache_ts) < _RUNTIME_CACHE_TTL:
+        return _runtime_cache.get(key)
+
+    try:
+        with get_conn() as conn:
+            rows = query(conn, "SELECT key, value FROM ai_runtime_config").fetchall()
+        _runtime_cache = {r["key"]: r["value"] for r in rows}
+        _runtime_cache_ts = now
+    except Exception as exc:
+        logger.warning("Failed to read ai_runtime_config: %s", exc)
+        return None
+    return _runtime_cache.get(key)
+
+
+def _set_runtime_value(key: str, value: str) -> bool:
+    global _runtime_cache_ts
+    now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        with get_conn() as conn:
+            if is_postgres():
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_runtime_config (key, value, updated_at)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (key) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (key, value, now_iso),
+                )
+            else:
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_runtime_config (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (key, value, now_iso),
+                )
+        _runtime_cache_ts = 0
+        return True
+    except Exception as exc:
+        logger.error("Failed to update ai_runtime_config (%s): %s", key, exc)
+        return False
+
+
+def get_ollama_timeout() -> int:
+    """Return the configured Ollama invocation timeout in seconds.
+
+    Falls back to ``OLLAMA_TIMEOUT_DEFAULT`` when no row exists, the value
+    is unparseable, or the stored value drifted outside the allowed range.
+    """
+    raw = _get_runtime_value(_OLLAMA_TIMEOUT_KEY)
+    if raw is None:
+        return OLLAMA_TIMEOUT_DEFAULT
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return OLLAMA_TIMEOUT_DEFAULT
+    if val < OLLAMA_TIMEOUT_MIN or val > OLLAMA_TIMEOUT_MAX:
+        return OLLAMA_TIMEOUT_DEFAULT
+    return val
+
+
+def set_ollama_timeout(seconds: int) -> bool:
+    """Persist a new Ollama timeout. Returns False if out of range."""
+    if not isinstance(seconds, int) or isinstance(seconds, bool):
+        return False
+    if seconds < OLLAMA_TIMEOUT_MIN or seconds > OLLAMA_TIMEOUT_MAX:
+        return False
+    ok = _set_runtime_value(_OLLAMA_TIMEOUT_KEY, str(seconds))
+    if ok:
+        logger.info("Ollama timeout updated: %ds", seconds)
+    return ok
 
 
 def load_last_good_topics() -> dict | None:

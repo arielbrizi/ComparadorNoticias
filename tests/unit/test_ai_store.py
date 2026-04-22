@@ -5,10 +5,14 @@ from __future__ import annotations
 import pytest
 
 from app.ai_store import (
+    OLLAMA_TIMEOUT_DEFAULT,
+    OLLAMA_TIMEOUT_MAX,
+    OLLAMA_TIMEOUT_MIN,
     VALID_EVENT_TYPES,
     VALID_PROVIDERS,
     compute_cost,
     count_ai_invocations,
+    get_ollama_timeout,
     get_provider_config,
     get_schedule_config,
     init_ai_tables,
@@ -18,6 +22,7 @@ from app.ai_store import (
     query_ai_cost_summary,
     query_ai_daily_cost,
     query_ai_invocations,
+    set_ollama_timeout,
     set_provider_config,
     set_schedule_config,
 )
@@ -28,6 +33,8 @@ def _reset_cache(monkeypatch):
     """Clear the in-memory config cache before each test."""
     monkeypatch.setattr("app.ai_store._config_cache", {})
     monkeypatch.setattr("app.ai_store._config_cache_ts", 0)
+    monkeypatch.setattr("app.ai_store._runtime_cache", {})
+    monkeypatch.setattr("app.ai_store._runtime_cache_ts", 0)
 
 
 class TestComputeCost:
@@ -505,3 +512,57 @@ class TestOllamaErrorPromptPersistence:
         )
         rows = query_ai_invocations()
         assert len(rows[0]["prompt_preview"]) == 2000
+
+
+class TestOllamaTimeoutConfig:
+    """Ollama invocation timeout is admin-configurable via ai_runtime_config."""
+
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def test_default_when_no_row(self):
+        assert get_ollama_timeout() == OLLAMA_TIMEOUT_DEFAULT
+
+    def test_set_and_get_roundtrip(self):
+        assert set_ollama_timeout(300) is True
+        assert get_ollama_timeout() == 300
+
+    def test_update_overwrites_previous(self):
+        set_ollama_timeout(180)
+        set_ollama_timeout(240)
+        assert get_ollama_timeout() == 240
+
+    def test_rejects_below_min(self):
+        assert set_ollama_timeout(OLLAMA_TIMEOUT_MIN - 1) is False
+        assert get_ollama_timeout() == OLLAMA_TIMEOUT_DEFAULT
+
+    def test_rejects_above_max(self):
+        assert set_ollama_timeout(OLLAMA_TIMEOUT_MAX + 1) is False
+        assert get_ollama_timeout() == OLLAMA_TIMEOUT_DEFAULT
+
+    def test_accepts_bounds(self):
+        assert set_ollama_timeout(OLLAMA_TIMEOUT_MIN) is True
+        assert get_ollama_timeout() == OLLAMA_TIMEOUT_MIN
+        assert set_ollama_timeout(OLLAMA_TIMEOUT_MAX) is True
+        assert get_ollama_timeout() == OLLAMA_TIMEOUT_MAX
+
+    def test_rejects_non_int(self):
+        assert set_ollama_timeout("180") is False  # type: ignore[arg-type]
+        assert set_ollama_timeout(180.5) is False  # type: ignore[arg-type]
+        assert set_ollama_timeout(True) is False
+        assert get_ollama_timeout() == OLLAMA_TIMEOUT_DEFAULT
+
+    def test_out_of_range_stored_value_falls_back_to_default(self, monkeypatch):
+        # Simulate a value that somehow drifted outside the allowed range
+        # (e.g. manual DB edit or range tightening in a future release).
+        monkeypatch.setattr(
+            "app.ai_store._get_runtime_value", lambda _k: "99999",
+        )
+        assert get_ollama_timeout() == OLLAMA_TIMEOUT_DEFAULT
+
+    def test_unparseable_stored_value_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.ai_store._get_runtime_value", lambda _k: "not-a-number",
+        )
+        assert get_ollama_timeout() == OLLAMA_TIMEOUT_DEFAULT

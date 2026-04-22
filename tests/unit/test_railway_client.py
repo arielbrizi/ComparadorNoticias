@@ -67,8 +67,17 @@ class TestFetchUsage:
                             {"node": {"id": "svc-1", "name": "web"}},
                             {"node": {"id": "svc-2", "name": "ollama"}},
                         ]},
-                        "estimatedUsage": {"estimatedValue": 12.34},
                     },
+                    # 1 vCPU-month ≈ 43_200 vCPU-minutes → $20.00
+                    # 2 GB-month ≈ 86_400 GB-minutes → $20.00
+                    # 10 GB egress → $0.50
+                    # 5 GB-month ≈ 216_000 GB-minutes → $1.25
+                    "estimatedUsage": [
+                        {"measurement": "CPU_USAGE", "estimatedValue": 43_200.0},
+                        {"measurement": "MEMORY_USAGE_GB", "estimatedValue": 86_400.0},
+                        {"measurement": "NETWORK_TX_GB", "estimatedValue": 10.0},
+                        {"measurement": "DISK_USAGE_GB", "estimatedValue": 216_000.0},
+                    ],
                 }
             })
 
@@ -76,13 +85,17 @@ class TestFetchUsage:
             result = railway_client.fetch_usage(client=client)
 
         assert captured["auth"] == "Bearer test-token"
-        assert captured["body"]["variables"] == {"projectId": "proj-abc"}
+        variables = captured["body"]["variables"]
+        assert variables["projectId"] == "proj-abc"
+        assert "CPU_USAGE" in variables["measurements"]
+        assert "MEMORY_USAGE_GB" in variables["measurements"]
 
         assert result["available"] is True
         names = [s["service_name"] for s in result["services"]]
         assert "web" in names
         assert "ollama" in names
-        assert result["total_usd_month"] == pytest.approx(12.34)
+        # 20 + 20 + 0.5 + 1.25 = 41.75
+        assert result["total_usd_month"] == pytest.approx(41.75, rel=1e-3)
 
     def test_returns_unavailable_on_http_error(self, _configured):
         def handler(request):
@@ -118,8 +131,8 @@ class TestFetchUsage:
                     "project": {
                         "id": "p", "name": "P",
                         "services": {"edges": []},
-                        "estimatedUsage": None,
-                    }
+                    },
+                    "estimatedUsage": None,
                 }
             })
 
@@ -130,10 +143,28 @@ class TestFetchUsage:
 
     def test_empty_project_data_is_handled(self, _configured):
         def handler(request):
-            return httpx.Response(200, json={"data": {"project": None}})
+            return httpx.Response(200, json={"data": {"project": None, "estimatedUsage": []}})
 
         with _make_client(handler) as client:
             result = railway_client.fetch_usage(client=client)
         assert result["available"] is True
         assert result["total_usd_month"] == 0.0
         assert isinstance(result["services"], list)
+
+    def test_unknown_measurement_contributes_zero(self, _configured):
+        def handler(request):
+            return httpx.Response(200, json={
+                "data": {
+                    "project": {"id": "p", "name": "P", "services": {"edges": []}},
+                    "estimatedUsage": [
+                        {"measurement": "SOMETHING_NEW", "estimatedValue": 999.0},
+                        {"measurement": "NETWORK_TX_GB", "estimatedValue": 4.0},
+                    ],
+                }
+            })
+
+        with _make_client(handler) as client:
+            result = railway_client.fetch_usage(client=client)
+        assert result["available"] is True
+        # Only NETWORK_TX_GB contributes: 4 GB * $0.05 = $0.20
+        assert result["total_usd_month"] == pytest.approx(0.20, rel=1e-3)

@@ -5,9 +5,11 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
 // ── AI config (client-side timeouts synced with admin-configurable
-//    Ollama timeout, so the browser never aborts before the server does) ──
+//    Ollama timeout, so the browser never aborts before the server does).
+//    Fallback uses MAX (not DEFAULT) to avoid cutting early on a race where
+//    /api/ai-config hasn't resolved yet but the user already fired a search. ──
 const AI_CONFIG_CLIENT_MARGIN_MS = 15_000;
-const AI_CONFIG_FALLBACK_SECONDS = 120;  // matches OLLAMA_TIMEOUT_DEFAULT
+const AI_CONFIG_FALLBACK_SECONDS = 900;  // matches OLLAMA_TIMEOUT_MAX (safe default)
 const AI_CONFIG_MAX_SECONDS = 900;       // matches OLLAMA_TIMEOUT_MAX
 let _aiConfigTimeoutMs = AI_CONFIG_FALLBACK_SECONDS * 1000 + AI_CONFIG_CLIENT_MARGIN_MS;
 
@@ -624,6 +626,7 @@ function setupFilters() {
 
 // ── Hero search & action cards ────────────────────────────────────────────
 let _aiSearchController = null;
+let _aiSearchTimedOut = false;
 let _topicsCache = null;
 let _topicsLoading = false;
 let _topicsCacheTs = 0;
@@ -928,6 +931,7 @@ async function performAISearch(query) {
     if (_aiSearchController) _aiSearchController.abort();
     _aiSearchController = new AbortController();
     const signal = _aiSearchController.signal;
+    _aiSearchTimedOut = false;
 
     state.searchQuery = query.toLowerCase();
     state.aiSearch.loading = true;
@@ -940,6 +944,15 @@ async function performAISearch(query) {
 
     const qEnc = encodeURIComponent(query);
     const searchUrl = `${API}/api/search?q=${qEnc}`;
+
+    // Client-side timeout synced with admin-configured Ollama timeout (+ margin),
+    // so we never abort before the server does. Tracks `_aiSearchTimedOut` so
+    // the catch below can tell user-driven aborts from time-based ones.
+    const timeoutMs = getSearchTimeoutMs();
+    const timer = setTimeout(() => {
+        _aiSearchTimedOut = true;
+        if (_aiSearchController) _aiSearchController.abort();
+    }, timeoutMs);
 
     try {
         const resp = await fetch(searchUrl, { signal });
@@ -973,18 +986,31 @@ async function performAISearch(query) {
     } catch (err) {
         if (err.name === "AbortError") {
             state.aiSearch.loading = false;
+            if (_aiSearchTimedOut) {
+                console.warn(`AI search timed out after ${Math.round(timeoutMs / 1000)}s`);
+                state.aiSearch.available = false;
+                state.aiSearch.active = false;
+                showToast(`La búsqueda tardó más de ${Math.round(timeoutMs / 1000)}s. Intentá de nuevo.`);
+                renderAIStatus(); renderAISummary(); renderGroups();
+                _aiSearchController = null;
+                _aiSearchTimedOut = false;
+                return;
+            }
             renderAIStatus(); renderAISummary(); renderGroups();
             return;
         }
         console.error("AI search failed:", err);
         state.aiSearch.available = false;
         state.aiSearch.active = false;
+    } finally {
+        clearTimeout(timer);
     }
 
     if (signal.aborted) return;
 
     state.aiSearch.loading = false;
     _aiSearchController = null;
+    _aiSearchTimedOut = false;
     renderAIStatus();
     renderAISummary();
     renderGroups();

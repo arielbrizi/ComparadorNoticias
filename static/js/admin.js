@@ -944,16 +944,16 @@ function renderOllamaTimeout(data) {
     const def = data.default ?? 120;
 
     container.innerHTML = `
-        <div class="admin-eng-card" style="flex-direction:column;align-items:stretch;gap:0.4rem;max-width:340px">
+        <div class="admin-eng-card" style="flex-direction:column;align-items:stretch;gap:0.4rem;max-width:420px">
             <div style="font-size:0.68rem;color:var(--text-dim);margin-bottom:0.2rem">
                 Rango permitido: ${min}–${max} segundos (default ${def}s).
             </div>
             <div style="display:flex;gap:0.5rem;align-items:center">
                 <input type="number" id="ollama-timeout-input" class="ai-config-select"
                     min="${min}" max="${max}" step="10" value="${current}"
-                    style="flex:1;max-width:140px">
+                    style="width:110px;min-width:110px;text-align:right;padding-right:0.5rem">
                 <span style="font-size:0.75rem;color:var(--text-dim)">seg</span>
-                <button id="ollama-timeout-save" class="ai-config-select" style="cursor:pointer">Guardar</button>
+                <button id="ollama-timeout-save" class="ai-config-select" style="cursor:pointer;flex:1">Guardar</button>
             </div>
             <div id="ollama-timeout-status" style="font-size:0.65rem;min-height:1rem;color:var(--text-dim)"></div>
         </div>

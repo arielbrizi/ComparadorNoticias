@@ -4,6 +4,31 @@ const API = "";
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
+// ── AI config (client-side timeouts synced with admin-configurable
+//    Ollama timeout, so the browser never aborts before the server does) ──
+const AI_CONFIG_CLIENT_MARGIN_MS = 15_000;
+const AI_CONFIG_FALLBACK_SECONDS = 120;  // matches OLLAMA_TIMEOUT_DEFAULT
+const AI_CONFIG_MAX_SECONDS = 900;       // matches OLLAMA_TIMEOUT_MAX
+let _aiConfigTimeoutMs = AI_CONFIG_FALLBACK_SECONDS * 1000 + AI_CONFIG_CLIENT_MARGIN_MS;
+
+async function loadAIConfig() {
+    try {
+        const resp = await fetch(`${API}/api/ai-config`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const raw = Number(data.search_timeout_seconds);
+        if (!Number.isFinite(raw) || raw <= 0) return;
+        const clamped = Math.min(raw, AI_CONFIG_MAX_SECONDS);
+        _aiConfigTimeoutMs = clamped * 1000 + AI_CONFIG_CLIENT_MARGIN_MS;
+    } catch (err) {
+        console.warn("Failed to load AI config, using default timeout:", err);
+    }
+}
+
+function getSearchTimeoutMs() {
+    return _aiConfigTimeoutMs;
+}
+
 // ── Deep-link support ────────────────────────────────────────────────────
 const VALID_VIEWS = new Set(["noticias", "metricas", "semana", "importante", "temas", "nube"]);
 
@@ -58,6 +83,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupContact();
     initAuth();
     loadDolarTicker();
+    loadAIConfig();
     track("page_view", { view: initialView, initial: true });
     await loadData();
     if (initialView !== "noticias") {
@@ -2026,7 +2052,7 @@ async function loadTemaDetail(label) {
     let timer;
     try {
         const ctrl = new AbortController();
-        timer = setTimeout(() => ctrl.abort(), 60000);
+        timer = setTimeout(() => ctrl.abort(), getSearchTimeoutMs());
         const resp = await fetch(`${API}/api/search?q=${encodeURIComponent(label)}`, { signal: ctrl.signal });
         clearTimeout(timer); timer = null;
 

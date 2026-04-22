@@ -1356,6 +1356,20 @@ async def admin_scheduler_config_set(
     return {"ok": True, "job_key": job_key, "interval_minutes": interval_minutes}
 
 
+@app.get("/api/ai-config")
+async def ai_config_public():
+    """Public AI config used by the frontend to size client-side timeouts.
+
+    The browser needs to know how long the backend is willing to wait for an
+    AI search so its ``AbortController`` timeout stays >= the server's, plus
+    a small margin. Otherwise the client aborts while the server keeps
+    working and logs a successful invocation the user never sees.
+    """
+    return {
+        "search_timeout_seconds": get_ollama_timeout(),
+    }
+
+
 @app.get("/api/admin/ollama-config")
 async def admin_ollama_config_get(_admin: dict = Depends(require_admin)):
     """Return the current Ollama invocation timeout and its allowed bounds."""

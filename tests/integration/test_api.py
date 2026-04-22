@@ -234,3 +234,25 @@ class TestApiTopStory:
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["date"]) == 10
+
+
+class TestApiAIConfig:
+    async def test_public_endpoint_returns_search_timeout(self, client):
+        resp = await client.get("/api/ai-config")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "search_timeout_seconds" in data
+        assert isinstance(data["search_timeout_seconds"], int)
+        assert data["search_timeout_seconds"] > 0
+
+    async def test_reflects_admin_configured_value(self, client):
+        from app.ai_store import init_ai_tables, set_ollama_timeout
+
+        init_ai_tables()
+        assert set_ollama_timeout(240) is True
+        try:
+            resp = await client.get("/api/ai-config")
+            assert resp.status_code == 200
+            assert resp.json()["search_timeout_seconds"] == 240
+        finally:
+            set_ollama_timeout(120)

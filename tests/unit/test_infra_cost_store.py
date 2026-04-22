@@ -66,12 +66,30 @@ class TestSaveSnapshot:
 
 
 class TestHistory:
-    def test_groups_by_day(self, _init):
-        save_snapshot([{"service_name": "a", "usd_month": 1.0, "raw": {}}])
-        save_snapshot([{"service_name": "a", "usd_month": 1.5, "raw": {}}])
+    def test_uses_latest_snapshot_per_day(self, _init):
+        """Multiple refreshes in the same day must NOT accumulate."""
+        save_snapshot([
+            {"service_name": "web", "usd_month": 1.0, "raw": {}},
+            {"service_name": "db",  "usd_month": 0.5, "raw": {}},
+        ])
+        time.sleep(1.1)  # ensure a distinct fetched_at (second resolution)
+        save_snapshot([
+            {"service_name": "web", "usd_month": 2.0, "raw": {}},
+            {"service_name": "db",  "usd_month": 1.0, "raw": {}},
+        ])
         rows = history(days=30)
         assert len(rows) == 1
-        assert rows[0]["estimated_usd_month"] == pytest.approx(2.5)
+        # Only the latest snapshot (2.0 + 1.0) counts, not 1.5 + 3.0 = 4.5
+        assert rows[0]["estimated_usd_month"] == pytest.approx(3.0)
+
+    def test_sums_services_within_latest_snapshot(self, _init):
+        save_snapshot([
+            {"service_name": "a", "usd_month": 1.25, "raw": {}},
+            {"service_name": "b", "usd_month": 2.75, "raw": {}},
+        ])
+        rows = history(days=30)
+        assert len(rows) == 1
+        assert rows[0]["estimated_usd_month"] == pytest.approx(4.0)
 
     def test_empty_returns_empty_list(self, _init):
         assert history() == []

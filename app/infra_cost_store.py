@@ -135,20 +135,33 @@ def latest_snapshot() -> dict:
 
 
 def history(days: int = 14) -> list[dict]:
-    """Return per-day aggregated totals for the last N days."""
+    """Return per-day totals for the last N days.
+
+    For each day we keep ONLY the latest snapshot (``MAX(fetched_at)``) and sum
+    its per-service costs. Otherwise multiple manual refreshes in the same day
+    would accumulate and inflate the daily estimate.
+    """
     cutoff = (datetime.now(ART) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
     try:
         with get_conn() as conn:
             rows = query(
                 conn,
                 """
-                SELECT SUBSTR(fetched_at, 1, 10) AS day,
-                       MAX(fetched_at) AS last_ts,
-                       SUM(CASE WHEN estimated_usd_month IS NULL THEN 0 ELSE estimated_usd_month END) AS total
-                FROM infra_cost_snapshot
-                WHERE fetched_at >= ?
-                GROUP BY SUBSTR(fetched_at, 1, 10)
-                ORDER BY day DESC
+                WITH last_per_day AS (
+                    SELECT SUBSTR(fetched_at, 1, 10) AS day,
+                           MAX(fetched_at)          AS last_ts
+                    FROM infra_cost_snapshot
+                    WHERE fetched_at >= ?
+                    GROUP BY SUBSTR(fetched_at, 1, 10)
+                )
+                SELECT lpd.day     AS day,
+                       lpd.last_ts AS last_ts,
+                       SUM(CASE WHEN s.estimated_usd_month IS NULL
+                                THEN 0 ELSE s.estimated_usd_month END) AS total
+                FROM last_per_day lpd
+                JOIN infra_cost_snapshot s ON s.fetched_at = lpd.last_ts
+                GROUP BY lpd.day, lpd.last_ts
+                ORDER BY lpd.day DESC
                 """,
                 (cutoff,),
             ).fetchall()

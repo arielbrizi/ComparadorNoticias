@@ -2636,7 +2636,7 @@ a.brand { text-decoration: none; color: inherit; cursor: pointer; }
     top: calc(100% + 6px);
     right: 0;
     min-width: 180px;
-    background: var(--card-bg);
+    background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     box-shadow: 0 8px 24px rgba(0,0,0,0.4);

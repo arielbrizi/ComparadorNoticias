@@ -1196,12 +1196,12 @@ function openInvocationModal(item) {
             item.request_sent_at ? _modalRow("Request enviado", formatDatetimeART(item.request_sent_at)) : "",
         ].join("");
         const hint = item.error_phase && _phaseHints[item.error_phase]
-            ? `<div style="margin-top:0.4rem;padding:0.6rem 0.8rem;background:rgba(234,88,12,0.10);border-radius:6px;font-size:0.78rem;color:#fca5a5">
+            ? `<div style="margin-top:0.5rem;padding:0.7rem 0.9rem;background:rgba(234,88,12,0.18);border:1px solid rgba(234,88,12,0.45);border-radius:6px;font-size:0.82rem;line-height:1.45;color:#fed7aa">
                 ${escHtml(_phaseHints[item.error_phase])}
                </div>`
             : "";
         technicalHtml = `
-            <div style="font-size:0.78rem;color:var(--text-dim);margin-top:0.8rem">Detalle técnico</div>
+            <div style="font-size:0.78rem;color:var(--text-dim);margin-top:0.8rem;text-transform:uppercase;letter-spacing:0.04em">Detalle técnico</div>
             ${techRows}
             ${hint}`;
     }
@@ -1213,7 +1213,7 @@ function openInvocationModal(item) {
         ? `<div style="font-size:0.78rem;color:var(--text-dim)">Respuesta (preview)</div><pre>${escHtml(item.response_preview)}</pre>`
         : "";
     const errorHtml = item.error_message
-        ? `<div style="font-size:0.78rem;color:#fca5a5;margin-top:0.8rem">Error</div><pre style="color:#fca5a5">${escHtml(item.error_message)}</pre>`
+        ? `<div style="font-size:0.78rem;color:#fca5a5;margin-top:0.8rem;text-transform:uppercase;letter-spacing:0.04em">Error</div><pre style="color:#fecaca;background:rgba(127,29,29,0.25);border:1px solid rgba(220,38,38,0.35);white-space:pre-wrap;word-break:break-word">${escHtml(item.error_message)}</pre>`
         : "";
     const noPreviewHint = (!promptHtml && !responseHtml && !errorHtml && !technicalHtml)
         ? `<div class="admin-empty" style="margin-top:0.8rem">Sin preview disponible. Habilitá <code>AI_LOG_PREVIEWS=1</code> para registrar previews.</div>`

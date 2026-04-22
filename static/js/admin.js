@@ -23,8 +23,13 @@ const _featureLabels = {
 const _barColors = ["blue", "teal", "purple", "orange", "pink"];
 
 let _dateRange = "7d";
-let _activeTab = "general";
+let _activeTab = "metrics";
+let _activeSubtab = "logged";
 let _aiMonitorTimer = null;
+
+let _aiInvocationsPage = 1;
+let _processEventsPage = 1;
+const _PAGE_SIZE = 25;
 
 document.addEventListener("DOMContentLoaded", async () => {
     const resp = await fetch("/auth/me");
@@ -35,7 +40,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     setupTabs();
+    setupSubtabs();
     setupDateFilters();
+    setupLogFilters();
     loadAll();
 });
 
@@ -46,10 +53,36 @@ function setupTabs() {
             tab.classList.add("active");
             _activeTab = tab.dataset.tab;
             $$(".admin-tab-panel").forEach(p => p.classList.remove("active"));
-            $(`#panel-${_activeTab}`).classList.add("active");
+            const panel = $(`#panel-${_activeTab}`);
+            if (panel) panel.classList.add("active");
             loadAll();
         });
     });
+}
+
+function setupSubtabs() {
+    $$("#admin-subtabs .admin-subtab").forEach(tab => {
+        tab.addEventListener("click", () => {
+            $$("#admin-subtabs .admin-subtab").forEach(t => t.classList.remove("active"));
+            tab.classList.add("active");
+            _activeSubtab = tab.dataset.subtab;
+            $$("#panel-metrics .admin-subtab-panel").forEach(p => p.classList.remove("active"));
+            const panel = $(`#subpanel-${_activeSubtab}`);
+            if (panel) panel.classList.add("active");
+            loadAll();
+        });
+    });
+}
+
+function setupLogFilters() {
+    const applyInv = $("#ai-inv-apply");
+    if (applyInv) {
+        applyInv.addEventListener("click", () => { _aiInvocationsPage = 1; loadAIInvocations(); });
+    }
+    const applyProc = $("#proc-apply");
+    if (applyProc) {
+        applyProc.addEventListener("click", () => { _processEventsPage = 1; loadProcessEvents(); });
+    }
 }
 
 function setupDateFilters() {
@@ -103,19 +136,27 @@ function qs(desde, hasta) {
 
 function loadAll() {
     const { desde, hasta } = computeRange(_dateRange);
-    if (_activeTab === "general") {
-        loadDashboard(desde, hasta);
-        loadTopContent();
-        loadSearches();
-        loadHourly(desde, hasta);
-        loadDaily(desde, hasta);
-        loadUsers();
-    } else if (_activeTab === "ai") {
-        loadAIDashboard(desde, hasta);
+    if (_activeTab === "metrics") {
+        if (_activeSubtab === "logged") {
+            loadDashboard(desde, hasta);
+            loadTopContent();
+            loadSearches();
+            loadHourly(desde, hasta);
+            loadDaily(desde, hasta);
+            loadUsers();
+        } else {
+            loadAnonymousDashboard(desde, hasta);
+        }
+    } else if (_activeTab === "logs") {
+        loadAIMonitor();
+        loadAIInvocations();
+        loadProcessEvents();
+    } else if (_activeTab === "admin") {
         loadAIConfig();
         loadSchedulerConfig();
-    } else {
-        loadAnonymousDashboard(desde, hasta);
+    } else if (_activeTab === "costs") {
+        loadAICosts(desde, hasta);
+        loadInfraCosts();
     }
     updateAIMonitorTimer();
 }
@@ -125,7 +166,7 @@ function updateAIMonitorTimer() {
         clearInterval(_aiMonitorTimer);
         _aiMonitorTimer = null;
     }
-    if (_activeTab === "ai") {
+    if (_activeTab === "logs") {
         _aiMonitorTimer = setInterval(loadAIMonitor, 20000);
     }
 }
@@ -508,8 +549,7 @@ function fmtTokens(n) {
     return String(n);
 }
 
-async function loadAIDashboard(desde, hasta) {
-    loadAIMonitor();
+async function loadAICosts(desde, hasta) {
     try {
         const now = new Date();
         const mesDesde = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
@@ -566,7 +606,7 @@ async function loadAIDashboard(desde, hasta) {
         renderAIEventTable(s.by_event);
         renderAIDailyTable(data.daily || []);
     } catch (err) {
-        console.error("AI dashboard load failed:", err);
+        console.error("AI costs load failed:", err);
     }
 }
 
@@ -884,7 +924,6 @@ async function loadAIMonitor() {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         renderAIMonitorProviders(data.providers || []);
-        renderAIMonitorRecent(data.recent_calls || []);
     } catch (err) {
         console.error("AI monitor load failed:", err);
         const providers = $("#ai-monitor-providers");
@@ -1003,6 +1042,344 @@ function renderAIMonitorRecent(calls) {
             <thead><tr><th>Cuándo</th><th>Evento</th><th>Provider</th><th>Estado</th><th>Detalle</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
+}
+
+// ── AI invocations (paginated) ──────────────────────────────────────────
+
+async function loadAIInvocations() {
+    const wrap = $("#ai-invocations-wrap");
+    const pager = $("#ai-invocations-pagination");
+    if (!wrap) return;
+
+    const provSel = $("#ai-inv-provider");
+    const evSel = $("#ai-inv-event");
+    const sucSel = $("#ai-inv-success");
+
+    const params = new URLSearchParams();
+    params.set("page", String(_aiInvocationsPage));
+    params.set("page_size", String(_PAGE_SIZE));
+    if (provSel && provSel.value) params.set("provider", provSel.value);
+    if (evSel && evSel.value) params.set("event_type", evSel.value);
+    if (sucSel && sucSel.value) params.set("success", sucSel.value);
+
+    try {
+        const resp = await fetch(`/api/admin/ai-invocations?${params}`);
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        if (resp.status === 404) {
+            wrap.innerHTML = `<div class="admin-empty">Endpoint no disponible (requiere Fase 2)</div>`;
+            if (pager) pager.innerHTML = "";
+            return;
+        }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        _populateInvocationFilters(data.filters || {});
+        renderAIInvocations(data.items || [], data.total || 0, data.page || 1, data.page_size || _PAGE_SIZE);
+    } catch (err) {
+        console.error("AI invocations load failed:", err);
+        wrap.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error de red</div>`;
+    }
+}
+
+function _populateInvocationFilters(filters) {
+    const provSel = $("#ai-inv-provider");
+    const evSel = $("#ai-inv-event");
+    if (provSel && !provSel.dataset.initialized && filters.providers) {
+        const current = provSel.value;
+        provSel.innerHTML = `<option value="">Todos los proveedores</option>` +
+            filters.providers.map(p => `<option value="${escHtml(p)}" ${p === current ? "selected" : ""}>${escHtml(_providerDisplayNames[p] || p)}</option>`).join("");
+        provSel.dataset.initialized = "1";
+    }
+    if (evSel && !evSel.dataset.initialized && filters.event_types) {
+        const current = evSel.value;
+        evSel.innerHTML = `<option value="">Todos los eventos</option>` +
+            filters.event_types.map(e => `<option value="${escHtml(e)}" ${e === current ? "selected" : ""}>${escHtml(_eventLabels[e] || e)}</option>`).join("");
+        evSel.dataset.initialized = "1";
+    }
+}
+
+function renderAIInvocations(items, total, page, pageSize) {
+    const wrap = $("#ai-invocations-wrap");
+    const pager = $("#ai-invocations-pagination");
+    if (!items.length) {
+        wrap.innerHTML = `<div class="admin-empty">No hay invocaciones en el rango seleccionado</div>`;
+        if (pager) pager.innerHTML = "";
+        return;
+    }
+
+    const rows = items.map((c, idx) => {
+        const ev = _eventLabels[c.event_type] || c.event_type;
+        const statusCell = c.success
+            ? `<span class="admin-status-pill admin-status-ok">OK</span>`
+            : `<span class="admin-status-pill admin-status-error">ERROR</span>`;
+        const detail = c.success
+            ? `${fmtTokens(c.input_tokens || 0)} → ${fmtTokens(c.output_tokens || 0)} · ${c.latency_ms || 0}ms`
+            : escHtml((c.error_message || "(sin mensaje)")).slice(0, 200);
+        const hasPreview = c.prompt_preview || c.response_preview;
+        const clickable = hasPreview ? "clickable" : "";
+        return `
+            <tr class="${clickable}" data-idx="${idx}">
+                <td style="white-space:nowrap">${escHtml(formatDatetimeART(c.created_at))}</td>
+                <td>${escHtml(ev)}</td>
+                <td><span class="admin-badge ${_providerBadgeClass(c.provider)}">${escHtml(c.provider || "")}</span></td>
+                <td style="font-size:0.7rem;color:var(--text-dim)">${escHtml(c.model || "")}</td>
+                <td>${statusCell}</td>
+                <td style="font-size:0.72rem;color:var(--text-dim);word-break:break-word">${detail}</td>
+            </tr>`;
+    }).join("");
+
+    wrap.innerHTML = `
+        <table class="admin-table">
+            <thead><tr><th>Cuándo</th><th>Evento</th><th>Provider</th><th>Modelo</th><th>Estado</th><th>Detalle</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+
+    $$("#ai-invocations-wrap tr.clickable").forEach(tr => {
+        tr.addEventListener("click", () => {
+            const idx = parseInt(tr.dataset.idx, 10);
+            const item = items[idx];
+            if (item) openInvocationModal(item);
+        });
+    });
+
+    _renderPagination(pager, total, page, pageSize, (newPage) => {
+        _aiInvocationsPage = newPage;
+        loadAIInvocations();
+    });
+}
+
+function openInvocationModal(item) {
+    const host = $("#admin-modal-host");
+    if (!host) return;
+    const rowsHtml = [
+        _modalRow("Cuándo", formatDatetimeART(item.created_at)),
+        _modalRow("Evento", _eventLabels[item.event_type] || item.event_type),
+        _modalRow("Provider", _providerDisplayNames[item.provider] || item.provider),
+        _modalRow("Modelo", item.model || "—"),
+        _modalRow("Estado", item.success ? "OK" : "ERROR"),
+        _modalRow("Tokens", `in ${fmtTokens(item.input_tokens || 0)} · out ${fmtTokens(item.output_tokens || 0)}`),
+        _modalRow("Latencia", `${item.latency_ms || 0} ms`),
+        _modalRow("Costo", fmtUSD(item.cost_total || 0)),
+    ].join("");
+    const promptHtml = item.prompt_preview
+        ? `<div style="font-size:0.78rem;color:var(--text-dim);margin-top:0.8rem">Prompt (preview)</div><pre>${escHtml(item.prompt_preview)}</pre>`
+        : "";
+    const responseHtml = item.response_preview
+        ? `<div style="font-size:0.78rem;color:var(--text-dim)">Respuesta (preview)</div><pre>${escHtml(item.response_preview)}</pre>`
+        : "";
+    const errorHtml = item.error_message
+        ? `<div style="font-size:0.78rem;color:#fca5a5;margin-top:0.8rem">Error</div><pre style="color:#fca5a5">${escHtml(item.error_message)}</pre>`
+        : "";
+    const noPreviewHint = (!promptHtml && !responseHtml && !errorHtml)
+        ? `<div class="admin-empty" style="margin-top:0.8rem">Sin preview disponible. Habilitá <code>AI_LOG_PREVIEWS=1</code> para registrar previews.</div>`
+        : "";
+
+    host.innerHTML = `
+        <div class="admin-modal-backdrop" id="admin-modal-bd">
+            <div class="admin-modal" onclick="event.stopPropagation()">
+                <button class="admin-modal-close" id="admin-modal-close">&times;</button>
+                <h3>Invocación IA #${item.id || ""}</h3>
+                ${rowsHtml}
+                ${promptHtml}
+                ${responseHtml}
+                ${errorHtml}
+                ${noPreviewHint}
+            </div>
+        </div>`;
+    const bd = $("#admin-modal-bd");
+    const close = () => { host.innerHTML = ""; };
+    if (bd) bd.addEventListener("click", close);
+    const btn = $("#admin-modal-close");
+    if (btn) btn.addEventListener("click", close);
+}
+
+function _modalRow(label, value) {
+    return `<div class="admin-modal-row"><span class="label">${escHtml(label)}</span><span>${escHtml(value == null ? "—" : String(value))}</span></div>`;
+}
+
+// ── Process events (scheduler + lifecycle) ──────────────────────────────
+
+const _componentLabels = {
+    scheduler: "Scheduler",
+    ai: "IA",
+    rss: "RSS",
+    lifespan: "Ciclo de vida",
+    railway: "Railway",
+};
+
+async function loadProcessEvents() {
+    const wrap = $("#process-events-wrap");
+    const pager = $("#process-events-pagination");
+    if (!wrap) return;
+
+    const compSel = $("#proc-component");
+    const statSel = $("#proc-status");
+
+    const params = new URLSearchParams();
+    params.set("page", String(_processEventsPage));
+    params.set("page_size", String(_PAGE_SIZE));
+    if (compSel && compSel.value) params.set("component", compSel.value);
+    if (statSel && statSel.value) params.set("status", statSel.value);
+
+    try {
+        const resp = await fetch(`/api/admin/process-events?${params}`);
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        if (resp.status === 404) {
+            wrap.innerHTML = `<div class="admin-empty">Endpoint no disponible (requiere Fase 2)</div>`;
+            if (pager) pager.innerHTML = "";
+            return;
+        }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        _populateProcessFilters(data.filters || {});
+        renderProcessEvents(data.items || [], data.total || 0, data.page || 1, data.page_size || _PAGE_SIZE);
+    } catch (err) {
+        console.error("Process events load failed:", err);
+        wrap.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error de red</div>`;
+    }
+}
+
+function _populateProcessFilters(filters) {
+    const compSel = $("#proc-component");
+    if (compSel && !compSel.dataset.initialized && filters.components) {
+        const current = compSel.value;
+        compSel.innerHTML = `<option value="">Todos los componentes</option>` +
+            filters.components.map(c => `<option value="${escHtml(c)}" ${c === current ? "selected" : ""}>${escHtml(_componentLabels[c] || c)}</option>`).join("");
+        compSel.dataset.initialized = "1";
+    }
+}
+
+function renderProcessEvents(items, total, page, pageSize) {
+    const wrap = $("#process-events-wrap");
+    const pager = $("#process-events-pagination");
+    if (!items.length) {
+        wrap.innerHTML = `<div class="admin-empty">No hay eventos registrados</div>`;
+        if (pager) pager.innerHTML = "";
+        return;
+    }
+
+    const rows = items.map(it => {
+        const status = (it.status || "info").toLowerCase();
+        const statusClass = `admin-status-${status}`;
+        const dur = it.duration_ms != null ? `${it.duration_ms} ms` : "—";
+        const msg = it.message || "";
+        return `
+            <tr>
+                <td style="white-space:nowrap">${escHtml(formatDatetimeART(it.created_at))}</td>
+                <td>${escHtml(_componentLabels[it.component] || it.component || "—")}</td>
+                <td style="font-family:ui-monospace,monospace;font-size:0.72rem">${escHtml(it.event_type || "")}</td>
+                <td><span class="admin-status-pill ${statusClass}">${escHtml(status.toUpperCase())}</span></td>
+                <td style="font-size:0.72rem;color:var(--text-dim)">${dur}</td>
+                <td style="font-size:0.72rem;word-break:break-word">${escHtml(msg).slice(0, 300)}</td>
+            </tr>`;
+    }).join("");
+
+    wrap.innerHTML = `
+        <table class="admin-table">
+            <thead><tr><th>Cuándo</th><th>Componente</th><th>Evento</th><th>Estado</th><th>Duración</th><th>Mensaje</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+
+    _renderPagination(pager, total, page, pageSize, (newPage) => {
+        _processEventsPage = newPage;
+        loadProcessEvents();
+    });
+}
+
+// ── Infra costs (Railway) ───────────────────────────────────────────────
+
+async function loadInfraCosts() {
+    const wrap = $("#infra-costs-wrap");
+    if (!wrap) return;
+    try {
+        const resp = await fetch("/api/admin/infra-costs");
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        if (resp.status === 404) {
+            wrap.innerHTML = `<div class="admin-empty">Endpoint no disponible (requiere Fase 3)</div>`;
+            return;
+        }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderInfraCosts(data);
+    } catch (err) {
+        console.error("Infra costs load failed:", err);
+        wrap.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error de red</div>`;
+    }
+}
+
+function renderInfraCosts(data) {
+    const wrap = $("#infra-costs-wrap");
+    if (!wrap) return;
+
+    if (!data.available) {
+        const reason = data.reason || "no_token";
+        const msg = reason === "no_token"
+            ? "Integración no configurada. Definí <code>RAILWAY_API_TOKEN</code> y <code>RAILWAY_PROJECT_ID</code> para ver el consumo."
+            : `No disponible: ${escHtml(reason)}`;
+        wrap.innerHTML = `<div class="admin-empty">${msg}</div>`;
+        return;
+    }
+
+    const services = data.services || [];
+    const totalMonth = services.reduce((a, s) => a + (s.estimated_usd_month || 0), 0);
+    const fetchedAt = data.fetched_at ? formatDatetimeART(data.fetched_at) : "—";
+
+    const serviceRows = services.length
+        ? services.map(s => `
+            <tr>
+                <td>${escHtml(s.service_name || s.service_id || "—")}</td>
+                <td style="font-weight:600">${fmtUSD(s.estimated_usd_month || 0)}</td>
+            </tr>`).join("")
+        : `<tr><td colspan="2" class="admin-empty">Sin servicios reportados</td></tr>`;
+
+    const history = data.history || [];
+    const historyHtml = history.length
+        ? `<div style="margin-top:0.8rem">
+            <div style="font-size:0.75rem;color:var(--text-dim);margin-bottom:0.4rem">Historial diario</div>
+            <table class="admin-table">
+                <thead><tr><th>Día</th><th>Estimado mensual</th></tr></thead>
+                <tbody>${history.slice(0, 14).map(h => `<tr><td>${escHtml(formatDay(h.day))}</td><td>${fmtUSD(h.estimated_usd_month || 0)}</td></tr>`).join("")}</tbody>
+            </table>
+        </div>`
+        : "";
+
+    wrap.innerHTML = `
+        <div class="admin-kpis" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:0.8rem">
+            <div class="admin-kpi">
+                <div class="admin-kpi-value">${fmtUSD(totalMonth)}</div>
+                <div class="admin-kpi-label">Estimado mensual</div>
+                <div class="admin-kpi-desc">Actualizado ${escHtml(fetchedAt)}</div>
+            </div>
+            <div class="admin-kpi">
+                <div class="admin-kpi-value">${services.length}</div>
+                <div class="admin-kpi-label">Servicios</div>
+                <div class="admin-kpi-desc">Activos en el proyecto</div>
+            </div>
+        </div>
+        <table class="admin-table">
+            <thead><tr><th>Servicio</th><th>Estimado mensual</th></tr></thead>
+            <tbody>${serviceRows}</tbody>
+        </table>
+        ${historyHtml}`;
+}
+
+// ── Pagination helper ───────────────────────────────────────────────────
+
+function _renderPagination(container, total, page, pageSize, onChange) {
+    if (!container) return;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (totalPages <= 1) {
+        container.innerHTML = `<span>${total} resultado${total === 1 ? "" : "s"}</span>`;
+        return;
+    }
+    container.innerHTML = `
+        <span>${total} resultados · Página ${page} de ${totalPages}</span>
+        <button ${page <= 1 ? "disabled" : ""} data-action="prev">← Anterior</button>
+        <button ${page >= totalPages ? "disabled" : ""} data-action="next">Siguiente →</button>`;
+    const prev = container.querySelector('[data-action="prev"]');
+    const next = container.querySelector('[data-action="next"]');
+    if (prev) prev.addEventListener("click", () => onChange(page - 1));
+    if (next) next.addEventListener("click", () => onChange(page + 1));
 }
 
 // ── Shared rendering ────────────────────────────────────────────────────

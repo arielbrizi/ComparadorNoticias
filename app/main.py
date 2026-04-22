@@ -43,12 +43,15 @@ from app.ai_search import (
     restore_last_good_topics,
 )
 from app.ai_store import (
+    count_ai_invocations,
     get_provider_config,
     get_schedule_config,
     get_scheduler_config,
     init_ai_tables,
+    list_distinct_providers,
     query_ai_cost_summary,
     query_ai_daily_cost,
+    query_ai_invocations,
     query_provider_health,
     query_recent_ai_calls,
     set_provider_config,
@@ -59,6 +62,22 @@ from app.ai_store import (
     VALID_PROVIDERS,
     VALID_SCHEDULER_INTERVALS,
 )
+from app.process_events_store import (
+    count_process_events,
+    init_process_events_table,
+    list_known_components,
+    log_process_event,
+    query_process_events,
+    purge_old_events as purge_old_process_events,
+)
+from app.infra_cost_store import (
+    history as infra_cost_history,
+    init_infra_cost_table,
+    latest_snapshot as infra_latest_snapshot,
+    purge_old_snapshots as purge_old_infra_snapshots,
+    save_snapshot as save_infra_snapshot,
+)
+from app import railway_client
 from app.search_utils import build_fallback_summary, extract_keywords
 from app.wordcloud import build_wordcloud
 from app.metrics_store import init_db, query_metrics, save_group_metrics
@@ -323,6 +342,82 @@ async def prefetch_topics():
 scheduler = AsyncIOScheduler(timezone=ART)
 
 
+async def _refresh_infra_costs() -> None:
+    """Fetch Railway usage and persist a snapshot. Runs in a worker thread."""
+    try:
+        result = await asyncio.to_thread(railway_client.fetch_usage)
+    except Exception as exc:
+        logger.warning("refresh_infra_costs fetch failed: %s", exc)
+        return
+
+    if not result.get("available"):
+        logger.info("Skipping infra snapshot (not available: %s)", result.get("reason"))
+        return
+
+    services = result.get("services") or []
+    inserted = save_infra_snapshot(services)
+    logger.info("Infra snapshot saved: %d rows", inserted)
+
+
+def _wrap_job(func, component: str, event_type: str):
+    """Return a wrapper (async or sync, matching *func*) that logs every run.
+
+    Measures duration, catches exceptions so one failed job doesn't crash the
+    scheduler, and records an ``ok``/``error`` row per execution in the
+    ``process_events`` table.
+    """
+    import time as _time
+    from functools import wraps
+    import inspect
+
+    def _log_ok(dur_ms: int) -> None:
+        try:
+            log_process_event(
+                component=component, event_type=event_type,
+                status="ok", duration_ms=dur_ms,
+            )
+        except Exception:
+            pass
+
+    def _log_err(dur_ms: int, exc: Exception) -> None:
+        try:
+            log_process_event(
+                component=component, event_type=event_type,
+                status="error", duration_ms=dur_ms,
+                message=str(exc)[:500],
+            )
+        except Exception:
+            pass
+
+    if inspect.iscoroutinefunction(func):
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            t0 = _time.monotonic()
+            try:
+                result = await func(*args, **kwargs)
+                _log_ok(int((_time.monotonic() - t0) * 1000))
+                return result
+            except Exception as exc:
+                _log_err(int((_time.monotonic() - t0) * 1000), exc)
+                logger.exception("Scheduler job %s/%s failed", component, event_type)
+                raise
+        return async_wrapper
+
+    @wraps(func)
+    def sync_wrapper(*args, **kwargs):
+        t0 = _time.monotonic()
+        try:
+            result = func(*args, **kwargs)
+            _log_ok(int((_time.monotonic() - t0) * 1000))
+            return result
+        except Exception as exc:
+            _log_err(int((_time.monotonic() - t0) * 1000), exc)
+            logger.exception("Scheduler job %s/%s failed", component, event_type)
+            raise
+
+    return sync_wrapper
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _articles, _groups, _ASSET_HASHES, _HTML_CACHE
@@ -349,6 +444,20 @@ async def lifespan(_app: FastAPI):
         init_ai_tables()
     except Exception as exc:
         logger.error("init_ai_tables failed: %s", exc)
+    try:
+        init_process_events_table()
+    except Exception as exc:
+        logger.error("init_process_events_table failed: %s", exc)
+    try:
+        init_infra_cost_table()
+    except Exception as exc:
+        logger.error("init_infra_cost_table failed: %s", exc)
+
+    try:
+        log_process_event(component="lifespan", event_type="startup", status="info",
+                          message="Application starting up")
+    except Exception:
+        pass
 
     try:
         restore_last_good_topics()
@@ -373,16 +482,44 @@ async def lifespan(_app: FastAPI):
     news_min = sched_cfg.get("refresh_news", SCHEDULER_DEFAULTS["refresh_news"])
     topics_min = sched_cfg.get("prefetch_topics", SCHEDULER_DEFAULTS["prefetch_topics"])
 
-    scheduler.add_job(refresh_news, "interval", minutes=news_min, id="refresh_news", replace_existing=True)
-    scheduler.add_job(refresh_wordcloud, "interval", hours=2)
-    scheduler.add_job(prefetch_top_story, "interval", hours=3)
-    scheduler.add_job(prefetch_topics, "interval", minutes=topics_min, id="prefetch_topics", replace_existing=True)
-    scheduler.add_job(prefetch_weekly_summary, "cron", hour=9, minute=15)
-    scheduler.add_job(prefetch_weekly_summary, "cron", hour=18, minute=0)
-    scheduler.add_job(purge_old_news, "cron", hour=7, minute=0)
-    scheduler.add_job(purge_old_events, "cron", hour=6, minute=30)
+    scheduler.add_job(_wrap_job(refresh_news, "rss", "refresh_news"),
+                      "interval", minutes=news_min, id="refresh_news", replace_existing=True)
+    scheduler.add_job(_wrap_job(refresh_wordcloud, "scheduler", "refresh_wordcloud"),
+                      "interval", hours=2)
+    scheduler.add_job(_wrap_job(prefetch_top_story, "ai", "prefetch_top_story"),
+                      "interval", hours=3)
+    scheduler.add_job(_wrap_job(prefetch_topics, "ai", "prefetch_topics"),
+                      "interval", minutes=topics_min, id="prefetch_topics", replace_existing=True)
+    scheduler.add_job(_wrap_job(prefetch_weekly_summary, "ai", "prefetch_weekly_summary"),
+                      "cron", hour=9, minute=15)
+    scheduler.add_job(_wrap_job(prefetch_weekly_summary, "ai", "prefetch_weekly_summary"),
+                      "cron", hour=18, minute=0)
+    scheduler.add_job(_wrap_job(purge_old_news, "scheduler", "purge_old_news"),
+                      "cron", hour=7, minute=0)
+    scheduler.add_job(_wrap_job(purge_old_events, "scheduler", "purge_old_events"),
+                      "cron", hour=6, minute=30)
+    scheduler.add_job(_wrap_job(purge_old_process_events, "scheduler", "purge_old_process_events"),
+                      "cron", hour=6, minute=45)
+
+    if railway_client.is_configured():
+        scheduler.add_job(_wrap_job(_refresh_infra_costs, "railway", "refresh_infra_costs"),
+                          "interval", hours=1, id="refresh_infra_costs", replace_existing=True)
+        scheduler.add_job(_wrap_job(purge_old_infra_snapshots, "railway", "purge_infra_snapshots"),
+                          "cron", hour=7, minute=15)
+        asyncio.create_task(_refresh_infra_costs())
+
     scheduler.start()
+    try:
+        log_process_event(component="lifespan", event_type="scheduler_started", status="info",
+                          message=f"refresh_news={news_min}m, prefetch_topics={topics_min}m")
+    except Exception:
+        pass
     yield
+    try:
+        log_process_event(component="lifespan", event_type="shutdown", status="info",
+                          message="Application shutting down")
+    except Exception:
+        pass
     scheduler.shutdown(wait=False)
 
 
@@ -910,6 +1047,121 @@ async def admin_ai_monitor(_admin: dict = Depends(require_admin)):
             _build_provider_status("ollama", OLLAMA_MODEL),
         ],
         "recent_calls": query_recent_ai_calls(limit=5),
+    }
+
+
+def _clamp_page(page: int, page_size: int) -> tuple[int, int]:
+    page = max(1, int(page or 1))
+    page_size = max(1, min(int(page_size or 25), 200))
+    return page, page_size
+
+
+@app.get("/api/admin/ai-invocations")
+async def admin_ai_invocations(
+    desde: str | None = None,
+    hasta: str | None = None,
+    provider: str | None = None,
+    event_type: str | None = None,
+    success: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    _admin: dict = Depends(require_admin),
+):
+    """Paginated list of AI invocations with optional filters."""
+    page, page_size = _clamp_page(page, page_size)
+    offset = (page - 1) * page_size
+
+    success_bool: bool | None
+    if success is None or success == "":
+        success_bool = None
+    elif str(success).lower() in ("1", "true", "yes"):
+        success_bool = True
+    elif str(success).lower() in ("0", "false", "no"):
+        success_bool = False
+    else:
+        success_bool = None
+
+    prov = provider or None
+    ev = event_type or None
+
+    items = query_ai_invocations(
+        desde=desde, hasta=hasta, provider=prov, event_type=ev,
+        success=success_bool, limit=page_size, offset=offset,
+    )
+    total = count_ai_invocations(
+        desde=desde, hasta=hasta, provider=prov, event_type=ev, success=success_bool,
+    )
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "filters": {
+            "providers": list_distinct_providers(),
+            "event_types": sorted(VALID_EVENT_TYPES),
+        },
+    }
+
+
+@app.get("/api/admin/infra-costs")
+async def admin_infra_costs(_admin: dict = Depends(require_admin)):
+    """Return the latest Railway cost snapshot plus a short daily history."""
+    if not railway_client.is_configured():
+        return {"available": False, "reason": "no_token"}
+
+    snap = infra_latest_snapshot()
+    hist = infra_cost_history(days=14)
+
+    services = []
+    for s in snap.get("services", []):
+        services.append({
+            "service_name": s.get("service_name"),
+            "service_id": s.get("service_id"),
+            "estimated_usd_month": s.get("estimated_usd_month"),
+        })
+
+    return {
+        "available": True,
+        "fetched_at": snap.get("fetched_at"),
+        "services": services,
+        "total_usd_month": snap.get("total_usd_month", 0.0),
+        "history": hist,
+    }
+
+
+@app.get("/api/admin/process-events")
+async def admin_process_events(
+    desde: str | None = None,
+    hasta: str | None = None,
+    component: str | None = None,
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    _admin: dict = Depends(require_admin),
+):
+    """Paginated list of background process events (scheduler runs, lifespan, etc)."""
+    page, page_size = _clamp_page(page, page_size)
+    offset = (page - 1) * page_size
+
+    comp = component or None
+    stat = status or None
+
+    items = query_process_events(
+        desde=desde, hasta=hasta, component=comp, status=stat,
+        limit=page_size, offset=offset,
+    )
+    total = count_process_events(
+        desde=desde, hasta=hasta, component=comp, status=stat,
+    )
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "filters": {
+            "components": list_known_components(),
+            "statuses": ["ok", "error", "warning", "info"],
+        },
     }
 
 

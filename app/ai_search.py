@@ -412,15 +412,19 @@ async def _run_provider_chain(
     for idx, provider in enumerate(filtered):
         t0 = time.time()
         model = _PROVIDER_MODELS[provider]
+        prompt = prompt_for(provider)
         try:
             text, in_tok, out_tok = await _invoke_provider(
-                provider, prompt_for(provider), timeout,
+                provider, prompt, timeout,
             )
-            _log_success(event_type, provider, model, in_tok, out_tok, t0)
+            _log_success(
+                event_type, provider, model, in_tok, out_tok, t0,
+                prompt=prompt, response=text,
+            )
             return text, _PROVIDER_DISPLAY[provider]
         except Exception as exc:
             last_exc = exc
-            _log_error(event_type, provider, model, t0, exc)
+            _log_error(event_type, provider, model, t0, exc, prompt=prompt)
             if idx + 1 < len(filtered):
                 logger.warning(
                     "%s failed (%s), falling back to %s",
@@ -456,6 +460,7 @@ async def _call_ai(
 def _log_success(
     event_type: str, provider: str, model: str,
     in_tok: int, out_tok: int, t0: float,
+    *, prompt: str | None = None, response: str | None = None,
 ) -> None:
     log_ai_usage(
         event_type=event_type,
@@ -464,12 +469,15 @@ def _log_success(
         input_tokens=in_tok,
         output_tokens=out_tok,
         latency_ms=int((time.time() - t0) * 1000),
+        prompt_preview=prompt,
+        response_preview=response,
     )
 
 
 def _log_error(
     event_type: str, provider: str, model: str,
     t0: float, exc: Exception,
+    *, prompt: str | None = None,
 ) -> None:
     log_ai_usage(
         event_type=event_type,
@@ -480,6 +488,7 @@ def _log_error(
         latency_ms=int((time.time() - t0) * 1000),
         success=False,
         error_message=str(exc)[:500],
+        prompt_preview=prompt,
     )
 
 

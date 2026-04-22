@@ -8,13 +8,16 @@ from app.ai_store import (
     VALID_EVENT_TYPES,
     VALID_PROVIDERS,
     compute_cost,
+    count_ai_invocations,
     get_provider_config,
     get_schedule_config,
     init_ai_tables,
     is_in_quiet_hours,
+    list_distinct_providers,
     log_ai_usage,
     query_ai_cost_summary,
     query_ai_daily_cost,
+    query_ai_invocations,
     set_provider_config,
     set_schedule_config,
 )
@@ -292,3 +295,135 @@ class TestScheduleConfig:
             "strftime": datetime.strftime,
         })())
         assert is_in_quiet_hours("search_prefetch") is True
+
+
+class TestInvocationsQuery:
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def _seed(self):
+        import time as _t
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview", input_tokens=100, output_tokens=20,
+            latency_ms=100,
+        )
+        _t.sleep(0.01)
+        log_ai_usage(
+            event_type="search", provider="groq",
+            model="llama-3.3-70b-versatile", input_tokens=50, output_tokens=10,
+            latency_ms=200,
+        )
+        _t.sleep(0.01)
+        log_ai_usage(
+            event_type="search", provider="gemini",
+            model="gemini-3-flash-preview", input_tokens=0, output_tokens=0,
+            latency_ms=50, success=False, error_message="Rate limited",
+        )
+
+    def test_query_returns_newest_first(self):
+        self._seed()
+        rows = query_ai_invocations()
+        assert [r["event_type"] for r in rows] == ["search", "search", "topics"]
+        assert rows[0]["success"] is False
+
+    def test_filter_by_provider(self):
+        self._seed()
+        rows = query_ai_invocations(provider="groq")
+        assert len(rows) == 1
+        assert rows[0]["provider"] == "groq"
+
+    def test_filter_by_event_type(self):
+        self._seed()
+        rows = query_ai_invocations(event_type="topics")
+        assert len(rows) == 1
+
+    def test_filter_by_success_false(self):
+        self._seed()
+        rows = query_ai_invocations(success=False)
+        assert len(rows) == 1
+        assert rows[0]["error_message"] == "Rate limited"
+
+    def test_filter_by_success_true(self):
+        self._seed()
+        rows = query_ai_invocations(success=True)
+        assert len(rows) == 2
+        assert all(r["success"] for r in rows)
+
+    def test_pagination(self):
+        self._seed()
+        page1 = query_ai_invocations(limit=2, offset=0)
+        page2 = query_ai_invocations(limit=2, offset=2)
+        assert len(page1) == 2
+        assert len(page2) == 1
+
+    def test_count(self):
+        self._seed()
+        assert count_ai_invocations() == 3
+        assert count_ai_invocations(provider="gemini") == 2
+        assert count_ai_invocations(success=False) == 1
+
+    def test_list_distinct_providers(self):
+        self._seed()
+        providers = list_distinct_providers()
+        assert set(providers) == {"gemini", "groq"}
+
+
+class TestPreviews:
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def test_previews_off_by_default(self, monkeypatch):
+        monkeypatch.setattr("app.ai_store._AI_LOG_PREVIEWS", False)
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview", input_tokens=10, output_tokens=5,
+            latency_ms=100,
+            prompt_preview="hello prompt",
+            response_preview="hello response",
+        )
+        rows = query_ai_invocations()
+        assert rows[0]["prompt_preview"] is None
+        assert rows[0]["response_preview"] is None
+
+    def test_previews_saved_when_enabled(self, monkeypatch):
+        monkeypatch.setattr("app.ai_store._AI_LOG_PREVIEWS", True)
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview", input_tokens=10, output_tokens=5,
+            latency_ms=100,
+            prompt_preview="hello prompt",
+            response_preview="hello response",
+        )
+        rows = query_ai_invocations()
+        assert rows[0]["prompt_preview"] == "hello prompt"
+        assert rows[0]["response_preview"] == "hello response"
+
+    def test_previews_truncated_to_2000(self, monkeypatch):
+        monkeypatch.setattr("app.ai_store._AI_LOG_PREVIEWS", True)
+        huge = "x" * 5000
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview", input_tokens=10, output_tokens=5,
+            latency_ms=100,
+            prompt_preview=huge,
+            response_preview=huge,
+        )
+        rows = query_ai_invocations()
+        assert len(rows[0]["prompt_preview"]) == 2000
+        assert len(rows[0]["response_preview"]) == 2000
+
+    def test_empty_previews_stored_as_null(self, monkeypatch):
+        monkeypatch.setattr("app.ai_store._AI_LOG_PREVIEWS", True)
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview", input_tokens=10, output_tokens=5,
+            latency_ms=100,
+            prompt_preview="",
+            response_preview=None,
+        )
+        rows = query_ai_invocations()
+        assert rows[0]["prompt_preview"] is None
+        assert rows[0]["response_preview"] is None

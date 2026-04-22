@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -14,6 +15,14 @@ from app.db import execute, get_conn, is_postgres, query
 logger = logging.getLogger(__name__)
 
 ART = timezone(timedelta(hours=-3))
+
+_AI_LOG_PREVIEWS = os.environ.get("AI_LOG_PREVIEWS", "").lower() in ("1", "true", "yes", "on")
+_PREVIEW_MAX_CHARS = 2000
+
+
+def previews_enabled() -> bool:
+    """Whether AI prompt/response previews should be persisted."""
+    return _AI_LOG_PREVIEWS
 
 # ── Pricing (USD per 1M tokens) ──────────────────────────────────────────────
 
@@ -51,19 +60,21 @@ def init_ai_tables() -> None:
                 conn,
                 """
                 CREATE TABLE IF NOT EXISTS ai_usage_log (
-                    id            SERIAL PRIMARY KEY,
-                    event_type    TEXT NOT NULL,
-                    provider      TEXT NOT NULL,
-                    model         TEXT NOT NULL,
-                    input_tokens  INTEGER NOT NULL,
-                    output_tokens INTEGER NOT NULL,
-                    cost_input    REAL NOT NULL,
-                    cost_output   REAL NOT NULL,
-                    cost_total    REAL NOT NULL,
-                    latency_ms    INTEGER,
-                    success       INTEGER NOT NULL DEFAULT 1,
-                    error_message TEXT,
-                    created_at    TEXT NOT NULL
+                    id              SERIAL PRIMARY KEY,
+                    event_type      TEXT NOT NULL,
+                    provider        TEXT NOT NULL,
+                    model           TEXT NOT NULL,
+                    input_tokens    INTEGER NOT NULL,
+                    output_tokens   INTEGER NOT NULL,
+                    cost_input      REAL NOT NULL,
+                    cost_output     REAL NOT NULL,
+                    cost_total      REAL NOT NULL,
+                    latency_ms      INTEGER,
+                    success         INTEGER NOT NULL DEFAULT 1,
+                    error_message   TEXT,
+                    created_at      TEXT NOT NULL,
+                    prompt_preview  TEXT,
+                    response_preview TEXT
                 )
                 """,
             )
@@ -72,25 +83,28 @@ def init_ai_tables() -> None:
                 conn,
                 """
                 CREATE TABLE IF NOT EXISTS ai_usage_log (
-                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_type    TEXT NOT NULL,
-                    provider      TEXT NOT NULL,
-                    model         TEXT NOT NULL,
-                    input_tokens  INTEGER NOT NULL,
-                    output_tokens INTEGER NOT NULL,
-                    cost_input    REAL NOT NULL,
-                    cost_output   REAL NOT NULL,
-                    cost_total    REAL NOT NULL,
-                    latency_ms    INTEGER,
-                    success       INTEGER NOT NULL DEFAULT 1,
-                    error_message TEXT,
-                    created_at    TEXT NOT NULL
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type      TEXT NOT NULL,
+                    provider        TEXT NOT NULL,
+                    model           TEXT NOT NULL,
+                    input_tokens    INTEGER NOT NULL,
+                    output_tokens   INTEGER NOT NULL,
+                    cost_input      REAL NOT NULL,
+                    cost_output     REAL NOT NULL,
+                    cost_total      REAL NOT NULL,
+                    latency_ms      INTEGER,
+                    success         INTEGER NOT NULL DEFAULT 1,
+                    error_message   TEXT,
+                    created_at      TEXT NOT NULL,
+                    prompt_preview  TEXT,
+                    response_preview TEXT
                 )
                 """,
             )
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_aul_created ON ai_usage_log(created_at)")
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_aul_event ON ai_usage_log(event_type)")
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_aul_provider ON ai_usage_log(provider)")
+        _migrate_ai_usage_log_previews(conn)
 
         execute(
             conn,
@@ -159,6 +173,23 @@ def init_ai_tables() -> None:
     logger.info("AI tables ready — %s", backend)
 
 
+def _migrate_ai_usage_log_previews(conn) -> None:
+    """Add prompt_preview / response_preview columns to an existing ai_usage_log."""
+    try:
+        if is_postgres():
+            execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN IF NOT EXISTS prompt_preview TEXT")
+            execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN IF NOT EXISTS response_preview TEXT")
+        else:
+            cur = query(conn, "PRAGMA table_info(ai_usage_log)")
+            cols = {row["name"] for row in cur.fetchall()}
+            if "prompt_preview" not in cols:
+                execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN prompt_preview TEXT")
+            if "response_preview" not in cols:
+                execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN response_preview TEXT")
+    except Exception as exc:
+        logger.warning("ai_usage_log preview migration failed: %s", exc)
+
+
 def _seed_provider_config(conn) -> None:
     """Insert default rows for every known event type if missing."""
     now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
@@ -197,10 +228,24 @@ def log_ai_usage(
     latency_ms: int,
     success: bool = True,
     error_message: str | None = None,
+    prompt_preview: str | None = None,
+    response_preview: str | None = None,
 ) -> None:
-    """Persist a single AI call record."""
+    """Persist a single AI call record.
+
+    Prompt and response previews are only persisted if the env var
+    ``AI_LOG_PREVIEWS=1`` is set; otherwise the caller may pass them but
+    they're dropped (limits storage and PII risk by default).
+    """
     cost_in, cost_out = compute_cost(model, input_tokens, output_tokens)
     now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+
+    if _AI_LOG_PREVIEWS:
+        pp = (prompt_preview or "")[:_PREVIEW_MAX_CHARS] or None
+        rp = (response_preview or "")[:_PREVIEW_MAX_CHARS] or None
+    else:
+        pp = None
+        rp = None
 
     try:
         with get_conn() as conn:
@@ -210,8 +255,9 @@ def log_ai_usage(
                 INSERT INTO ai_usage_log
                     (event_type, provider, model, input_tokens, output_tokens,
                      cost_input, cost_output, cost_total, latency_ms,
-                     success, error_message, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     success, error_message, created_at,
+                     prompt_preview, response_preview)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_type,
@@ -226,6 +272,8 @@ def log_ai_usage(
                     1 if success else 0,
                     error_message,
                     now_iso,
+                    pp,
+                    rp,
                 ),
             )
     except Exception as exc:
@@ -438,6 +486,117 @@ def query_recent_ai_calls(limit: int = 5) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def _ai_invocations_where(
+    desde: str | None,
+    hasta: str | None,
+    provider: str | None,
+    event_type: str | None,
+    success: bool | None,
+) -> tuple[str, list]:
+    clauses: list[str] = []
+    params: list = []
+    if desde:
+        clauses.append("created_at >= ?")
+        params.append(f"{desde}T00:00:00")
+    if hasta:
+        clauses.append("created_at <= ?")
+        params.append(f"{hasta}T23:59:59")
+    if provider:
+        clauses.append("provider = ?")
+        params.append(provider)
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(event_type)
+    if success is not None:
+        clauses.append("success = ?")
+        params.append(1 if success else 0)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def query_ai_invocations(
+    *,
+    desde: str | None = None,
+    hasta: str | None = None,
+    provider: str | None = None,
+    event_type: str | None = None,
+    success: bool | None = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> list[dict]:
+    """Return a paginated list of AI invocations with preview columns.
+
+    Used by the admin Logs tab. Supports filters by date range, provider,
+    event type and success flag.
+    """
+    where, params = _ai_invocations_where(desde, hasta, provider, event_type, success)
+    sql = (
+        "SELECT id, event_type, provider, model, input_tokens, output_tokens, "
+        "cost_total, latency_ms, success, error_message, created_at, "
+        "prompt_preview, response_preview "
+        f"FROM ai_usage_log{where} ORDER BY id DESC LIMIT ? OFFSET ?"
+    )
+    params.extend([int(limit), int(offset)])
+    try:
+        with get_conn() as conn:
+            rows = query(conn, sql, tuple(params)).fetchall()
+    except Exception as exc:
+        logger.warning("query_ai_invocations failed: %s", exc)
+        return []
+
+    return [
+        {
+            "id": r["id"],
+            "event_type": r["event_type"],
+            "provider": r["provider"],
+            "model": r["model"],
+            "input_tokens": r["input_tokens"],
+            "output_tokens": r["output_tokens"],
+            "cost_total": round(r["cost_total"], 6),
+            "latency_ms": r["latency_ms"],
+            "success": bool(r["success"]),
+            "error_message": r["error_message"],
+            "created_at": r["created_at"],
+            "prompt_preview": r["prompt_preview"],
+            "response_preview": r["response_preview"],
+        }
+        for r in rows
+    ]
+
+
+def count_ai_invocations(
+    *,
+    desde: str | None = None,
+    hasta: str | None = None,
+    provider: str | None = None,
+    event_type: str | None = None,
+    success: bool | None = None,
+) -> int:
+    """Return the total number of invocations matching the filter."""
+    where, params = _ai_invocations_where(desde, hasta, provider, event_type, success)
+    sql = f"SELECT COUNT(*) AS c FROM ai_usage_log{where}"
+    try:
+        with get_conn() as conn:
+            row = query(conn, sql, tuple(params)).fetchone()
+        if row is None:
+            return 0
+        return int(row["c"] if hasattr(row, "__getitem__") else row[0])
+    except Exception as exc:
+        logger.warning("count_ai_invocations failed: %s", exc)
+        return 0
+
+
+def list_distinct_providers() -> list[str]:
+    """Providers that appear in ai_usage_log. Used to populate filter dropdowns."""
+    try:
+        with get_conn() as conn:
+            rows = query(conn, "SELECT DISTINCT provider FROM ai_usage_log ORDER BY provider").fetchall()
+        return [r["provider"] for r in rows if r["provider"]]
+    except Exception as exc:
+        logger.warning("list_distinct_providers failed: %s", exc)
+        return []
 
 
 def query_provider_health(

@@ -796,7 +796,26 @@ function _rerenderSlotsForEvent(et, chain, providers) {
     if (host) host.innerHTML = _renderSlotsForEvent(et, chain, providers);
 }
 
-async function _saveProviderChain(et, chain) {
+// Re-fetch the full provider config from the backend and re-render the slots
+// for ``et`` using the server's authoritative value. Used as a safety net on
+// save failures so the optimistic UI doesn't claim a chain that was never
+// persisted (exactly the bug where the panel showed Gemini→Groq→Ollama while
+// the DB still had legacy "ollama" and every call skipped the fallbacks).
+async function _resyncProviderChain(et, providers) {
+    try {
+        const resp = await fetch("/api/admin/ai-config");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const actual = _normalizeProviderChain((data.config || {})[et]);
+        if (!actual.length && providers.length) actual.push(providers[0]);
+        _rerenderSlotsForEvent(et, actual, providers);
+    } catch {
+        // Best effort: if the refetch itself fails, leave the optimistic
+        // state in place rather than wiping the user's input.
+    }
+}
+
+async function _saveProviderChain(et, chain, providers) {
     const status = $(`.ai-config-status[data-event="${et}"]`);
     if (status) {
         status.textContent = "Guardando...";
@@ -809,6 +828,13 @@ async function _saveProviderChain(et, chain) {
             body: JSON.stringify({ event_type: et, providers: chain }),
         });
         if (resp.ok) {
+            // Re-render from the server-confirmed chain so the UI reflects
+            // exactly what got persisted, not what we optimistically drew.
+            const data = await resp.json().catch(() => ({}));
+            const confirmed = _normalizeProviderChain(data.providers);
+            if (confirmed.length && providers && providers.length) {
+                _rerenderSlotsForEvent(et, confirmed, providers);
+            }
             if (status) {
                 status.textContent = "Guardado";
                 status.style.color = "#0d9488";
@@ -820,11 +846,17 @@ async function _saveProviderChain(et, chain) {
                 status.textContent = err.error || "Error";
                 status.style.color = "#ea580c";
             }
+            if (providers && providers.length) {
+                await _resyncProviderChain(et, providers);
+            }
         }
     } catch (err) {
         if (status) {
             status.textContent = "Error de red";
             status.style.color = "#ea580c";
+        }
+        if (providers && providers.length) {
+            await _resyncProviderChain(et, providers);
         }
     }
 }
@@ -890,7 +922,7 @@ function renderAIConfig(config, validProviders, validEventTypes, schedule) {
             chain.push(providers[0]);
         }
         _rerenderSlotsForEvent(et, chain, providers);
-        await _saveProviderChain(et, chain);
+        await _saveProviderChain(et, chain, providers);
     };
 
     $$(".ai-schedule-start, .ai-schedule-end").forEach(sel => {

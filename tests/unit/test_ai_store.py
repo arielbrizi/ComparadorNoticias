@@ -8,22 +8,30 @@ from app.ai_store import (
     OLLAMA_TIMEOUT_DEFAULT,
     OLLAMA_TIMEOUT_MAX,
     OLLAMA_TIMEOUT_MIN,
+    PROVIDER_LIMIT_DEFAULTS,
     VALID_EVENT_TYPES,
     VALID_PROVIDERS,
     compute_cost,
     count_ai_invocations,
     get_ollama_timeout,
     get_provider_config,
+    get_provider_limit,
+    get_provider_limits,
     get_schedule_config,
     init_ai_tables,
+    invalidate_provider_usage_cache,
+    is_default_provider_limit,
     is_in_quiet_hours,
     list_distinct_providers,
     log_ai_usage,
     query_ai_cost_summary,
     query_ai_daily_cost,
     query_ai_invocations,
+    query_provider_usage,
+    reset_provider_limits,
     set_ollama_timeout,
     set_provider_config,
+    set_provider_limits,
     set_schedule_config,
 )
 
@@ -35,6 +43,9 @@ def _reset_cache(monkeypatch):
     monkeypatch.setattr("app.ai_store._config_cache_ts", 0)
     monkeypatch.setattr("app.ai_store._runtime_cache", {})
     monkeypatch.setattr("app.ai_store._runtime_cache_ts", 0)
+    monkeypatch.setattr("app.ai_store._limits_cache", {})
+    monkeypatch.setattr("app.ai_store._limits_cache_ts", 0)
+    monkeypatch.setattr("app.ai_store._usage_cache", {})
 
 
 class TestComputeCost:
@@ -71,7 +82,7 @@ class TestInitAndSeed:
         config = get_provider_config()
         assert set(config.keys()) == VALID_EVENT_TYPES
         for v in config.values():
-            assert v == "gemini_fallback_groq"
+            assert v == ["gemini", "groq"]
 
     def test_init_is_idempotent(self, temp_db):
         init_ai_tables()
@@ -170,61 +181,75 @@ class TestProviderConfig:
 
     def test_default_config(self):
         config = get_provider_config()
-        assert config["topics"] == "gemini_fallback_groq"
-        assert config["search"] == "gemini_fallback_groq"
+        assert config["topics"] == ["gemini", "groq"]
+        assert config["search"] == ["gemini", "groq"]
 
     def test_set_and_get(self):
-        ok = set_provider_config("topics", "groq")
+        ok = set_provider_config("topics", ["groq"])
         assert ok is True
         config = get_provider_config()
-        assert config["topics"] == "groq"
+        assert config["topics"] == ["groq"]
 
     def test_set_invalid_event_type(self):
-        ok = set_provider_config("nonexistent", "groq")
+        ok = set_provider_config("nonexistent", ["groq"])
         assert ok is False
 
     def test_set_invalid_provider(self):
-        ok = set_provider_config("topics", "openai")
+        ok = set_provider_config("topics", ["openai"])
         assert ok is False
+
+    def test_set_empty_chain_rejected(self):
+        assert set_provider_config("topics", []) is False
+
+    def test_set_chain_not_list_rejected(self):
+        assert set_provider_config("topics", "gemini") is False  # type: ignore[arg-type]
 
     def test_config_cache_invalidation(self):
         get_provider_config()
-        set_provider_config("topics", "gemini")
+        set_provider_config("topics", ["gemini"])
         config = get_provider_config()
-        assert config["topics"] == "gemini"
+        assert config["topics"] == ["gemini"]
 
-    def test_set_groq_fallback_gemini(self):
-        ok = set_provider_config("topics", "groq_fallback_gemini")
+    def test_set_two_provider_chain(self):
+        ok = set_provider_config("topics", ["groq", "gemini"])
         assert ok is True
         config = get_provider_config()
-        assert config["topics"] == "groq_fallback_gemini"
+        assert config["topics"] == ["groq", "gemini"]
 
     def test_set_ollama_provider(self):
-        ok = set_provider_config("topics", "ollama")
+        ok = set_provider_config("topics", ["ollama"])
         assert ok is True
         config = get_provider_config()
-        assert config["topics"] == "ollama"
+        assert config["topics"] == ["ollama"]
 
-    def test_set_ollama_fallback_modes(self):
-        for mode in (
-            "gemini_fallback_ollama",
-            "ollama_fallback_gemini",
-            "groq_fallback_ollama",
-            "ollama_fallback_groq",
-        ):
-            ok = set_provider_config("topics", mode)
-            assert ok is True, mode
-            config = get_provider_config()
-            assert config["topics"] == mode
+    def test_set_full_chain(self):
+        ok = set_provider_config("topics", ["ollama", "gemini", "groq"])
+        assert ok is True
+        config = get_provider_config()
+        assert config["topics"] == ["ollama", "gemini", "groq"]
 
-    def test_valid_providers_contains_ollama_modes(self):
-        expected = {
-            "gemini", "groq", "ollama",
-            "gemini_fallback_groq", "groq_fallback_gemini",
-            "gemini_fallback_ollama", "ollama_fallback_gemini",
-            "groq_fallback_ollama", "ollama_fallback_groq",
-        }
-        assert expected.issubset(VALID_PROVIDERS)
+    def test_set_chain_dedupes_repeats(self):
+        ok = set_provider_config("topics", ["gemini", "gemini", "groq"])
+        assert ok is True
+        config = get_provider_config()
+        assert config["topics"] == ["gemini", "groq"]
+
+    def test_valid_providers_is_only_simple(self):
+        assert VALID_PROVIDERS == frozenset({"gemini", "groq", "ollama"})
+
+    def test_legacy_fallback_string_parsed_on_read(self, temp_db):
+        from app.ai_store import _config_cache
+        from app.db import execute, get_conn
+
+        with get_conn() as conn:
+            execute(
+                conn,
+                "UPDATE ai_provider_config SET provider = ? WHERE event_type = ?",
+                ("gemini_fallback_ollama", "topics"),
+            )
+        _config_cache.clear()
+        config = get_provider_config()
+        assert config["topics"] == ["gemini", "ollama"]
 
 
 class TestScheduleConfig:
@@ -566,3 +591,182 @@ class TestOllamaTimeoutConfig:
             "app.ai_store._get_runtime_value", lambda _k: "not-a-number",
         )
         assert get_ollama_timeout() == OLLAMA_TIMEOUT_DEFAULT
+
+
+class TestProviderLimits:
+    """CRUD and merging of hardcoded defaults + DB overrides."""
+
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def test_defaults_present_when_no_override(self):
+        limits = get_provider_limits()
+        assert ("gemini", "gemini-3-flash-preview") in limits
+        assert ("groq", "llama-3.3-70b-versatile") in limits
+        gemini = limits[("gemini", "gemini-3-flash-preview")]
+        default = PROVIDER_LIMIT_DEFAULTS[("gemini", "gemini-3-flash-preview")]
+        assert gemini == default
+
+    def test_is_default_flag(self):
+        assert is_default_provider_limit("gemini", "gemini-3-flash-preview") is True
+        set_provider_limits("gemini", "gemini-3-flash-preview", 5, None, 100, None)
+        assert is_default_provider_limit("gemini", "gemini-3-flash-preview") is False
+
+    def test_set_override_replaces_defaults(self):
+        ok = set_provider_limits("gemini", "gemini-3-flash-preview", 5, None, 100, None)
+        assert ok is True
+        lim = get_provider_limit("gemini", "gemini-3-flash-preview")
+        assert lim == {"rpm": 5, "tpm": None, "rpd": 100, "tpd": None}
+
+    def test_reset_restores_defaults(self):
+        set_provider_limits("gemini", "gemini-3-flash-preview", 1, 1, 1, 1)
+        ok = reset_provider_limits("gemini", "gemini-3-flash-preview")
+        assert ok is True
+        lim = get_provider_limit("gemini", "gemini-3-flash-preview")
+        assert lim == PROVIDER_LIMIT_DEFAULTS[("gemini", "gemini-3-flash-preview")]
+        assert is_default_provider_limit("gemini", "gemini-3-flash-preview") is True
+
+    def test_set_rejects_unknown_provider(self):
+        assert set_provider_limits("openai", "gpt-5", 5, 5, 5, 5) is False
+        assert set_provider_limits("", "x", 5, 5, 5, 5) is False
+
+    def test_set_rejects_empty_model(self):
+        assert set_provider_limits("gemini", "", 5, 5, 5, 5) is False
+        assert set_provider_limits("gemini", "   ", 5, 5, 5, 5) is False
+
+    def test_set_rejects_negative_limits(self):
+        assert set_provider_limits("gemini", "m1", -1, 0, 0, 0) is False
+        assert set_provider_limits("gemini", "m1", 0, 0, 0, -5) is False
+
+    def test_set_rejects_non_int(self):
+        assert set_provider_limits("gemini", "m1", "5", 0, 0, 0) is False  # type: ignore[arg-type]
+        assert set_provider_limits("gemini", "m1", True, 0, 0, 0) is False
+        assert set_provider_limits("gemini", "m1", 1.5, 0, 0, 0) is False  # type: ignore[arg-type]
+
+    def test_set_accepts_null_for_all(self):
+        ok = set_provider_limits("gemini", "m1", None, None, None, None)
+        assert ok is True
+        lim = get_provider_limit("gemini", "m1")
+        assert lim == {"rpm": None, "tpm": None, "rpd": None, "tpd": None}
+
+    def test_update_overwrites_previous_row(self):
+        set_provider_limits("gemini", "gemini-3-flash-preview", 1, 2, 3, 4)
+        set_provider_limits("gemini", "gemini-3-flash-preview", 10, 20, 30, 40)
+        lim = get_provider_limit("gemini", "gemini-3-flash-preview")
+        assert lim == {"rpm": 10, "tpm": 20, "rpd": 30, "tpd": 40}
+
+    def test_unknown_pair_returns_all_none(self):
+        lim = get_provider_limit("gemini", "totally-fake-model")
+        assert lim == {"rpm": None, "tpm": None, "rpd": None, "tpd": None}
+
+    def test_set_invalidates_cache(self):
+        # Prime the cache with defaults.
+        get_provider_limits()
+        set_provider_limits("gemini", "gemini-3-flash-preview", 42, None, None, None)
+        lim = get_provider_limit("gemini", "gemini-3-flash-preview")
+        assert lim["rpm"] == 42
+
+
+class TestProviderUsage:
+    """Rolling windows based on ai_usage_log."""
+
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def test_empty_usage(self):
+        usage = query_provider_usage("gemini")
+        assert usage == {"rpm_used": 0, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0}
+
+    def test_success_calls_counted(self):
+        for _ in range(3):
+            log_ai_usage(
+                event_type="topics", provider="gemini",
+                model="gemini-3-flash-preview",
+                input_tokens=100, output_tokens=50, latency_ms=10,
+            )
+        invalidate_provider_usage_cache()
+        usage = query_provider_usage("gemini")
+        assert usage["rpm_used"] == 3
+        assert usage["tpm_used"] == 3 * 150
+        assert usage["rpd_used"] == 3
+        assert usage["tpd_used"] == 3 * 150
+
+    def test_failed_calls_excluded(self):
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=0, output_tokens=0, latency_ms=10,
+            success=False, error_message="429",
+        )
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=10, output_tokens=5, latency_ms=10,
+        )
+        invalidate_provider_usage_cache()
+        usage = query_provider_usage("gemini")
+        assert usage["rpm_used"] == 1
+        assert usage["tpm_used"] == 15
+
+    def test_isolated_per_provider(self):
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=100, output_tokens=50, latency_ms=10,
+        )
+        log_ai_usage(
+            event_type="topics", provider="groq",
+            model="llama-3.3-70b-versatile",
+            input_tokens=200, output_tokens=40, latency_ms=10,
+        )
+        invalidate_provider_usage_cache()
+        gemini = query_provider_usage("gemini")
+        groq = query_provider_usage("groq")
+        assert gemini["tpm_used"] == 150
+        assert groq["tpm_used"] == 240
+
+    def test_minute_window_excludes_old_rows(self, temp_db):
+        """Rows older than 60s count only toward the daily window, not the minute."""
+        from app.db import execute, get_conn
+        from datetime import datetime, timedelta, timezone
+        old_dt = datetime.now(timezone(timedelta(hours=-3))) - timedelta(minutes=10)
+        old_iso = old_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        with get_conn() as conn:
+            execute(
+                conn,
+                """INSERT INTO ai_usage_log
+                   (event_type, provider, model, input_tokens, output_tokens,
+                    cost_input, cost_output, cost_total, latency_ms, success,
+                    error_message, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "topics", "gemini", "gemini-3-flash-preview",
+                    500, 100, 0.0, 0.0, 0.0, 10, 1, None, old_iso,
+                ),
+            )
+        invalidate_provider_usage_cache()
+        usage = query_provider_usage("gemini")
+        assert usage["rpm_used"] == 0
+        assert usage["tpm_used"] == 0
+        assert usage["rpd_used"] == 1
+        assert usage["tpd_used"] == 600
+
+    def test_usage_cache_hits(self, monkeypatch):
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=100, output_tokens=50, latency_ms=10,
+        )
+        first = query_provider_usage("gemini")
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=999, output_tokens=999, latency_ms=10,
+        )
+        cached = query_provider_usage("gemini")
+        assert cached == first  # Cached, doesn't see the new row.
+        invalidate_provider_usage_cache("gemini")
+        refreshed = query_provider_usage("gemini")
+        assert refreshed["rpm_used"] > first["rpm_used"]

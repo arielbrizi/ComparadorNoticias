@@ -638,6 +638,18 @@
         </div>
     </div>
 
+    <!-- AI provider quota limits -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 5-5"/></svg>
+                Límites de proveedores IA
+            </h3>
+            <p class="admin-card-desc">Cupos publicados por cada proveedor (RPM/TPM/RPD/TPD). Si un proveedor supera su cupo, el sistema salta al siguiente de la cadena definida más arriba en lugar de devolver error. Vacío = sin límite.</p>
+            <div id="ai-limits-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
     </div><!-- /panel-admin -->
 
     <!-- ═══ LOGS TAB ═══ -->
@@ -731,6 +743,6 @@
     <div id="admin-modal-host"></div>
 </div>
 
-<script src="/static/js/admin.js?v=12"></script>
+<script src="/static/js/admin.js?v=13"></script>
 </body>
 </html>

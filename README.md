@@ -129,7 +129,7 @@ flowchart LR
 - **Sin framework frontend**: HTML + CSS + JS vanilla servidos como estáticos (`static/`), con cache-busting por hash de contenido computado al arrancar (`_compute_asset_hashes` en `app/main.py`).
 - **Un solo proceso**: la API FastAPI y el scheduler (`APScheduler`) corren en el mismo `uvicorn` worker. El scheduler vive dentro del `lifespan` (`app/main.py` línea 492+).
 - **Persistencia agnóstica**: `app/db.py` detecta `DATABASE_URL` → PostgreSQL; si no está definida, cae a SQLite (`data/metrics.db`). Los SQL usan `?` como placeholder y se traducen a `%s` para Postgres.
-- **IA con fallback**: cada evento (`search`, `topics`, `top_story`, `weekly_summary`, `search_prefetch`) elige su propia cadena de proveedores desde el panel admin (ej.: `gemini_fallback_ollama`). Si un proveedor falla o no está configurado, se pasa al siguiente y se loguea todo en `ai_usage_log`.
+- **IA con fallback**: cada evento (`search`, `topics`, `top_story`, `weekly_summary`, `search_prefetch`) arma su propia **cadena ordenada** de hasta 4 proveedores desde el panel admin (ej.: `["gemini", "ollama", "groq"]`). Si un proveedor falla o no está configurado, se pasa al siguiente y se loguea todo en `ai_usage_log`.
 - **Admin controlable en caliente**: intervalos del scheduler, ventanas de silencio (quiet hours) para IA, timeout de Ollama, y límites de cuota por proveedor se ajustan desde `/admin` sin redeployar.
 
 ---
@@ -222,7 +222,7 @@ sequenceDiagram
 
 ## Proveedores de IA
 
-Soportamos **tres** proveedores (`app/ai_search.py`) y cada evento puede elegir su propia cadena (`app.ai_store.VALID_PROVIDERS`):
+Soportamos **tres** proveedores (`app/ai_search.py`) y cada evento arma su propia cadena ordenada con los valores simples de `app.ai_store.VALID_PROVIDERS`:
 
 | Proveedor | Modelo por defecto | Costo | Contexto útil | Uso recomendado |
 |-----------|-------------------|-------|---------------|-----------------|
@@ -230,13 +230,13 @@ Soportamos **tres** proveedores (`app/ai_search.py`) y cada evento puede elegir 
 | **Groq** | `llama-3.3-70b-versatile` | Free tier generoso | ~10k chars (`GROQ_MAX_PROMPT_CHARS`) | Fallback rápido — fuerza JSON con `response_format` |
 | **Ollama** | `qwen3:8b` (override con `OLLAMA_MODEL`) | Self-hosted (0 USD por token) | ~12k chars (`OLLAMA_MAX_PROMPT_CHARS`) | Fallback sin salida a internet; ideal para Railway interno |
 
-**Cadenas válidas** (`VALID_PROVIDERS`): `gemini`, `groq`, `ollama`, y cualquier combinación `X_fallback_Y`.
+**Proveedores válidos** (`VALID_PROVIDERS`): `gemini`, `groq`, `ollama`. Cada evento guarda en `ai_provider_config.provider` una **lista JSON ordenada** sin duplicados y de hasta `MAX_PROVIDER_CHAIN = 4` entradas (ej.: `["gemini"]`, `["gemini","groq"]`, `["ollama","gemini","groq"]`). Los valores legacy del formato `X_fallback_Y` se parsean en lectura para compatibilidad hacia atrás.
 
 **Eventos** (`VALID_EVENT_TYPES`): `search`, `search_prefetch`, `topics`, `weekly_summary`, `top_story`.
 
 **Mecanismos de control** (todos modificables desde `/admin` sin redeploy):
 
-- **Provider por evento** (`ai_runtime_config`): elegís qué cadena usar para cada uno.
+- **Cadena de providers por evento** (`ai_provider_config`): panel con 4 combos ordenados por evento (1ro / 2do / 3ro / 4to); cada slot excluye los proveedores ya elegidos en slots anteriores.
 - **Cuotas por proveedor** (`ai_provider_limits`): RPM, TPM, RPD, TPD. Si se exceden, `_run_provider_chain` salta al siguiente de la cadena y lo loguea.
 - **Quiet hours** (`ai_schedule_config`): ventana horaria por evento (zona horaria ART) en la que no se corre IA. Útil para apagar prefetch de madrugada.
 - **Timeout de Ollama** (`OLLAMA_TIMEOUT_MIN=30` / `MAX=900`, default 120 s): se lee en cada invocación desde `get_ollama_timeout()`. La primera llamada tras idle puede tardar 15–40 s (cold start del modelo); mantené `OLLAMA_KEEP_ALIVE=10m` en el servicio.
@@ -399,7 +399,7 @@ Base URL: `http://localhost:8000` (local) o el dominio de Railway (prod).
 | `/api/admin/debug-headers` | GET | Cabeceras / IP detectada (debug). |
 | `/api/admin/purge-proxy-events` | POST | Borra eventos cuya IP es de un proxy. |
 | `/api/admin/ai-cost` | GET | Costo acumulado por proveedor/día. |
-| `/api/admin/ai-config` | GET / POST | Provider por evento. |
+| `/api/admin/ai-config` | GET / POST | Cadena ordenada de providers por evento (hasta 4 entradas). |
 | `/api/admin/ai-schedule` | POST | Quiet hours por evento. |
 | `/api/admin/ai-limits` | GET / POST | Cuotas RPM/TPM/RPD/TPD por proveedor. |
 | `/api/admin/ai-monitor` | GET | Últimas invocaciones. |

@@ -8,6 +8,7 @@ from app.ai_search import (
     GEMINI_TIMEOUT,
     OLLAMA_MAX_PROMPT_CHARS,
     OllamaCallError,
+    QuotaExhaustedError,
     _build_context,
     _call_ai,
     _call_gemini,
@@ -17,6 +18,7 @@ from app.ai_search import (
     _last_good_topics,
     _prefetch_topic_searches,
     _provider_chain,
+    _quota_blocked,
     ai_top_story,
     _parse_retry_seconds,
     ai_news_search,
@@ -36,14 +38,39 @@ def _no_ai(monkeypatch):
     monkeypatch.setattr("app.ai_search._ollama_client", None)
 
 
-def _mock_ai_store(monkeypatch, provider="gemini_fallback_groq"):
-    """Stub out ai_store DB calls used by _call_ai / _call_ai_search."""
+def _mock_ai_store(monkeypatch, provider=None, chain=None):
+    """Stub out ai_store DB calls used by ``_call_ai`` / ``_call_ai_search``.
+
+    *provider* accepts the old enum strings (``"gemini_fallback_groq"``) for
+    backward compatibility with existing tests — they're translated to the
+    equivalent ordered chain. *chain* takes precedence when given.
+
+    The quota-guard lookups are also stubbed (no limits, zero usage) so the
+    routing tests don't accidentally hit the real dev DB, which would make
+    them flaky depending on recent AI usage.
+    """
+    if chain is None:
+        if provider is None:
+            chain = ["gemini", "groq"]
+        elif "_fallback_" in provider:
+            primary, _, secondary = provider.partition("_fallback_")
+            chain = [primary, secondary]
+        else:
+            chain = [provider]
     monkeypatch.setattr(
         "app.ai_search.get_provider_config",
-        lambda: {et: provider for et in
+        lambda: {et: list(chain) for et in
                  ("search", "search_prefetch", "topics", "weekly_summary", "top_story")},
     )
     monkeypatch.setattr("app.ai_search.log_ai_usage", lambda **kw: None)
+    monkeypatch.setattr(
+        "app.ai_search.get_provider_limit",
+        lambda _p, _m: {"rpm": None, "tpm": None, "rpd": None, "tpd": None},
+    )
+    monkeypatch.setattr(
+        "app.ai_search.query_provider_usage",
+        lambda _p: {"rpm_used": 0, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0},
+    )
 
 
 class TestBuildContext:
@@ -1080,22 +1107,30 @@ class TestCallOllama:
 
 
 class TestProviderChain:
-    def test_single_provider_modes(self):
-        assert _provider_chain("gemini") == ["gemini"]
-        assert _provider_chain("groq") == ["groq"]
-        assert _provider_chain("ollama") == ["ollama"]
+    def test_single_provider_list(self):
+        assert _provider_chain(["gemini"]) == ["gemini"]
+        assert _provider_chain(["groq"]) == ["groq"]
+        assert _provider_chain(["ollama"]) == ["ollama"]
 
-    def test_fallback_modes(self):
-        assert _provider_chain("gemini_fallback_groq") == ["gemini", "groq"]
-        assert _provider_chain("groq_fallback_gemini") == ["groq", "gemini"]
-        assert _provider_chain("gemini_fallback_ollama") == ["gemini", "ollama"]
-        assert _provider_chain("ollama_fallback_gemini") == ["ollama", "gemini"]
-        assert _provider_chain("groq_fallback_ollama") == ["groq", "ollama"]
-        assert _provider_chain("ollama_fallback_groq") == ["ollama", "groq"]
+    def test_two_provider_chain(self):
+        assert _provider_chain(["gemini", "groq"]) == ["gemini", "groq"]
+        assert _provider_chain(["ollama", "gemini"]) == ["ollama", "gemini"]
+        assert _provider_chain(["groq", "ollama"]) == ["groq", "ollama"]
 
-    def test_unknown_mode_defaults_to_gemini_groq(self):
-        assert _provider_chain("bogus") == ["gemini", "groq"]
-        assert _provider_chain("gemini_fallback_bogus") == ["gemini", "groq"]
+    def test_full_chain(self):
+        assert _provider_chain(["ollama", "gemini", "groq"]) == [
+            "ollama", "gemini", "groq",
+        ]
+
+    def test_dedupe_preserves_order(self):
+        assert _provider_chain(["gemini", "gemini", "groq"]) == ["gemini", "groq"]
+
+    def test_unknown_providers_filtered(self):
+        assert _provider_chain(["bogus", "groq"]) == ["groq"]
+
+    def test_empty_defaults_to_gemini_groq(self):
+        assert _provider_chain([]) == ["gemini", "groq"]
+        assert _provider_chain(["bogus", "nonexistent"]) == ["gemini", "groq"]
 
 
 class TestCallAiOllamaRouting:
@@ -1223,3 +1258,215 @@ class TestCallAiOllamaRouting:
         logged = [(c["provider"], c["success"]) for c in calls]
         assert ("gemini", False) in logged
         assert ("ollama", False) in logged
+
+
+def _stub_limits(monkeypatch, per_provider: dict[str, dict[str, int | None]]):
+    """Stub get_provider_limit to return fixed limits per provider."""
+    def _fake(provider, _model):
+        return per_provider.get(provider, {"rpm": None, "tpm": None, "rpd": None, "tpd": None})
+    monkeypatch.setattr("app.ai_search.get_provider_limit", _fake)
+
+
+def _stub_usage(monkeypatch, per_provider: dict[str, dict[str, int]]):
+    """Stub query_provider_usage to return fixed usage per provider."""
+    def _fake(provider):
+        return per_provider.get(provider, {"rpm_used": 0, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0})
+    monkeypatch.setattr("app.ai_search.query_provider_usage", _fake)
+
+
+class TestQuotaBlocked:
+    def test_no_limits_returns_none(self, monkeypatch):
+        _stub_limits(monkeypatch, {})
+        _stub_usage(monkeypatch, {})
+        assert _quota_blocked("gemini") is None
+
+    def test_ollama_never_blocked(self, monkeypatch):
+        _stub_limits(monkeypatch, {"ollama": {"rpm": 1, "tpm": None, "rpd": None, "tpd": None}})
+        _stub_usage(monkeypatch, {"ollama": {"rpm_used": 999, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0}})
+        assert _quota_blocked("ollama") is None
+
+    def test_rpm_exceeded(self, monkeypatch):
+        _stub_limits(monkeypatch, {"gemini": {"rpm": 10, "tpm": None, "rpd": None, "tpd": None}})
+        _stub_usage(monkeypatch, {"gemini": {"rpm_used": 10, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0}})
+        assert _quota_blocked("gemini") == "rpm"
+
+    def test_tpm_exceeded(self, monkeypatch):
+        _stub_limits(monkeypatch, {"gemini": {"rpm": None, "tpm": 1000, "rpd": None, "tpd": None}})
+        _stub_usage(monkeypatch, {"gemini": {"rpm_used": 0, "tpm_used": 2000, "rpd_used": 0, "tpd_used": 0}})
+        assert _quota_blocked("gemini") == "tpm"
+
+    def test_rpd_exceeded(self, monkeypatch):
+        _stub_limits(monkeypatch, {"gemini": {"rpm": None, "tpm": None, "rpd": 100, "tpd": None}})
+        _stub_usage(monkeypatch, {"gemini": {"rpm_used": 0, "tpm_used": 0, "rpd_used": 100, "tpd_used": 0}})
+        assert _quota_blocked("gemini") == "rpd"
+
+    def test_tpd_exceeded(self, monkeypatch):
+        _stub_limits(monkeypatch, {"gemini": {"rpm": None, "tpm": None, "rpd": None, "tpd": 10_000}})
+        _stub_usage(monkeypatch, {"gemini": {"rpm_used": 0, "tpm_used": 0, "rpd_used": 0, "tpd_used": 10_001}})
+        assert _quota_blocked("gemini") == "tpd"
+
+    def test_under_limit(self, monkeypatch):
+        _stub_limits(monkeypatch, {"gemini": {"rpm": 10, "tpm": 1000, "rpd": 100, "tpd": 10_000}})
+        _stub_usage(monkeypatch, {"gemini": {"rpm_used": 5, "tpm_used": 500, "rpd_used": 50, "tpd_used": 5000}})
+        assert _quota_blocked("gemini") is None
+
+    def test_unknown_provider_returns_none(self, monkeypatch):
+        _stub_limits(monkeypatch, {})
+        _stub_usage(monkeypatch, {})
+        assert _quota_blocked("totally-fake") is None
+
+    def test_store_error_does_not_block(self, monkeypatch):
+        def _boom(*a, **kw):
+            raise RuntimeError("db down")
+        monkeypatch.setattr("app.ai_search.get_provider_limit", _boom)
+        assert _quota_blocked("gemini") is None
+
+
+def _mock_ollama_success(monkeypatch):
+    from unittest.mock import AsyncMock
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(
+        return_value=_mock_ollama_response('{"result":"ollama ok"}'),
+    )
+    monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+    return mock_client
+
+
+class TestQuotaGuardChain:
+    """End-to-end behaviour of _run_provider_chain with the precheck active."""
+
+    async def test_skips_primary_when_over_quota(self, monkeypatch):
+        _mock_ai_store(monkeypatch, provider="gemini_fallback_groq")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+        _stub_limits(monkeypatch, {"gemini": {"rpm": 10, "tpm": None, "rpd": None, "tpd": None}})
+        _stub_usage(monkeypatch, {"gemini": {"rpm_used": 10, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0}})
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "app.ai_search.log_ai_usage",
+            lambda **kw: calls.append(kw),
+        )
+
+        mock_gemini = MagicMock()
+        mock_gemini.aio.models.generate_content = AsyncMock(
+            return_value=MagicMock(text="should not be called", usage_metadata=MagicMock()),
+        )
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 10
+        mock_usage.completion_tokens = 5
+        mock_choice = MagicMock()
+        mock_choice.message.content = '{"from":"groq"}'
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = mock_usage
+        mock_groq = AsyncMock()
+        mock_groq.chat.completions.create = AsyncMock(return_value=mock_resp)
+        monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"from":"groq"}'
+        assert provider == "Groq"
+
+        mock_gemini.aio.models.generate_content.assert_not_called()
+        gemini_calls = [c for c in calls if c["provider"] == "gemini"]
+        assert len(gemini_calls) == 1
+        assert gemini_calls[0]["success"] is False
+        assert gemini_calls[0]["error_type"] == "QuotaExhausted:rpm"
+        assert gemini_calls[0]["error_phase"] == "precheck"
+
+    async def test_last_in_chain_called_even_if_blocked(self, monkeypatch):
+        """The last provider gets a real shot even if the precheck trips."""
+        _mock_ai_store(monkeypatch, provider="gemini_fallback_groq")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+        _stub_limits(monkeypatch, {
+            "gemini": {"rpm": 10, "tpm": None, "rpd": None, "tpd": None},
+            "groq": {"rpd": 5, "rpm": None, "tpm": None, "tpd": None},
+        })
+        _stub_usage(monkeypatch, {
+            "gemini": {"rpm_used": 10, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0},
+            "groq": {"rpm_used": 0, "tpm_used": 0, "rpd_used": 999, "tpd_used": 0},
+        })
+
+        calls: list[dict] = []
+        monkeypatch.setattr("app.ai_search.log_ai_usage", lambda **kw: calls.append(kw))
+
+        mock_gemini = MagicMock()
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 10
+        mock_usage.completion_tokens = 5
+        mock_choice = MagicMock()
+        mock_choice.message.content = '{"from":"groq-last-resort"}'
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = mock_usage
+        mock_groq = AsyncMock()
+        mock_groq.chat.completions.create = AsyncMock(return_value=mock_resp)
+        monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"from":"groq-last-resort"}'
+        assert provider == "Groq"
+        mock_groq.chat.completions.create.assert_called_once()
+
+    async def test_single_provider_mode_still_tries_when_blocked(self, monkeypatch):
+        """Mode=gemini (no fallback): the precheck treats it as the last link."""
+        _mock_ai_store(monkeypatch, provider="gemini")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        _stub_limits(monkeypatch, {"gemini": {"rpm": 1, "tpm": None, "rpd": None, "tpd": None}})
+        _stub_usage(monkeypatch, {"gemini": {"rpm_used": 99, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0}})
+
+        monkeypatch.setattr("app.ai_search.log_ai_usage", lambda **kw: None)
+
+        mock_response = MagicMock()
+        mock_response.text = '{"ok":true}'
+        mock_response.usage_metadata = MagicMock()
+        mock_response.usage_metadata.prompt_token_count = 10
+        mock_response.usage_metadata.candidates_token_count = 5
+
+        mock_gemini = MagicMock()
+        mock_gemini.aio.models.generate_content = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"ok":true}'
+        assert provider == "Gemini"
+        mock_gemini.aio.models.generate_content.assert_called_once()
+
+    async def test_no_limits_configured_does_not_skip(self, monkeypatch):
+        _mock_ai_store(monkeypatch, provider="gemini_fallback_groq")
+        monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake")
+        monkeypatch.setenv("GROQ_API_KEY", "fake")
+        _stub_limits(monkeypatch, {})
+        _stub_usage(monkeypatch, {})
+        monkeypatch.setattr("app.ai_search.log_ai_usage", lambda **kw: None)
+
+        mock_response = MagicMock()
+        mock_response.text = '{"from":"gemini"}'
+        mock_response.usage_metadata = MagicMock()
+        mock_response.usage_metadata.prompt_token_count = 10
+        mock_response.usage_metadata.candidates_token_count = 5
+
+        mock_gemini = MagicMock()
+        mock_gemini.aio.models.generate_content = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"from":"gemini"}'
+        assert provider == "Gemini"
+
+
+class TestQuotaExhaustedError:
+    def test_carries_limit_name(self):
+        exc = QuotaExhaustedError("cupo", limit_name="rpd")
+        assert exc.limit_name == "rpd"
+        assert str(exc) == "cupo"

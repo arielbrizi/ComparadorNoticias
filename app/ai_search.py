@@ -23,9 +23,11 @@ from app.ai_store import (
     ART,
     get_ollama_timeout,
     get_provider_config,
+    get_provider_limit,
     is_in_quiet_hours,
     load_last_good_topics,
     log_ai_usage,
+    query_provider_usage,
     save_last_good_topics,
 )
 from app.models import ArticleGroup
@@ -142,6 +144,21 @@ class OllamaCallError(RuntimeError):
         self.phase = phase
         self.http_status = http_status
         self.request_sent_at = request_sent_at
+
+
+class QuotaExhaustedError(RuntimeError):
+    """Raised by the local quota-guard when a provider is over its limit.
+
+    ``limit_name`` is one of ``rpm``, ``tpm``, ``rpd``, ``tpd`` and indicates
+    which ventana tripped the precheck. This exception never escapes
+    ``_run_provider_chain`` — it's used to produce a consistent
+    ``ai_usage_log`` entry so the admin can see that we skipped the
+    provider on purpose.
+    """
+
+    def __init__(self, message: str, *, limit_name: str) -> None:
+        super().__init__(message)
+        self.limit_name = limit_name
 
 
 def _ai_available() -> bool:
@@ -498,20 +515,20 @@ _PROVIDER_DISPLAY: dict[str, str] = {
 }
 
 
-def _provider_chain(mode: str) -> list[str]:
-    """Return the ordered list of providers to try for *mode*.
+def _provider_chain(providers: list[str]) -> list[str]:
+    """Return the ordered list of providers to try.
 
-    Single-provider modes (``gemini``, ``groq``, ``ollama``) yield a
-    one-element list. Fallback modes (``X_fallback_Y``) yield ``[X, Y]``.
-    Unknown modes fall back to Gemini→Groq to stay safe.
+    Filters *providers* down to the ones we know how to invoke and removes
+    duplicates while preserving order. If nothing is left (config empty or
+    malformed) we fall back to the safe Gemini→Groq default.
     """
-    if "_fallback_" in mode:
-        primary, _, secondary = mode.partition("_fallback_")
-        if primary in _PROVIDER_MODELS and secondary in _PROVIDER_MODELS:
-            return [primary, secondary]
-    if mode in _PROVIDER_MODELS:
-        return [mode]
-    return ["gemini", "groq"]
+    chain: list[str] = []
+    for p in providers or []:
+        if p in _PROVIDER_MODELS and p not in chain:
+            chain.append(p)
+    if not chain:
+        return ["gemini", "groq"]
+    return chain
 
 
 def _available_providers() -> dict[str, bool]:
@@ -536,6 +553,51 @@ async def _invoke_provider(
     raise RuntimeError(f"Unknown provider: {provider}")
 
 
+# Mapping precheck field → ventana descriptiva para mensajes de log.
+_QUOTA_FIELD_WINDOW: dict[str, str] = {
+    "rpm": "últimos 60s",
+    "tpm": "últimos 60s",
+    "rpd": "últimas 24h",
+    "tpd": "últimas 24h",
+}
+
+
+def _quota_blocked(provider: str) -> str | None:
+    """Return the name of the first tripped limit, or ``None`` if OK.
+
+    Consulta los límites configurados para ``(provider, modelo_actual)`` y los
+    compara contra el consumo reciente registrado en ``ai_usage_log``. Ollama
+    es self-hosted y siempre devuelve ``None`` porque no tiene cupo externo.
+    Errores inesperados caen en "no bloquear" — preferimos una llamada real
+    fallida a una falsa alarma que deje al usuario sin respuesta.
+    """
+    if provider == "ollama":
+        return None
+    model = _PROVIDER_MODELS.get(provider)
+    if not model:
+        return None
+    try:
+        limits = get_provider_limit(provider, model)
+        if not any(limits.get(f) is not None for f in ("rpm", "tpm", "rpd", "tpd")):
+            return None
+        usage = query_provider_usage(provider)
+    except Exception as exc:
+        logger.warning("Quota precheck failed for %s: %s", provider, exc)
+        return None
+
+    checks = (
+        ("rpm", usage.get("rpm_used", 0)),
+        ("tpm", usage.get("tpm_used", 0)),
+        ("rpd", usage.get("rpd_used", 0)),
+        ("tpd", usage.get("tpd_used", 0)),
+    )
+    for field, used in checks:
+        lim = limits.get(field)
+        if lim is not None and used >= lim:
+            return field
+    return None
+
+
 async def _run_provider_chain(
     event_type: str,
     chain: list[str],
@@ -546,6 +608,9 @@ async def _run_provider_chain(
 
     - ``prompt_for(provider)`` returns the prompt tailored to that provider
       (Groq/Ollama typically get a shorter one to fit their context budget).
+    - Antes de llamar a un proveedor consulta ``_quota_blocked`` y, si está
+      excedido, lo saltea sin gastar API (salvo que sea el último de la
+      cadena: en ese caso intentamos igual como última bala).
     - On success, logs via ``_log_success`` and returns immediately.
     - On failure, logs via ``_log_error`` and falls through to the next
       provider. Re-raises the last exception if every provider fails.
@@ -555,8 +620,8 @@ async def _run_provider_chain(
 
     if not filtered:
         raise RuntimeError(
-            "No AI provider configured for mode "
-            f"'{'_fallback_'.join(chain) if len(chain) > 1 else chain[0]}'"
+            "No AI provider configured for chain "
+            f"[{', '.join(chain) if chain else '<empty>'}]"
         )
 
     last_exc: Exception | None = None
@@ -564,6 +629,26 @@ async def _run_provider_chain(
         t0 = time.time()
         model = _PROVIDER_MODELS[provider]
         prompt = prompt_for(provider)
+
+        is_last = idx + 1 >= len(filtered)
+        blocked_by = _quota_blocked(provider)
+        if blocked_by and not is_last:
+            window = _QUOTA_FIELD_WINDOW.get(blocked_by, "")
+            next_provider = filtered[idx + 1]
+            logger.info(
+                "quota guard: skipping %s (%s excedido en %s), "
+                "pasando a %s",
+                _PROVIDER_DISPLAY[provider], blocked_by, window,
+                _PROVIDER_DISPLAY[next_provider],
+            )
+            exc = QuotaExhaustedError(
+                f"Cupo local agotado: {blocked_by} ({window})",
+                limit_name=blocked_by,
+            )
+            last_exc = exc
+            _log_error(event_type, provider, model, t0, exc, prompt=prompt)
+            continue
+
         try:
             text, in_tok, out_tok = await _invoke_provider(
                 provider, prompt, timeout,
@@ -601,8 +686,9 @@ async def _call_ai(
     if not _ai_available():
         raise RuntimeError("No AI provider configured")
 
-    mode = get_provider_config().get(event_type, "gemini_fallback_groq")
-    chain = _provider_chain(mode)
+    chain = _provider_chain(
+        get_provider_config().get(event_type, ["gemini", "groq"])
+    )
     return await _run_provider_chain(
         event_type, chain, lambda _p: prompt, timeout,
     )
@@ -639,6 +725,11 @@ def _log_error(
         error_phase = exc.phase
         http_status = exc.http_status
         request_sent_at = exc.request_sent_at
+    elif isinstance(exc, QuotaExhaustedError):
+        # Marcamos explícitamente que la llamada no se hizo: así la grilla
+        # de invocaciones deja ver al admin que el skip fue intencional.
+        error_type = f"QuotaExhausted:{exc.limit_name}"
+        error_phase = "precheck"
     log_ai_usage(
         event_type=event_type,
         provider=provider,
@@ -765,8 +856,9 @@ async def _call_ai_search(
     if not _ai_available():
         raise RuntimeError("No AI provider configured")
 
-    mode = get_provider_config().get(event_type, "gemini_fallback_groq")
-    chain = _provider_chain(mode)
+    chain = _provider_chain(
+        get_provider_config().get(event_type, ["gemini", "groq"])
+    )
 
     keywords_str = _format_keywords(query)
     prompt_overhead = len(

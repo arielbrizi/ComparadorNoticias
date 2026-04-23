@@ -46,22 +46,29 @@ from app.ai_store import (
     count_ai_invocations,
     get_ollama_timeout,
     get_provider_config,
+    get_provider_limits,
     get_schedule_config,
     get_scheduler_config,
     init_ai_tables,
+    is_default_provider_limit,
     list_distinct_providers,
+    MAX_PROVIDER_CHAIN,
     query_ai_cost_summary,
     query_ai_daily_cost,
     query_ai_invocations,
     query_provider_health,
+    query_provider_usage,
     query_recent_ai_calls,
+    reset_provider_limits,
     set_ollama_timeout,
     set_provider_config,
+    set_provider_limits,
     set_schedule_config,
     set_scheduler_interval,
     OLLAMA_TIMEOUT_DEFAULT,
     OLLAMA_TIMEOUT_MAX,
     OLLAMA_TIMEOUT_MIN,
+    PROVIDER_LIMIT_DEFAULTS,
     SCHEDULER_DEFAULTS,
     VALID_EVENT_TYPES,
     VALID_PROVIDERS,
@@ -1254,30 +1261,63 @@ async def admin_ai_config_set(
     request: Request,
     _admin: dict = Depends(require_admin),
 ):
-    """Update AI provider for a specific event type."""
+    """Update AI provider chain for a specific event type.
+
+    Accepts ``{"event_type": "...", "providers": ["gemini", "groq", ...]}``
+    with 1..4 unique provider keys. For backward compatibility a legacy
+    payload with ``{"provider": "gemini_fallback_groq"}`` is also accepted
+    and converted on the fly.
+    """
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
     event_type = body.get("event_type", "")
-    provider = body.get("provider", "")
+    providers_raw = body.get("providers")
+    legacy = body.get("provider")
+
+    if providers_raw is None and isinstance(legacy, str):
+        if "_fallback_" in legacy:
+            primary, _, secondary = legacy.partition("_fallback_")
+            providers_raw = [primary, secondary]
+        else:
+            providers_raw = [legacy]
 
     if event_type not in VALID_EVENT_TYPES:
         return JSONResponse(
             {"error": f"Invalid event_type. Valid: {sorted(VALID_EVENT_TYPES)}"},
             status_code=400,
         )
-    if provider not in VALID_PROVIDERS:
+    if not isinstance(providers_raw, list) or not providers_raw:
         return JSONResponse(
-            {"error": f"Invalid provider. Valid: {sorted(VALID_PROVIDERS)}"},
+            {"error": "providers must be a non-empty list"},
+            status_code=400,
+        )
+    if len(providers_raw) > MAX_PROVIDER_CHAIN:
+        return JSONResponse(
+            {"error": f"providers length must be ≤ {MAX_PROVIDER_CHAIN}"},
             status_code=400,
         )
 
-    ok = set_provider_config(event_type, provider)
+    chain: list[str] = []
+    for item in providers_raw:
+        if not isinstance(item, str) or item not in VALID_PROVIDERS:
+            return JSONResponse(
+                {"error": f"Invalid provider. Valid: {sorted(VALID_PROVIDERS)}"},
+                status_code=400,
+            )
+        if item in chain:
+            return JSONResponse(
+                {"error": "providers must not contain duplicates"},
+                status_code=400,
+            )
+        chain.append(item)
+
+    ok = set_provider_config(event_type, chain)
     if not ok:
         return JSONResponse({"error": "Failed to update"}, status_code=500)
-    return {"ok": True, "event_type": event_type, "provider": provider}
+    return {"ok": True, "event_type": event_type, "providers": chain}
 
 
 @app.post("/api/admin/ai-schedule")
@@ -1413,6 +1453,122 @@ async def admin_ollama_config_set(
     if not ok:
         return JSONResponse({"error": "Failed to update"}, status_code=500)
     return {"ok": True, "timeout_seconds": timeout_seconds}
+
+
+# ── AI provider limits (quota guard) ─────────────────────────────────────────
+
+_QUOTA_LIMIT_FIELDS = ("rpm", "tpm", "rpd", "tpd")
+
+
+def _build_provider_limit_row(provider: str, model: str) -> dict:
+    """Merge configured limits with live usage for the UI."""
+    limits = get_provider_limits().get((provider, model)) or {}
+    usage = query_provider_usage(provider)
+
+    blocked_by: list[str] = []
+    for f in _QUOTA_LIMIT_FIELDS:
+        lim = limits.get(f)
+        used = usage.get(f + "_used", 0)
+        if lim is not None and used >= lim:
+            blocked_by.append(f)
+
+    return {
+        "provider": provider,
+        "model": model,
+        "rpm": limits.get("rpm"),
+        "tpm": limits.get("tpm"),
+        "rpd": limits.get("rpd"),
+        "tpd": limits.get("tpd"),
+        "rpm_used": usage.get("rpm_used", 0),
+        "tpm_used": usage.get("tpm_used", 0),
+        "rpd_used": usage.get("rpd_used", 0),
+        "tpd_used": usage.get("tpd_used", 0),
+        "is_default": is_default_provider_limit(provider, model),
+        "blocked_by": blocked_by,
+    }
+
+
+@app.get("/api/admin/ai-limits")
+async def admin_ai_limits_get(_admin: dict = Depends(require_admin)):
+    """Return configured limits + live usage for each (provider, model)."""
+    items = [
+        _build_provider_limit_row(provider, model)
+        for (provider, model) in PROVIDER_LIMIT_DEFAULTS.keys()
+    ]
+    return {
+        "items": items,
+        "defaults": {
+            f"{p}/{m}": dict(v) for (p, m), v in PROVIDER_LIMIT_DEFAULTS.items()
+        },
+    }
+
+
+@app.post("/api/admin/ai-limits")
+async def admin_ai_limits_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Update (or reset) the quota limits for a (provider, model) pair.
+
+    Body shape::
+
+        {
+            "provider": "gemini",
+            "model": "gemini-3-flash-preview",
+            "rpm": 10 | null, "tpm": 250000 | null,
+            "rpd": 250 | null, "tpd": null,
+            "reset": false
+        }
+
+    ``reset: true`` deletes the override row and restores defaults. Otherwise
+    each of the 4 fields accepts an integer >= 0 or ``null`` ("sin límite").
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    provider = body.get("provider", "")
+    model = body.get("model", "")
+
+    if provider not in {"gemini", "groq", "ollama"}:
+        return JSONResponse(
+            {"error": "Invalid provider. Valid: gemini, groq, ollama"},
+            status_code=400,
+        )
+    if not isinstance(model, str) or not model.strip():
+        return JSONResponse({"error": "model is required"}, status_code=400)
+
+    if body.get("reset"):
+        ok = reset_provider_limits(provider, model)
+        if not ok:
+            return JSONResponse({"error": "Failed to reset"}, status_code=500)
+        return {
+            "ok": True,
+            "item": _build_provider_limit_row(provider, model),
+            "reset": True,
+        }
+
+    parsed: dict[str, int | None] = {}
+    for field in _QUOTA_LIMIT_FIELDS:
+        raw = body.get(field, None)
+        if raw is None:
+            parsed[field] = None
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            return JSONResponse(
+                {"error": f"{field} must be a non-negative integer or null"},
+                status_code=400,
+            )
+        parsed[field] = raw
+
+    ok = set_provider_limits(
+        provider, model,
+        parsed["rpm"], parsed["tpm"], parsed["rpd"], parsed["tpd"],
+    )
+    if not ok:
+        return JSONResponse({"error": "Failed to update"}, status_code=500)
+    return {"ok": True, "item": _build_provider_limit_row(provider, model)}
 
 
 # ── Health check ─────────────────────────────────────────────────────────────

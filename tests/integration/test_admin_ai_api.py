@@ -169,7 +169,8 @@ class TestAIConfigEndpoint:
         assert "config" in data
         assert "valid_providers" in data
         assert "valid_event_types" in data
-        assert data["config"]["topics"] == "gemini_fallback_groq"
+        assert data["config"]["topics"] == ["gemini", "groq"]
+        assert set(data["valid_providers"]) == {"gemini", "groq", "ollama"}
 
     async def test_set_updates_config(self, client, monkeypatch):
         monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
@@ -178,14 +179,16 @@ class TestAIConfigEndpoint:
 
         resp = await client.post(
             "/api/admin/ai-config",
-            json={"event_type": "topics", "provider": "groq"},
+            json={"event_type": "topics", "providers": ["groq"]},
             cookies={"vs_token": token},
         )
         assert resp.status_code == 200
-        assert resp.json()["ok"] is True
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["providers"] == ["groq"]
 
         resp = await client.get("/api/admin/ai-config", cookies={"vs_token": token})
-        assert resp.json()["config"]["topics"] == "groq"
+        assert resp.json()["config"]["topics"] == ["groq"]
 
     async def test_set_invalid_event_type(self, client, monkeypatch):
         monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
@@ -194,7 +197,7 @@ class TestAIConfigEndpoint:
 
         resp = await client.post(
             "/api/admin/ai-config",
-            json={"event_type": "invalid", "provider": "groq"},
+            json={"event_type": "invalid", "providers": ["groq"]},
             cookies={"vs_token": token},
         )
         assert resp.status_code == 400
@@ -206,12 +209,53 @@ class TestAIConfigEndpoint:
 
         resp = await client.post(
             "/api/admin/ai-config",
-            json={"event_type": "topics", "provider": "openai"},
+            json={"event_type": "topics", "providers": ["openai"]},
             cookies={"vs_token": token},
         )
         assert resp.status_code == 400
 
-    async def test_set_groq_fallback_gemini(self, client, monkeypatch):
+    async def test_set_empty_chain_rejected(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-config",
+            json={"event_type": "topics", "providers": []},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+    async def test_set_duplicate_providers_rejected(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-config",
+            json={"event_type": "topics", "providers": ["groq", "groq"]},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+    async def test_set_three_provider_chain(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-config",
+            json={"event_type": "topics", "providers": ["ollama", "gemini", "groq"]},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["providers"] == ["ollama", "gemini", "groq"]
+
+        resp = await client.get("/api/admin/ai-config", cookies={"vs_token": token})
+        assert resp.json()["config"]["topics"] == ["ollama", "gemini", "groq"]
+
+    async def test_legacy_provider_string_still_accepted(self, client, monkeypatch):
+        """Back-compat: old clients sending ``provider: "X_fallback_Y"`` keep working."""
         monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
         admin = upsert_user("admin@test.com", "Admin", "")
         token = _make_admin_token(user_id=admin["id"], email=admin["email"])
@@ -222,10 +266,10 @@ class TestAIConfigEndpoint:
             cookies={"vs_token": token},
         )
         assert resp.status_code == 200
-        assert resp.json()["ok"] is True
+        assert resp.json()["providers"] == ["groq", "gemini"]
 
         resp = await client.get("/api/admin/ai-config", cookies={"vs_token": token})
-        assert resp.json()["config"]["topics"] == "groq_fallback_gemini"
+        assert resp.json()["config"]["topics"] == ["groq", "gemini"]
 
     async def test_config_returns_schedule(self, client, monkeypatch):
         monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])

@@ -56,12 +56,54 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
 VALID_EVENT_TYPES = frozenset(
     {"search", "search_prefetch", "topics", "weekly_summary", "top_story"}
 )
-VALID_PROVIDERS = frozenset({
-    "gemini", "groq", "ollama",
-    "gemini_fallback_groq", "groq_fallback_gemini",
-    "gemini_fallback_ollama", "ollama_fallback_gemini",
-    "groq_fallback_ollama", "ollama_fallback_groq",
-})
+VALID_PROVIDERS = frozenset({"gemini", "groq", "ollama"})
+MAX_PROVIDER_CHAIN = 4
+
+# ── Provider quota limits ────────────────────────────────────────────────────
+#
+# Rate/quota limits published by each provider for the model we actually use,
+# expressed per ventana:
+#   rpm = requests per minute  | tpm = tokens per minute
+#   rpd = requests per day     | tpd = tokens per day
+#
+# None means "sin límite conocido" (por ejemplo, Ollama es self-hosted y no
+# tiene límites externos). Los valores son los del portal del proveedor al
+# momento del lookup y están pensados para repasarse cada mes — el admin
+# puede sobre-escribirlos desde el panel y guardarlos en ai_provider_limits.
+#
+# LAST_VERIFIED: 2026-04-22 — Gemini (AI Studio free tier gemini-2.5-flash),
+# Groq (free tier llama-3.3-70b-versatile). Ajustar cuando cambien.
+# Defaults de cupos publicados por los portales. Verificados mirando:
+#   - Gemini free tier (aistudio.google.com/rate-limit):
+#       reporte comunidad abr-2026 para gemini-3-flash-preview.
+#   - Groq free tier (console.groq.com/docs/rate-limits).
+# Lookup: 2026-04-22. Repetir una vez al mes y actualizar la fecha.
+PROVIDER_LIMIT_DEFAULTS: dict[tuple[str, str], dict[str, int | None]] = {
+    ("gemini", "gemini-3-flash-preview"): {
+        # Preview free tier — Google no publica tabla estática; los números
+        # coinciden con lo que devuelve aistudio.google.com/rate-limit para
+        # una cuenta sin billing activo. Ajustar desde el admin si se pasa a
+        # Tier 1 (≈ 20-25 RPM / 250 RPD).
+        "rpm": 5,
+        "tpm": 250_000,
+        "rpd": 20,
+        "tpd": None,
+    },
+    ("groq", "llama-3.3-70b-versatile"): {
+        # Free tier Groq Console. TPM/RPD confirmados en docs oficiales.
+        "rpm": 30,
+        "tpm": 12_000,
+        "rpd": 1_000,
+        "tpd": 100_000,
+    },
+    # Ollama: self-hosted, sin límite externo. Lo dejamos explícito para que
+    # get_provider_limits devuelva algo en vez de "desconocido".
+    ("ollama", "qwen3:8b"): {
+        "rpm": None, "tpm": None, "rpd": None, "tpd": None,
+    },
+}
+
+_LIMIT_FIELDS: tuple[str, ...] = ("rpm", "tpm", "rpd", "tpd")
 
 # ── Table init ────────────────────────────────────────────────────────────────
 
@@ -126,6 +168,13 @@ def init_ai_tables() -> None:
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_aul_created ON ai_usage_log(created_at)")
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_aul_event ON ai_usage_log(event_type)")
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_aul_provider ON ai_usage_log(provider)")
+        # El quota-guard consulta "últimos 60s / 24h por proveedor" en cada
+        # invocación; un índice compuesto mantiene la consulta en O(log n).
+        execute(
+            conn,
+            "CREATE INDEX IF NOT EXISTS idx_aul_provider_created "
+            "ON ai_usage_log(provider, created_at)",
+        )
         _migrate_ai_usage_log_previews(conn)
         _migrate_ai_usage_log_errors(conn)
 
@@ -134,12 +183,28 @@ def init_ai_tables() -> None:
             """
             CREATE TABLE IF NOT EXISTS ai_provider_config (
                 event_type TEXT PRIMARY KEY,
-                provider   TEXT NOT NULL DEFAULT 'gemini_fallback_groq',
+                provider   TEXT NOT NULL DEFAULT '["gemini","groq"]',
                 updated_at TEXT NOT NULL
             )
             """,
         )
         _seed_provider_config(conn)
+
+        execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS ai_provider_limits (
+                provider   TEXT NOT NULL,
+                model      TEXT NOT NULL,
+                rpm        INTEGER,
+                tpm        INTEGER,
+                rpd        INTEGER,
+                tpd        INTEGER,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, model)
+            )
+            """,
+        )
 
         execute(
             conn,
@@ -253,20 +318,24 @@ def _migrate_ai_usage_log_errors(conn) -> None:
         logger.warning("ai_usage_log error-columns migration failed: %s", exc)
 
 
+DEFAULT_PROVIDER_CHAIN: tuple[str, ...] = ("gemini", "groq")
+
+
 def _seed_provider_config(conn) -> None:
     """Insert default rows for every known event type if missing."""
     now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+    default_chain = json.dumps(list(DEFAULT_PROVIDER_CHAIN))
     for et in sorted(VALID_EVENT_TYPES):
         execute(
             conn,
             """
             INSERT INTO ai_provider_config (event_type, provider, updated_at)
-            SELECT ?, 'gemini_fallback_groq', ?
+            SELECT ?, ?, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM ai_provider_config WHERE event_type = ?
             )
             """,
-            (et, now_iso, et),
+            (et, default_chain, now_iso, et),
         )
 
 
@@ -367,40 +436,97 @@ def log_ai_usage(
 
 # ── Provider config ───────────────────────────────────────────────────────────
 
-_config_cache: dict[str, str] = {}
+_config_cache: dict[str, list[str]] = {}
 _config_cache_ts: float = 0
 _CONFIG_CACHE_TTL = 30  # seconds
 
 
-def get_provider_config() -> dict[str, str]:
-    """Return {event_type: provider} dict (cached briefly)."""
+def _legacy_to_chain(raw: str) -> list[str]:
+    """Convert a legacy ``ai_provider_config.provider`` value to a chain list.
+
+    Old schema stored enums like ``"gemini_fallback_groq"`` or ``"ollama"`` as
+    a single string. We map them to ordered lists without touching the DB —
+    the first write from the admin panel will normalize the row to JSON.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return list(DEFAULT_PROVIDER_CHAIN)
+    if "_fallback_" in raw:
+        primary, _, secondary = raw.partition("_fallback_")
+        chain = [p for p in (primary, secondary) if p in VALID_PROVIDERS]
+        return chain or list(DEFAULT_PROVIDER_CHAIN)
+    if raw in VALID_PROVIDERS:
+        return [raw]
+    return list(DEFAULT_PROVIDER_CHAIN)
+
+
+def _parse_provider_value(raw: str) -> list[str]:
+    """Parse a stored ``provider`` column value into an ordered chain."""
+    raw = (raw or "").strip()
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return _legacy_to_chain(raw)
+        if not isinstance(parsed, list):
+            return _legacy_to_chain(raw)
+        chain: list[str] = []
+        for item in parsed:
+            if isinstance(item, str) and item in VALID_PROVIDERS and item not in chain:
+                chain.append(item)
+        return chain or list(DEFAULT_PROVIDER_CHAIN)
+    return _legacy_to_chain(raw)
+
+
+def get_provider_config() -> dict[str, list[str]]:
+    """Return ``{event_type: [providers...]}`` with an ordered fallback chain."""
     global _config_cache, _config_cache_ts
     now = time.time()
     if _config_cache and (now - _config_cache_ts) < _CONFIG_CACHE_TTL:
-        return dict(_config_cache)
+        return {k: list(v) for k, v in _config_cache.items()}
 
     try:
         with get_conn() as conn:
             rows = query(conn, "SELECT event_type, provider FROM ai_provider_config").fetchall()
-        _config_cache = {r["event_type"]: r["provider"] for r in rows}
+        _config_cache = {
+            r["event_type"]: _parse_provider_value(r["provider"]) for r in rows
+        }
         _config_cache_ts = now
     except Exception as exc:
         logger.warning("Failed to read AI provider config: %s", exc)
         if not _config_cache:
-            _config_cache = {et: "gemini_fallback_groq" for et in VALID_EVENT_TYPES}
+            _config_cache = {
+                et: list(DEFAULT_PROVIDER_CHAIN) for et in VALID_EVENT_TYPES
+            }
             _config_cache_ts = now
 
-    return dict(_config_cache)
+    return {k: list(v) for k, v in _config_cache.items()}
 
 
-def set_provider_config(event_type: str, provider: str) -> bool:
-    """Update the provider for an event type. Returns True on success."""
+def set_provider_config(event_type: str, providers: list[str]) -> bool:
+    """Update the provider chain for an event type. Returns True on success.
+
+    *providers* must be an ordered, non-empty list of valid provider keys
+    without duplicates. The DB column stores the JSON-encoded list.
+    """
     global _config_cache_ts
     if event_type not in VALID_EVENT_TYPES:
         return False
-    if provider not in VALID_PROVIDERS:
+    if not isinstance(providers, (list, tuple)):
         return False
 
+    chain: list[str] = []
+    for item in providers:
+        if not isinstance(item, str) or item not in VALID_PROVIDERS:
+            return False
+        if item in chain:
+            continue  # dedupe defensively
+        chain.append(item)
+
+    if not chain or len(chain) > MAX_PROVIDER_CHAIN:
+        return False
+
+    encoded = json.dumps(chain)
     now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
     try:
         with get_conn() as conn:
@@ -410,10 +536,10 @@ def set_provider_config(event_type: str, provider: str) -> bool:
                 UPDATE ai_provider_config SET provider = ?, updated_at = ?
                 WHERE event_type = ?
                 """,
-                (provider, now_iso, event_type),
+                (encoded, now_iso, event_type),
             )
         _config_cache_ts = 0  # invalidate cache
-        logger.info("AI provider config updated: %s → %s", event_type, provider)
+        logger.info("AI provider config updated: %s → %s", event_type, chain)
         return True
     except Exception as exc:
         logger.error("Failed to update AI provider config: %s", exc)
@@ -1142,3 +1268,273 @@ def load_last_good_topics() -> dict | None:
     except Exception as exc:
         logger.warning("Failed to load last good topics: %s", exc)
         return None
+
+
+# ── Provider limits (quota guard) ─────────────────────────────────────────────
+
+_BASE_PROVIDERS: frozenset[str] = frozenset({"gemini", "groq", "ollama"})
+
+_limits_cache: dict[tuple[str, str], dict[str, int | None]] = {}
+_limits_cache_ts: float = 0
+_LIMITS_CACHE_TTL = 30
+
+_usage_cache: dict[str, tuple[float, dict[str, int]]] = {}
+_USAGE_CACHE_TTL = 10
+
+
+def _default_limits(provider: str, model: str) -> dict[str, int | None]:
+    """Return the hardcoded defaults for (provider, model), or all-None."""
+    base = PROVIDER_LIMIT_DEFAULTS.get((provider, model))
+    if base:
+        return {k: base.get(k) for k in _LIMIT_FIELDS}
+    return {k: None for k in _LIMIT_FIELDS}
+
+
+def _parse_limit_field(value) -> int | None:
+    """Normalize an incoming limit field to ``None`` or a non-negative int."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        if value < 0:
+            return None
+        return int(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            v = int(s)
+        except ValueError:
+            return None
+        return v if v >= 0 else None
+    return None
+
+
+def _load_provider_limits_from_db() -> dict[tuple[str, str], dict[str, int | None]]:
+    """Return overrides stored in ``ai_provider_limits`` (only fields present)."""
+    out: dict[tuple[str, str], dict[str, int | None]] = {}
+    try:
+        with get_conn() as conn:
+            rows = query(
+                conn,
+                "SELECT provider, model, rpm, tpm, rpd, tpd FROM ai_provider_limits",
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("Failed to read ai_provider_limits: %s", exc)
+        return out
+    for r in rows:
+        key = (r["provider"], r["model"])
+        out[key] = {f: r[f] for f in _LIMIT_FIELDS}
+    return out
+
+
+def get_provider_limits() -> dict[tuple[str, str], dict[str, int | None]]:
+    """Return the merged view of provider limits (defaults + DB overrides).
+
+    The resulting dict is keyed by ``(provider, model)``. A row in the DB is
+    authoritative in its entirety: if it exists, the 4 fields replace the
+    defaults for that pair (``None`` in a field means "no limit"). If no row
+    exists, the hardcoded ``PROVIDER_LIMIT_DEFAULTS`` for that pair apply.
+    Cached for ``_LIMITS_CACHE_TTL`` seconds.
+    """
+    global _limits_cache, _limits_cache_ts
+    now = time.time()
+    if _limits_cache and (now - _limits_cache_ts) < _LIMITS_CACHE_TTL:
+        return {k: dict(v) for k, v in _limits_cache.items()}
+
+    merged: dict[tuple[str, str], dict[str, int | None]] = {
+        key: dict(vals) for key, vals in PROVIDER_LIMIT_DEFAULTS.items()
+    }
+    overrides = _load_provider_limits_from_db()
+    for key, vals in overrides.items():
+        merged[key] = {f: vals.get(f) for f in _LIMIT_FIELDS}
+
+    _limits_cache = {k: dict(v) for k, v in merged.items()}
+    _limits_cache_ts = now
+    return {k: dict(v) for k, v in merged.items()}
+
+
+def get_provider_limit(provider: str, model: str) -> dict[str, int | None]:
+    """Return the limits for a specific ``(provider, model)`` pair."""
+    all_limits = get_provider_limits()
+    if (provider, model) in all_limits:
+        return dict(all_limits[(provider, model)])
+    return _default_limits(provider, model)
+
+
+def is_default_provider_limit(provider: str, model: str) -> bool:
+    """True when no admin override exists for ``(provider, model)``."""
+    overrides = _load_provider_limits_from_db()
+    return (provider, model) not in overrides
+
+
+def set_provider_limits(
+    provider: str,
+    model: str,
+    rpm: int | None,
+    tpm: int | None,
+    rpd: int | None,
+    tpd: int | None,
+) -> bool:
+    """Persist an override row. ``None`` in a field means "sin límite"."""
+    global _limits_cache_ts, _usage_cache
+    if provider not in _BASE_PROVIDERS:
+        return False
+    if not isinstance(model, str) or not model.strip():
+        return False
+
+    values: dict[str, int | None] = {}
+    for field, raw in (("rpm", rpm), ("tpm", tpm), ("rpd", rpd), ("tpd", tpd)):
+        if raw is not None and (
+            isinstance(raw, bool) or not isinstance(raw, int) or raw < 0
+        ):
+            return False
+        values[field] = raw
+
+    now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        with get_conn() as conn:
+            if is_postgres():
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_provider_limits
+                        (provider, model, rpm, tpm, rpd, tpd, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (provider, model) DO UPDATE SET
+                        rpm = EXCLUDED.rpm,
+                        tpm = EXCLUDED.tpm,
+                        rpd = EXCLUDED.rpd,
+                        tpd = EXCLUDED.tpd,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (
+                        provider, model,
+                        values["rpm"], values["tpm"],
+                        values["rpd"], values["tpd"],
+                        now_iso,
+                    ),
+                )
+            else:
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_provider_limits
+                        (provider, model, rpm, tpm, rpd, tpd, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(provider, model) DO UPDATE SET
+                        rpm = excluded.rpm,
+                        tpm = excluded.tpm,
+                        rpd = excluded.rpd,
+                        tpd = excluded.tpd,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        provider, model,
+                        values["rpm"], values["tpm"],
+                        values["rpd"], values["tpd"],
+                        now_iso,
+                    ),
+                )
+        _limits_cache_ts = 0
+        _usage_cache = {}
+        logger.info(
+            "AI provider limit updated: %s/%s → rpm=%s tpm=%s rpd=%s tpd=%s",
+            provider, model,
+            values["rpm"], values["tpm"], values["rpd"], values["tpd"],
+        )
+        return True
+    except Exception as exc:
+        logger.error("Failed to update ai_provider_limits: %s", exc)
+        return False
+
+
+def reset_provider_limits(provider: str, model: str) -> bool:
+    """Delete the override row, making the defaults authoritative again."""
+    global _limits_cache_ts, _usage_cache
+    if provider not in _BASE_PROVIDERS:
+        return False
+    try:
+        with get_conn() as conn:
+            execute(
+                conn,
+                "DELETE FROM ai_provider_limits WHERE provider = ? AND model = ?",
+                (provider, model),
+            )
+        _limits_cache_ts = 0
+        _usage_cache = {}
+        logger.info("AI provider limit reset to defaults: %s/%s", provider, model)
+        return True
+    except Exception as exc:
+        logger.error("Failed to reset ai_provider_limits: %s", exc)
+        return False
+
+
+def _usage_cutoff(seconds: int) -> str:
+    """Return an ISO cutoff string compatible with ``ai_usage_log.created_at``."""
+    return (datetime.now(ART) - timedelta(seconds=seconds)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+
+
+def query_provider_usage(provider: str) -> dict[str, int]:
+    """Return current usage for ``provider`` across the rolling 60s and 24h.
+
+    Uses ``ai_usage_log`` filtered by ``success = 1`` (failed calls don't
+    consume the provider-side quota). Returns ``{rpm_used, tpm_used,
+    rpd_used, tpd_used}``. Cached per provider for ``_USAGE_CACHE_TTL`` seconds
+    to keep the precheck cheap even on bursty traffic.
+    """
+    global _usage_cache
+    now = time.time()
+    cached = _usage_cache.get(provider)
+    if cached and (now - cached[0]) < _USAGE_CACHE_TTL:
+        return dict(cached[1])
+
+    minute_cutoff = _usage_cutoff(60)
+    day_cutoff = _usage_cutoff(60 * 60 * 24)
+
+    result = {"rpm_used": 0, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0}
+    try:
+        with get_conn() as conn:
+            minute_row = query(
+                conn,
+                """SELECT COUNT(*) AS c,
+                          COALESCE(SUM(input_tokens + output_tokens), 0) AS t
+                     FROM ai_usage_log
+                    WHERE provider = ? AND success = 1 AND created_at >= ?""",
+                (provider, minute_cutoff),
+            ).fetchone()
+            day_row = query(
+                conn,
+                """SELECT COUNT(*) AS c,
+                          COALESCE(SUM(input_tokens + output_tokens), 0) AS t
+                     FROM ai_usage_log
+                    WHERE provider = ? AND success = 1 AND created_at >= ?""",
+                (provider, day_cutoff),
+            ).fetchone()
+        if minute_row is not None:
+            result["rpm_used"] = int(minute_row["c"] or 0)
+            result["tpm_used"] = int(minute_row["t"] or 0)
+        if day_row is not None:
+            result["rpd_used"] = int(day_row["c"] or 0)
+            result["tpd_used"] = int(day_row["t"] or 0)
+    except Exception as exc:
+        logger.warning("query_provider_usage(%s) failed: %s", provider, exc)
+        return result
+
+    _usage_cache[provider] = (now, dict(result))
+    return result
+
+
+def invalidate_provider_usage_cache(provider: str | None = None) -> None:
+    """Drop the usage cache entry for ``provider`` (or all if ``None``)."""
+    global _usage_cache
+    if provider is None:
+        _usage_cache = {}
+    else:
+        _usage_cache.pop(provider, None)

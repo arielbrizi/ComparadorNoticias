@@ -7,9 +7,13 @@ alwaysApply: false
 # AI Provider Constraints
 
 This project supports **three** providers: **Gemini** (Google), **Groq** (Llama)
-and **Ollama** (self-hosted, typically on Railway). Each event type picks a
-mode from the admin panel; valid modes live in
-`app.ai_store.VALID_PROVIDERS`.
+and **Ollama** (self-hosted, typically on Railway). Valid provider keys live in
+`app.ai_store.VALID_PROVIDERS` (`{"gemini", "groq", "ollama"}`). Each event
+type stores an **ordered fallback chain** in `ai_provider_config.provider`
+(JSON list up to `app.ai_store.MAX_PROVIDER_CHAIN` entries, no duplicates),
+editable from the admin panel as 4 priority selects. Legacy enum strings
+like `"gemini_fallback_groq"` are still parsed at read time for backward
+compatibility.
 
 ## Groq limits
 
@@ -42,12 +46,56 @@ mode from the admin panel; valid modes live in
 
 ## Provider routing
 
-- `_provider_chain(mode)` returns the ordered list of providers for a mode
-  (`"gemini_fallback_ollama"` → `["gemini", "ollama"]`)
+- `get_provider_config()` returns `{event_type: [providers...]}`; the list is
+  the user-ordered fallback chain.
+- `_provider_chain(providers)` filters the stored list down to known
+  providers (keeps order, drops unknowns, falls back to `["gemini", "groq"]`
+  if the chain is empty/invalid).
 - `_run_provider_chain(...)` walks the chain, logging every attempt to
-  `ai_usage_log` so the admin monitor always reflects the real state
+  `ai_usage_log` so the admin monitor always reflects the real state.
 - Filter by `_available_providers()` before trying — missing credentials
-  skip the provider and fall through to the next
+  skip the provider and fall through to the next.
+
+## Quota guard (proactive RPM/TPM/RPD/TPD)
+
+To avoid hammering providers with known-bad requests (429s from portals),
+`_run_provider_chain` runs a **local precheck** before every invocation:
+
+- `app.ai_store.PROVIDER_LIMIT_DEFAULTS` holds hardcoded monthly-researched
+  defaults per `(provider, model)` for RPM/TPM/RPD/TPD. Ollama defaults are
+  all `None` (self-hosted → no external cap).
+- Admin overrides live in the `ai_provider_limits` table and are edited from
+  the "Límites de proveedores IA" card (Administración tab). Setting a field
+  to empty reverts that field to the default; "Restaurar default" deletes the
+  whole row.
+- `get_provider_limit(provider, model)` merges defaults + overrides and is
+  cached for 30 s (`_limits_cache`).
+- `query_provider_usage(provider)` counts successful rows in `ai_usage_log`
+  inside two rolling windows — 60 s for RPM/TPM and 24 h for RPD/TPD — using
+  the `idx_aul_provider_created` index. Cached 10 s per provider
+  (`_usage_cache`).
+- `_quota_blocked(provider)` returns the name of the tripped limit
+  (`"rpm"`/`"tpm"`/`"rpd"`/`"tpd"`) or `None`. Always returns `None` for
+  `ollama` and swallows any DB error safely (fail-open).
+- In `_run_provider_chain`, if `_quota_blocked` returns non-`None` **and the
+  provider is not the last in the chain**, the step is skipped and logged as
+  `error_type="QuotaExhausted:<field>"`, `error_phase="precheck"`, zero
+  tokens. The last provider is always attempted as a last-resort fallback so
+  the user still gets an answer.
+- `GET /api/admin/ai-limits` returns the merged `{limits, usage, blocked_by,
+  is_default}` payload consumed by `static/js/admin.js`. `POST` with a null
+  field clears that field (back to default); body with all four nulls is
+  equivalent to reset.
+- When editing quotas, invalidate caches via `invalidate_provider_limits()`
+  and `invalidate_provider_usage_cache()` — both are called automatically
+  from the admin endpoint.
+
+### Monthly research TODO
+
+The numeric defaults in `PROVIDER_LIMIT_DEFAULTS` are marked with a
+`# Lookup YYYY-MM-DD` comment. Once a month, re-check Google AI Studio and
+Groq Console, update the numbers, and bump the date. Admins can also patch
+the live values immediately from the UI without a deploy.
 
 ## When changing search or topic prompts
 

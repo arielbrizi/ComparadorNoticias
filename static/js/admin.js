@@ -169,6 +169,7 @@ function loadAll() {
         loadAIConfig();
         loadSchedulerConfig();
         loadOllamaTimeout();
+        loadAILimits();
     } else if (_activeTab === "costs") {
         loadAICosts(desde, hasta);
         loadInfraCosts();
@@ -532,13 +533,15 @@ const _providerLabels = {
     gemini: "Gemini",
     groq: "Groq",
     ollama: "Ollama",
-    gemini_fallback_groq: "Gemini (fallback Groq)",
-    groq_fallback_gemini: "Groq (fallback Gemini)",
-    gemini_fallback_ollama: "Gemini (fallback Ollama)",
-    ollama_fallback_gemini: "Ollama (fallback Gemini)",
-    groq_fallback_ollama: "Groq (fallback Ollama)",
-    ollama_fallback_groq: "Ollama (fallback Groq)",
 };
+
+const _PROVIDER_SLOT_LABELS = [
+    "Primer proveedor",
+    "Si falla, 2do",
+    "Si falla, 3ro",
+    "Si falla, 4to",
+];
+const _MAX_PROVIDER_SLOTS = 4;
 
 const _providerColors = {
     gemini: { bar: "#4088c7", bg: "rgba(64,136,199,0.12)" },
@@ -716,6 +719,116 @@ function _buildHourOptions(selected) {
     return opts.join("");
 }
 
+function _normalizeProviderChain(raw) {
+    if (Array.isArray(raw)) {
+        const seen = new Set();
+        const out = [];
+        for (const p of raw) {
+            if (typeof p !== "string" || !p) continue;
+            if (seen.has(p)) continue;
+            seen.add(p);
+            out.push(p);
+        }
+        return out;
+    }
+    if (typeof raw === "string" && raw) {
+        if (raw.includes("_fallback_")) {
+            const [primary, secondary] = raw.split("_fallback_");
+            return [primary, secondary].filter(Boolean);
+        }
+        return [raw];
+    }
+    return [];
+}
+
+function _renderSlotSelect(et, slotIdx, chain, providers) {
+    const value = chain[slotIdx] || "";
+    const isFirstSlot = slotIdx === 0;
+    const previous = chain.slice(0, slotIdx);
+    const prevComplete = previous.length === slotIdx && previous.every(Boolean);
+    const disabled = !isFirstSlot && (!prevComplete || previous.length >= providers.length);
+
+    const opts = [];
+    if (!isFirstSlot) {
+        opts.push(`<option value="" ${value ? "" : "selected"}>(ninguno)</option>`);
+    }
+    for (const p of providers) {
+        const usedEarlier = previous.includes(p);
+        if (usedEarlier && p !== value) continue;
+        const selected = p === value ? "selected" : "";
+        opts.push(`<option value="${escHtml(p)}" ${selected}>${escHtml(_providerLabels[p] || p)}</option>`);
+    }
+    if (isFirstSlot && !value && providers.length) {
+        // First slot must have a value; force selection of first option
+        opts[0] = opts[0].replace("<option", "<option selected");
+    }
+
+    return `
+        <div style="display:flex;flex-direction:column;gap:0.15rem">
+            <div style="font-size:0.62rem;color:var(--text-dim)">${escHtml(_PROVIDER_SLOT_LABELS[slotIdx])}</div>
+            <select class="ai-config-slot" data-event="${et}" data-slot="${slotIdx}" ${disabled ? "disabled" : ""}>${opts.join("")}</select>
+        </div>`;
+}
+
+function _renderSlotsForEvent(et, chain, providers) {
+    const slots = [];
+    for (let i = 0; i < _MAX_PROVIDER_SLOTS; i++) {
+        slots.push(_renderSlotSelect(et, i, chain, providers));
+    }
+    return slots.join("");
+}
+
+function _readChainFromDom(et) {
+    const chain = [];
+    for (let i = 0; i < _MAX_PROVIDER_SLOTS; i++) {
+        const sel = $(`.ai-config-slot[data-event="${et}"][data-slot="${i}"]`);
+        if (!sel) break;
+        const v = sel.value;
+        if (v) chain.push(v);
+    }
+    // Dedupe defensively while preserving order
+    const seen = new Set();
+    return chain.filter(p => (seen.has(p) ? false : (seen.add(p), true)));
+}
+
+function _rerenderSlotsForEvent(et, chain, providers) {
+    const host = $(`.ai-config-slots[data-event="${et}"]`);
+    if (host) host.innerHTML = _renderSlotsForEvent(et, chain, providers);
+}
+
+async function _saveProviderChain(et, chain) {
+    const status = $(`.ai-config-status[data-event="${et}"]`);
+    if (status) {
+        status.textContent = "Guardando...";
+        status.style.color = "var(--text-dim)";
+    }
+    try {
+        const resp = await fetch("/api/admin/ai-config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ event_type: et, providers: chain }),
+        });
+        if (resp.ok) {
+            if (status) {
+                status.textContent = "Guardado";
+                status.style.color = "#0d9488";
+                setTimeout(() => { if (status) status.textContent = ""; }, 2000);
+            }
+        } else {
+            const err = await resp.json().catch(() => ({}));
+            if (status) {
+                status.textContent = err.error || "Error";
+                status.style.color = "#ea580c";
+            }
+        }
+    } catch (err) {
+        if (status) {
+            status.textContent = "Error de red";
+            status.style.color = "#ea580c";
+        }
+    }
+}
+
 function renderAIConfig(config, validProviders, validEventTypes, schedule) {
     const container = $("#ai-config-wrap");
     if (!validEventTypes || !validEventTypes.length) {
@@ -723,13 +836,11 @@ function renderAIConfig(config, validProviders, validEventTypes, schedule) {
         return;
     }
 
-    const selectStyle = "";
+    const providers = (validProviders || []).filter(p => _providerLabels[p]);
 
     const cards = validEventTypes.map(et => {
-        const current = config[et] || "gemini_fallback_groq";
-        const options = validProviders.map(p =>
-            `<option value="${p}" ${p === current ? "selected" : ""}>${escHtml(_providerLabels[p] || p)}</option>`
-        ).join("");
+        const chain = _normalizeProviderChain(config[et]);
+        if (!chain.length && providers.length) chain.push(providers[0]);
 
         const desc = _eventDescs[et] || "";
 
@@ -754,11 +865,13 @@ function renderAIConfig(config, validProviders, validEventTypes, schedule) {
                 </div>`;
         }
 
+        const slotsHtml = _renderSlotsForEvent(et, chain, providers);
+
         return `
             <div class="admin-eng-card" style="flex-direction:column;align-items:stretch;gap:0.4rem">
                 <div style="font-size:0.82rem;font-weight:600;color:var(--text)">${escHtml(_eventLabels[et] || et)}</div>
                 <div style="font-size:0.68rem;color:var(--text-dim);margin-bottom:0.2rem">${escHtml(desc)}</div>
-                <select class="ai-config-select" data-event="${et}" style="${selectStyle}">${options}</select>
+                <div class="ai-config-slots" data-event="${et}" style="display:flex;flex-direction:column;gap:0.35rem">${slotsHtml}</div>
                 <div class="ai-config-status" data-event="${et}" style="font-size:0.65rem;min-height:1rem;color:var(--text-dim)"></div>
                 ${scheduleHtml}
             </div>`;
@@ -766,34 +879,19 @@ function renderAIConfig(config, validProviders, validEventTypes, schedule) {
 
     container.innerHTML = `<div class="admin-engagement">${cards}</div>`;
 
-    $$(".ai-config-select").forEach(sel => {
-        sel.addEventListener("change", async () => {
-            const et = sel.dataset.event;
-            const provider = sel.value;
-            const status = $(`.ai-config-status[data-event="${et}"]`);
-            status.textContent = "Guardando...";
-            status.style.color = "var(--text-dim)";
-            try {
-                const resp = await fetch("/api/admin/ai-config", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ event_type: et, provider }),
-                });
-                if (resp.ok) {
-                    status.textContent = "Guardado";
-                    status.style.color = "#0d9488";
-                    setTimeout(() => { status.textContent = ""; }, 2000);
-                } else {
-                    const err = await resp.json();
-                    status.textContent = err.error || "Error";
-                    status.style.color = "#ea580c";
-                }
-            } catch (err) {
-                status.textContent = "Error de red";
-                status.style.color = "#ea580c";
-            }
-        });
-    });
+    // Use onchange property (not addEventListener) so repeated calls to
+    // renderAIConfig don't stack duplicate handlers.
+    container.onchange = async (evt) => {
+        const sel = evt.target;
+        if (!sel || !sel.classList || !sel.classList.contains("ai-config-slot")) return;
+        const et = sel.dataset.event;
+        const chain = _readChainFromDom(et);
+        if (!chain.length && providers.length) {
+            chain.push(providers[0]);
+        }
+        _rerenderSlotsForEvent(et, chain, providers);
+        await _saveProviderChain(et, chain);
+    };
 
     $$(".ai-schedule-start, .ai-schedule-end").forEach(sel => {
         sel.addEventListener("change", async () => {
@@ -991,6 +1089,212 @@ function renderOllamaTimeout(data) {
             status.textContent = "Error de red";
             status.style.color = "#ea580c";
         }
+    });
+}
+
+// ── AI provider quota limits ─────────────────────────────────────────────
+
+const _limitFieldLabels = {
+    rpm: "RPM",
+    tpm: "TPM",
+    rpd: "RPD",
+    tpd: "TPD",
+};
+
+const _limitFieldDescs = {
+    rpm: "Requests por minuto",
+    tpm: "Tokens por minuto",
+    rpd: "Requests por día",
+    tpd: "Tokens por día",
+};
+
+function _fmtLimitNum(n) {
+    if (n === null || n === undefined) return "—";
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+    if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k";
+    return String(n);
+}
+
+async function loadAILimits() {
+    const container = $("#ai-limits-wrap");
+    if (!container) return;
+    try {
+        const resp = await fetch("/api/admin/ai-limits");
+        if (resp.status === 403) return;
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderAILimits(data.items || []);
+    } catch (err) {
+        console.error("AI limits load failed:", err);
+        container.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error al cargar límites</div>`;
+    }
+}
+
+function _renderLimitField(item, field) {
+    const lim = item[field];
+    const used = item[`${field}_used`] ?? 0;
+    const tripped = item.blocked_by.includes(field);
+    const pct = lim && lim > 0 ? Math.min(100, Math.round((used / lim) * 100)) : 0;
+    const barColor = tripped ? "#dc2626" : pct >= 80 ? "#ea580c" : "#0d9488";
+    const barWidth = lim ? pct : 0;
+
+    const val = lim === null || lim === undefined ? "" : lim;
+    return `
+        <div style="display:flex;flex-direction:column;gap:0.25rem">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:0.4rem">
+                <label style="font-size:0.7rem;font-weight:600;color:var(--text)"
+                       title="${escHtml(_limitFieldDescs[field] || "")}">${_limitFieldLabels[field]}</label>
+                <span style="font-size:0.62rem;color:var(--text-dim)">
+                    ${escHtml(_fmtLimitNum(used))}${lim ? " / " + escHtml(_fmtLimitNum(lim)) : ""}
+                </span>
+            </div>
+            <input type="number" min="0" step="1"
+                class="ai-limit-input" data-provider="${escHtml(item.provider)}"
+                data-model="${escHtml(item.model)}" data-field="${field}"
+                value="${val}" placeholder="sin límite"
+                style="width:100%;padding:0.3rem 0.4rem;font-size:0.75rem">
+            <div style="height:4px;border-radius:2px;background:var(--border);overflow:hidden">
+                <div style="height:100%;width:${barWidth}%;background:${barColor};transition:width .3s"></div>
+            </div>
+        </div>`;
+}
+
+function renderAILimits(items) {
+    const container = $("#ai-limits-wrap");
+    if (!container) return;
+    if (!items.length) {
+        container.innerHTML = `<div class="admin-empty">Sin proveedores configurados</div>`;
+        return;
+    }
+
+    const cards = items.map(item => {
+        const provName = _providerDisplayNames[item.provider] || item.provider;
+        const blockedBadge = item.blocked_by.length
+            ? `<span style="background:#fee2e2;color:#991b1b;padding:0.15rem 0.45rem;border-radius:999px;font-size:0.62rem;font-weight:600">
+                 Bloqueado: ${item.blocked_by.map(f => _limitFieldLabels[f] || f).join(", ")}
+               </span>`
+            : "";
+        const defaultBadge = item.is_default
+            ? `<span style="background:var(--border);color:var(--text-dim);padding:0.15rem 0.45rem;border-radius:999px;font-size:0.62rem">default</span>`
+            : `<span style="background:#dbeafe;color:#1e40af;padding:0.15rem 0.45rem;border-radius:999px;font-size:0.62rem">personalizado</span>`;
+
+        const ollamaNote = item.provider === "ollama"
+            ? `<div style="font-size:0.65rem;color:var(--text-dim);font-style:italic">Self-hosted: sin cupo externo. Dejá los 4 campos vacíos.</div>`
+            : "";
+
+        return `
+            <div class="admin-eng-card" data-provider="${escHtml(item.provider)}" data-model="${escHtml(item.model)}"
+                 style="flex-direction:column;align-items:stretch;gap:0.5rem;flex:1;min-width:280px">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:0.4rem;flex-wrap:wrap">
+                    <div style="display:flex;flex-direction:column;gap:0.1rem">
+                        <div style="font-size:0.82rem;font-weight:600;color:var(--text)">${escHtml(provName)}</div>
+                        <div style="font-size:0.65rem;color:var(--text-dim);font-family:monospace">${escHtml(item.model)}</div>
+                    </div>
+                    <div style="display:flex;gap:0.3rem;align-items:center;flex-wrap:wrap">
+                        ${blockedBadge}
+                        ${defaultBadge}
+                    </div>
+                </div>
+                ${ollamaNote}
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.6rem">
+                    ${_renderLimitField(item, "rpm")}
+                    ${_renderLimitField(item, "tpm")}
+                    ${_renderLimitField(item, "rpd")}
+                    ${_renderLimitField(item, "tpd")}
+                </div>
+                <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+                    <button class="ai-limit-save ai-config-select" data-provider="${escHtml(item.provider)}"
+                            data-model="${escHtml(item.model)}"
+                            style="cursor:pointer;padding:0.35rem 0.8rem">Guardar</button>
+                    <button class="ai-limit-reset" data-provider="${escHtml(item.provider)}"
+                            data-model="${escHtml(item.model)}"
+                            style="cursor:pointer;padding:0.35rem 0.8rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);font-size:0.72rem">
+                        Restaurar default
+                    </button>
+                    <div class="ai-limit-status" data-provider="${escHtml(item.provider)}"
+                         data-model="${escHtml(item.model)}"
+                         style="font-size:0.65rem;color:var(--text-dim);flex:1;min-width:100px"></div>
+                </div>
+            </div>`;
+    }).join("");
+
+    container.innerHTML = `<div class="admin-engagement" style="flex-wrap:wrap">${cards}</div>`;
+
+    $$(".ai-limit-save").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            const provider = btn.dataset.provider;
+            const model = btn.dataset.model;
+            const status = $(`.ai-limit-status[data-provider="${provider}"][data-model="${model}"]`);
+            const payload = { provider, model };
+            for (const field of ["rpm", "tpm", "rpd", "tpd"]) {
+                const input = document.querySelector(
+                    `.ai-limit-input[data-provider="${provider}"][data-model="${model}"][data-field="${field}"]`
+                );
+                const raw = (input?.value ?? "").trim();
+                if (raw === "") {
+                    payload[field] = null;
+                } else {
+                    const n = parseInt(raw, 10);
+                    if (!Number.isFinite(n) || n < 0) {
+                        status.textContent = `${_limitFieldLabels[field]} inválido`;
+                        status.style.color = "#ea580c";
+                        return;
+                    }
+                    payload[field] = n;
+                }
+            }
+
+            status.textContent = "Guardando...";
+            status.style.color = "var(--text-dim)";
+            try {
+                const resp = await fetch("/api/admin/ai-limits", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+                if (resp.ok) {
+                    status.textContent = "Guardado";
+                    status.style.color = "#0d9488";
+                    setTimeout(loadAILimits, 800);
+                } else {
+                    const err = await resp.json().catch(() => ({}));
+                    status.textContent = err.error || "Error";
+                    status.style.color = "#ea580c";
+                }
+            } catch (err) {
+                status.textContent = "Error de red";
+                status.style.color = "#ea580c";
+            }
+        });
+    });
+
+    $$(".ai-limit-reset").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            const provider = btn.dataset.provider;
+            const model = btn.dataset.model;
+            const status = $(`.ai-limit-status[data-provider="${provider}"][data-model="${model}"]`);
+            status.textContent = "Restaurando...";
+            status.style.color = "var(--text-dim)";
+            try {
+                const resp = await fetch("/api/admin/ai-limits", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ provider, model, reset: true }),
+                });
+                if (resp.ok) {
+                    status.textContent = "Defaults restaurados";
+                    status.style.color = "#0d9488";
+                    setTimeout(loadAILimits, 800);
+                } else {
+                    const err = await resp.json().catch(() => ({}));
+                    status.textContent = err.error || "Error";
+                    status.style.color = "#ea580c";
+                }
+            } catch (err) {
+                status.textContent = "Error de red";
+                status.style.color = "#ea580c";
+            }
+        });
     });
 }
 

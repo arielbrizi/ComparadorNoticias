@@ -3,12 +3,33 @@
 Lista priorizable de mejoras para el proyecto. Ver el [README](./README.md)
 para el estado actual del producto.
 
-## 1. Integración con X (ex-Twitter)
+## 1. Integración con X (ex-Twitter) — **hecho**
 
-Definir alcance: ingesta de hilos o enlaces desde cuentas de medios (API de X,
-con costos y límites), sólo "compartir en X" desde la UI, o enlaces/embeds a
-posts relacionados con una noticia. Incluye: credenciales seguras, límites de
-rate y cómo integrar esos ítems con el modelo `Article` y el agrupador.
+Se implementó la integración de salida con la API de X v2 para publicar
+5 tipos de campañas configurables desde el panel admin
+([tab "Campañas X"](./README.md#campañas-x)):
+
+- **Nube del día** — PNG renderizado del wordcloud + tweet.
+- **Noticia del día** — tweet con el top story del día (reutiliza `ai_top_story`).
+- **Resumen semanal** — hilo breve con los temas editoriales (reutiliza `ai_weekly_summary`).
+- **Temas del día** — hilo con los trending topics (reutiliza `ai_topics`).
+- **Breaking news** — disparo reactivo cuando aparece un grupo con ≥ N fuentes.
+
+La auth es OAuth 2.0 de cuenta única, con tokens iniciales en env vars y
+refresh automático persistido en la tabla `x_oauth_state` (los tokens rotados
+sobreviven a redeploys). El admin configura el **tier contratado**
+(Free / Basic / Pro / Custom) y los caps diarios/mensuales se enforcean en
+`x_store.check_cap` antes de cada posteo.
+
+Módulos:
+
+- [`app/x_store.py`](./app/x_store.py) — DB, tier, CRUD de campañas, log de uso.
+- [`app/x_client.py`](./app/x_client.py) — HTTP sobre X API v2 + refresh automático en 401.
+- [`app/x_campaigns.py`](./app/x_campaigns.py) — runners de cada tipo de post.
+- [`static/admin.html`](./static/admin.html) + [`static/js/admin.js`](./static/js/admin.js) — tab "Campañas X".
+
+Follow-ups posibles (nuevos ítems): polls, DMs automáticos, múltiples cuentas,
+embed de tweets de medios argentinos en la UI de grupos.
 
 ## 2. Más fuentes o tipos de entrada
 

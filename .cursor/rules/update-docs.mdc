@@ -40,6 +40,8 @@ Cuando se detecta un cambio en estos archivos, revisar la sección indicada del 
 | `Procfile` / `railway.toml` | **Deploy en Railway** |
 | Nuevas env vars (`os.environ.get(...)`) | **Variables de entorno** — agregar la variable con su uso |
 | Cambios en `static/admin.html` (nuevas cards / secciones) | **Panel de administración** |
+| `app/x_store.py` / `app/x_client.py` / `app/x_campaigns.py` | **Integración con X**, **Modelo de datos**, **Variables de entorno** |
+| Cambios en tab **Campañas X** de `static/admin.html` | **Panel de administración — Campañas X** |
 | Nuevos tests o estructura en `tests/` | **Tests y calidad** |
 
 ## Variables de entorno

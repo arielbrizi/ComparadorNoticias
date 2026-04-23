@@ -173,6 +173,10 @@ function loadAll() {
     } else if (_activeTab === "costs") {
         loadAICosts(desde, hasta);
         loadInfraCosts();
+    } else if (_activeTab === "x") {
+        loadXStatus();
+        loadXCampaigns();
+        loadXUsage();
     }
     updateAIMonitorTimer();
 }
@@ -2127,3 +2131,494 @@ function escHtml(str) {
     div.textContent = str;
     return div.innerHTML;
 }
+
+
+// ── X (Twitter) tab ─────────────────────────────────────────────────────────
+
+let _xStatusCache = null;
+let _xUsagePage = 1;
+const _X_CAMPAIGN_LABELS = {
+    cloud: { title: "Nube del día", subtitle: "Renderiza la nube como PNG y la postea con las top palabras." },
+    topstory: { title: "Noticia del día", subtitle: "Usa el análisis IA del grupo más cubierto." },
+    weekly: { title: "Resumen semanal", subtitle: "Publica un hilo con los temas de la semana." },
+    topics: { title: "Temas del día", subtitle: "Hilo breve con los trending topics detectados." },
+    breaking: { title: "Breaking news", subtitle: "Se dispara cuando aparece un grupo con N+ fuentes." },
+};
+const _X_STATUS_LABELS = {
+    ok: "OK",
+    error: "Error",
+    rate_limited: "Rate limit",
+    quota_exceeded: "Cupo superado",
+    disabled_by_tier: "Bloqueado (tier)",
+    skipped: "Saltado",
+};
+const _X_DAY_LABELS = { mon: "Lunes", tue: "Martes", wed: "Miércoles", thu: "Jueves", fri: "Viernes", sat: "Sábado", sun: "Domingo" };
+
+async function loadXStatus() {
+    const host = $("#x-status-wrap");
+    if (!host) return;
+    try {
+        const resp = await fetch("/api/admin/x-status");
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        const data = await resp.json();
+        _xStatusCache = data;
+        host.innerHTML = renderXStatus(data);
+        bindXStatusEvents();
+    } catch (err) {
+        host.innerHTML = `<div class="admin-empty">Error cargando estado: ${escHtml(err.message || err)}</div>`;
+    }
+}
+
+function renderXStatus(data) {
+    const tier = data.tier || {};
+    const usage = data.usage || {};
+    const defaults = data.tier_defaults || {};
+    const tierOpts = (data.valid_tiers || ["free", "basic", "pro", "custom"])
+        .map(t => `<option value="${t}" ${t === tier.tier ? "selected" : ""}>${t.charAt(0).toUpperCase() + t.slice(1)}</option>`)
+        .join("");
+
+    const dailyPct = tier.daily_cap > 0 ? Math.min(100, (usage.posts_today / tier.daily_cap) * 100) : 0;
+    const monthPct = tier.monthly_cap > 0 ? Math.min(100, (usage.posts_this_month / tier.monthly_cap) * 100) : 0;
+    const dailyClass = dailyPct >= 90 ? "danger" : dailyPct >= 70 ? "warn" : "";
+    const monthClass = monthPct >= 90 ? "danger" : monthPct >= 70 ? "warn" : "";
+    const configBadge = data.configured
+        ? `<span class="x-status-badge ok">Conectada</span>`
+        : `<span class="x-status-badge error">Sin tokens</span>`;
+
+    const freeWarn = tier.tier === "free"
+        ? `<div class="x-tier-warn">Tier <strong>Free</strong>: la API no permite publicar. Todas las campañas quedan deshabilitadas.</div>`
+        : "";
+
+    const readOnly = tier.tier !== "custom" && tier.tier !== "free";
+    const capReadOnly = tier.tier === "free" ? "disabled" : (readOnly ? "readonly" : "");
+
+    return `
+        <div class="x-status-grid">
+            <div class="x-status-cell">
+                <div class="label">Cuenta</div>
+                <div class="value">${escHtml(data.handle || "—")} ${configBadge}</div>
+                <div class="hint">${data.token_updated_at ? "Token actualizado: " + escHtml(data.token_updated_at) : "Sin refresh registrado"}</div>
+                <div style="margin-top:0.5rem"><button class="btn-secondary" id="x-refresh-handle">Refrescar handle</button></div>
+            </div>
+            <div class="x-status-cell">
+                <div class="label">Posts hoy</div>
+                <div class="value">${usage.posts_today ?? 0} / ${tier.daily_cap || "∞"}</div>
+                <div class="x-progress-row">
+                    <div class="x-progress-track"><div class="x-progress-fill ${dailyClass}" style="width:${dailyPct}%"></div></div>
+                    <div class="x-progress-label">${Math.round(dailyPct)}%</div>
+                </div>
+            </div>
+            <div class="x-status-cell">
+                <div class="label">Posts este mes</div>
+                <div class="value">${usage.posts_this_month ?? 0} / ${tier.monthly_cap || "∞"}</div>
+                <div class="x-progress-row">
+                    <div class="x-progress-track"><div class="x-progress-fill ${monthClass}" style="width:${monthPct}%"></div></div>
+                    <div class="x-progress-label">${Math.round(monthPct)}%</div>
+                </div>
+            </div>
+            <div class="x-status-cell">
+                <div class="label">Costo mensual estimado</div>
+                <div class="value">USD ${Number(tier.monthly_usd || 0).toFixed(2)}</div>
+                <div class="hint">Según plan contratado en X Developer Portal</div>
+            </div>
+        </div>
+
+        <div class="x-tier-form">
+            <label>Tier
+                <select id="x-tier-select">${tierOpts}</select>
+            </label>
+            <label>Daily cap
+                <input type="number" min="0" id="x-daily-cap" value="${tier.daily_cap ?? 0}" ${capReadOnly} />
+            </label>
+            <label>Monthly cap
+                <input type="number" min="0" id="x-monthly-cap" value="${tier.monthly_cap ?? 0}" ${capReadOnly} />
+            </label>
+            <label>Costo mensual (USD)
+                <input type="number" min="0" step="0.01" id="x-monthly-usd" value="${Number(tier.monthly_usd || 0)}" ${tier.tier === "free" ? "disabled" : ""} />
+            </label>
+            <div>
+                <button class="btn-primary" id="x-save-tier">Guardar tier</button>
+            </div>
+        </div>
+        ${freeWarn}
+
+        <div class="x-hint" data-defaults='${JSON.stringify(defaults)}'>
+            Free bloquea el posteo · Basic: 50/día, 1500/mes · Pro: 10k/día, 300k/mes · Custom: caps manuales.
+        </div>
+    `;
+}
+
+function bindXStatusEvents() {
+    const sel = $("#x-tier-select");
+    if (sel) sel.addEventListener("change", onXTierChange);
+    const saveBtn = $("#x-save-tier");
+    if (saveBtn) saveBtn.addEventListener("click", saveXTier);
+    const refreshBtn = $("#x-refresh-handle");
+    if (refreshBtn) refreshBtn.addEventListener("click", refreshXHandle);
+}
+
+function onXTierChange(ev) {
+    const tier = ev.target.value;
+    const defaults = (_xStatusCache && _xStatusCache.tier_defaults) || {};
+    const def = defaults[tier] || {};
+    const dailyInput = $("#x-daily-cap");
+    const monthlyInput = $("#x-monthly-cap");
+    const usdInput = $("#x-monthly-usd");
+    if (dailyInput) dailyInput.value = def.daily_cap ?? 0;
+    if (monthlyInput) monthlyInput.value = def.monthly_cap ?? 0;
+    if (usdInput) usdInput.value = def.monthly_usd ?? 0;
+
+    const readOnly = tier !== "custom" && tier !== "free";
+    const disabled = tier === "free";
+    [dailyInput, monthlyInput].forEach(el => {
+        if (!el) return;
+        el.readOnly = readOnly && !disabled;
+        el.disabled = disabled;
+    });
+    if (usdInput) usdInput.disabled = disabled;
+}
+
+async function saveXTier() {
+    const tier = $("#x-tier-select").value;
+    const payload = {
+        tier,
+        daily_cap: Number($("#x-daily-cap").value || 0),
+        monthly_cap: Number($("#x-monthly-cap").value || 0),
+        monthly_usd: Number($("#x-monthly-usd").value || 0),
+    };
+    const btn = $("#x-save-tier");
+    if (btn) { btn.disabled = true; btn.textContent = "Guardando…"; }
+    try {
+        const resp = await fetch("/api/admin/x-tier", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            alert(data.error || "Error guardando tier");
+            return;
+        }
+        await loadXStatus();
+        await loadXCampaigns();
+    } catch (err) {
+        alert("Error: " + (err.message || err));
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = "Guardar tier"; }
+    }
+}
+
+async function refreshXHandle() {
+    const btn = $("#x-refresh-handle");
+    if (btn) { btn.disabled = true; btn.textContent = "Consultando…"; }
+    try {
+        const resp = await fetch("/api/admin/x-refresh-handle", { method: "POST" });
+        const data = await resp.json();
+        if (!resp.ok) {
+            alert(data.message || data.error || "No se pudo consultar /users/me");
+        }
+        await loadXStatus();
+    } catch (err) {
+        alert("Error: " + (err.message || err));
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = "Refrescar handle"; }
+    }
+}
+
+async function loadXCampaigns() {
+    const host = $("#x-campaigns-wrap");
+    if (!host) return;
+    try {
+        const resp = await fetch("/api/admin/x-campaigns");
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        const data = await resp.json();
+        host.innerHTML = (data.items || []).map(renderXCampaignCard).join("") || `<div class="admin-empty">No hay campañas configuradas.</div>`;
+        (data.items || []).forEach(c => bindXCampaignEvents(c.campaign_key));
+
+        const sel = $("#x-usage-filter-campaign");
+        if (sel) {
+            const current = sel.value;
+            sel.innerHTML = `<option value="">Todas las campañas</option>` +
+                (data.valid_keys || []).map(k => `<option value="${k}" ${k === current ? "selected" : ""}>${_X_CAMPAIGN_LABELS[k]?.title || k}</option>`).join("");
+        }
+    } catch (err) {
+        host.innerHTML = `<div class="admin-empty">Error cargando campañas: ${escHtml(err.message || err)}</div>`;
+    }
+}
+
+function renderXCampaignCard(c) {
+    const label = _X_CAMPAIGN_LABELS[c.campaign_key] || { title: c.campaign_key, subtitle: "" };
+    const schedule = c.schedule || {};
+    const template = c.template || {};
+    const last = c.last_run_at
+        ? `Último run: <span class="x-status-badge ${c.last_run_status || 'skipped'}">${escHtml(_X_STATUS_LABELS[c.last_run_status] || c.last_run_status || 'n/d')}</span> <span style="opacity:0.7">${escHtml(c.last_run_at)}</span>`
+        : `Nunca ejecutada`;
+
+    let scheduleHtml = "";
+    if (c.campaign_key === "breaking") {
+        const cats = (schedule.categories || []).join(", ");
+        scheduleHtml = `
+            <label>Mín. fuentes distintas<input type="number" min="1" max="20" data-field="min_source_count" value="${schedule.min_source_count ?? 3}" /></label>
+            <label>Cooldown (min)<input type="number" min="0" max="1440" data-field="cooldown_minutes" value="${schedule.cooldown_minutes ?? 60}" /></label>
+            <label style="grid-column:1/-1">Categorías permitidas (coma separadas)
+                <input type="text" data-field="categories" value="${escHtml(cats)}" placeholder="Política, Economía" />
+            </label>
+        `;
+    } else {
+        const timeVal = `${String(schedule.hour ?? 9).padStart(2, "0")}:${String(schedule.minute ?? 0).padStart(2, "0")}`;
+        scheduleHtml = `<label>Hora ART<input type="time" data-field="time" value="${timeVal}" /></label>`;
+        if (c.campaign_key === "weekly") {
+            const dow = schedule.day_of_week || "mon";
+            const dowOpts = Object.entries(_X_DAY_LABELS).map(([k, v]) => `<option value="${k}" ${k === dow ? "selected" : ""}>${v}</option>`).join("");
+            scheduleHtml += `<label>Día de la semana<select data-field="day_of_week">${dowOpts}</select></label>`;
+        }
+    }
+
+    const attachImageRow = c.campaign_key === "cloud" || c.campaign_key === "breaking"
+        ? `<label style="grid-column:1/-1;flex-direction:row;gap:0.5rem;align-items:center">
+               <input type="checkbox" data-field="attach_image" ${template.attach_image ? "checked" : ""} />
+               Adjuntar imagen ${c.campaign_key === "cloud" ? "(nube del día PNG)" : ""}
+           </label>`
+        : "";
+
+    const threadRow = (c.campaign_key === "weekly" || c.campaign_key === "topics")
+        ? `<label style="flex-direction:row;gap:0.5rem;align-items:center">
+               <input type="checkbox" data-field="thread" ${template.thread ? "checked" : ""} /> Postear como hilo
+           </label>
+           <label>Máx. posts en hilo<input type="number" min="1" max="10" data-field="thread_max_posts" value="${template.thread_max_posts ?? 4}" /></label>`
+        : "";
+
+    return `
+        <div class="x-campaign-card" data-campaign="${c.campaign_key}">
+            <div class="x-campaign-head">
+                <div>
+                    <div class="x-campaign-title">${escHtml(label.title)}</div>
+                    <div class="x-campaign-subtitle">${escHtml(label.subtitle)}</div>
+                </div>
+                <label class="x-toggle">
+                    <input type="checkbox" data-field="enabled" ${c.enabled ? "checked" : ""} />
+                    <span class="x-toggle-track"></span>
+                    <span class="x-toggle-label">${c.enabled ? "Activa" : "Deshabilitada"}</span>
+                </label>
+            </div>
+            <div class="x-campaign-body">
+                ${scheduleHtml}
+                ${threadRow}
+                <label style="grid-column:1/-1">Texto (plantilla)
+                    <textarea data-field="text" rows="3">${escHtml(template.text || "")}</textarea>
+                </label>
+                <label style="grid-column:1/-1">Hashtags
+                    <input type="text" data-field="hashtags" value="${escHtml(template.hashtags || "")}" />
+                </label>
+                ${attachImageRow}
+            </div>
+            <div class="x-campaign-actions">
+                <button class="btn-primary" data-action="save">Guardar</button>
+                <button class="btn-secondary" data-action="test">Probar ahora</button>
+                <span class="x-last-run">${last}</span>
+            </div>
+        </div>
+    `;
+}
+
+function bindXCampaignEvents(key) {
+    const card = document.querySelector(`.x-campaign-card[data-campaign="${key}"]`);
+    if (!card) return;
+    const toggleLabel = card.querySelector(".x-toggle-label");
+    const toggleInput = card.querySelector('input[data-field="enabled"]');
+    if (toggleInput && toggleLabel) {
+        toggleInput.addEventListener("change", () => {
+            toggleLabel.textContent = toggleInput.checked ? "Activa" : "Deshabilitada";
+        });
+    }
+    card.querySelector('[data-action="save"]').addEventListener("click", () => saveXCampaign(key));
+    card.querySelector('[data-action="test"]').addEventListener("click", () => testXCampaign(key));
+}
+
+function readXCampaignForm(key) {
+    const card = document.querySelector(`.x-campaign-card[data-campaign="${key}"]`);
+    if (!card) return null;
+    const enabled = card.querySelector('input[data-field="enabled"]').checked;
+
+    const schedule = {};
+    if (key === "breaking") {
+        schedule.min_source_count = Number(card.querySelector('[data-field="min_source_count"]').value || 3);
+        schedule.cooldown_minutes = Number(card.querySelector('[data-field="cooldown_minutes"]').value || 60);
+        const catsRaw = card.querySelector('[data-field="categories"]').value || "";
+        schedule.categories = catsRaw.split(",").map(s => s.trim()).filter(Boolean);
+    } else {
+        const timeVal = card.querySelector('[data-field="time"]').value || "09:00";
+        const [h, m] = timeVal.split(":");
+        schedule.hour = Number(h);
+        schedule.minute = Number(m);
+        if (key === "weekly") {
+            schedule.day_of_week = card.querySelector('[data-field="day_of_week"]').value || "mon";
+        }
+    }
+
+    const template = {
+        text: card.querySelector('[data-field="text"]').value || "",
+        hashtags: card.querySelector('[data-field="hashtags"]').value || "",
+    };
+    const attach = card.querySelector('[data-field="attach_image"]');
+    if (attach) template.attach_image = attach.checked;
+    const thread = card.querySelector('[data-field="thread"]');
+    if (thread) template.thread = thread.checked;
+    const tmp = card.querySelector('[data-field="thread_max_posts"]');
+    if (tmp) template.thread_max_posts = Number(tmp.value || 4);
+
+    return { campaign_key: key, enabled, schedule, template };
+}
+
+async function saveXCampaign(key) {
+    const payload = readXCampaignForm(key);
+    if (!payload) return;
+    const card = document.querySelector(`.x-campaign-card[data-campaign="${key}"]`);
+    const btn = card.querySelector('[data-action="save"]');
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = "Guardando…";
+    try {
+        const resp = await fetch("/api/admin/x-campaigns", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            alert(data.error || "Error guardando campaña");
+            return;
+        }
+        await loadXCampaigns();
+    } catch (err) {
+        alert("Error: " + (err.message || err));
+    } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+    }
+}
+
+async function testXCampaign(key) {
+    const card = document.querySelector(`.x-campaign-card[data-campaign="${key}"]`);
+    const btn = card.querySelector('[data-action="test"]');
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = "Ejecutando…";
+    try {
+        const resp = await fetch("/api/admin/x-test-post", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ campaign_key: key }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            alert(data.error || "Error ejecutando test");
+        } else if (data.ok) {
+            alert(`Posteado correctamente. Tweets: ${(data.post_ids || []).join(", ")}`);
+        } else {
+            alert(`No se posteó (${data.status}): ${data.reason || data.message || "sin detalle"}`);
+        }
+        await loadXStatus();
+        await loadXUsage();
+        await loadXCampaigns();
+    } catch (err) {
+        alert("Error: " + (err.message || err));
+    } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+    }
+}
+
+async function loadXUsage() {
+    const host = $("#x-usage-wrap");
+    if (!host) return;
+
+    const filterCampaign = $("#x-usage-filter-campaign")?.value || "";
+    const filterStatus = $("#x-usage-filter-status")?.value || "";
+
+    const params = new URLSearchParams();
+    params.set("page", _xUsagePage);
+    params.set("page_size", 25);
+    if (filterCampaign) params.set("campaign_key", filterCampaign);
+    if (filterStatus) params.set("status", filterStatus);
+
+    try {
+        const resp = await fetch(`/api/admin/x-usage?${params}`);
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        const data = await resp.json();
+
+        const sSel = $("#x-usage-filter-status");
+        if (sSel && sSel.options.length <= 1) {
+            sSel.innerHTML = `<option value="">Cualquier estado</option>` +
+                (data.filters?.statuses || []).map(s => `<option value="${s}" ${s === filterStatus ? "selected" : ""}>${_X_STATUS_LABELS[s] || s}</option>`).join("");
+        }
+
+        if (!data.items || data.items.length === 0) {
+            host.innerHTML = `<div class="admin-empty">No hay publicaciones registradas con estos filtros.</div>`;
+        } else {
+            host.innerHTML = `
+                <table class="admin-table">
+                    <thead>
+                        <tr>
+                            <th>Fecha</th>
+                            <th>Campaña</th>
+                            <th>Status</th>
+                            <th>Post</th>
+                            <th>Detalle</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${data.items.map(renderXUsageRow).join("")}
+                    </tbody>
+                </table>
+            `;
+        }
+        renderXUsagePagination(data.total || 0, data.page, data.page_size);
+    } catch (err) {
+        host.innerHTML = `<div class="admin-empty">Error cargando historial: ${escHtml(err.message || err)}</div>`;
+    }
+}
+
+function renderXUsageRow(r) {
+    const label = _X_CAMPAIGN_LABELS[r.campaign_key]?.title || r.campaign_key;
+    const statusLabel = _X_STATUS_LABELS[r.status] || r.status;
+    const postCell = r.post_id
+        ? `<a href="https://x.com/i/web/status/${escHtml(r.post_id.split(",")[0])}" target="_blank" rel="noopener">${escHtml(r.post_id.split(",")[0])}</a>${r.posts_count > 1 ? ` <span style="color:var(--text-dim)">(+${r.posts_count - 1})</span>` : ""}`
+        : "—";
+    const detail = r.error_message
+        ? `<span style="color:#f87171">${escHtml(r.error_message)}</span>`
+        : (r.preview ? `<span style="color:var(--text-dim)">${escHtml(r.preview.slice(0, 120))}${r.preview.length > 120 ? "…" : ""}</span>` : "—");
+    return `
+        <tr>
+            <td>${escHtml(r.created_at || "")}</td>
+            <td>${escHtml(label)}</td>
+            <td><span class="x-status-badge ${r.status}">${escHtml(statusLabel)}</span></td>
+            <td>${postCell}</td>
+            <td>${detail}</td>
+        </tr>
+    `;
+}
+
+function renderXUsagePagination(total, page, pageSize) {
+    const host = $("#x-usage-pagination");
+    if (!host) return;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    host.innerHTML = `
+        <span>${total} registros · página ${page} de ${totalPages}</span>
+        <button ${page <= 1 ? "disabled" : ""} id="x-usage-prev">◀</button>
+        <button ${page >= totalPages ? "disabled" : ""} id="x-usage-next">▶</button>
+    `;
+    const prev = $("#x-usage-prev");
+    const next = $("#x-usage-next");
+    if (prev) prev.addEventListener("click", () => { if (_xUsagePage > 1) { _xUsagePage--; loadXUsage(); } });
+    if (next) next.addEventListener("click", () => { if (page < totalPages) { _xUsagePage++; loadXUsage(); } });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    const refresh = document.getElementById("x-usage-refresh");
+    if (refresh) refresh.addEventListener("click", () => { _xUsagePage = 1; loadXUsage(); });
+    const fc = document.getElementById("x-usage-filter-campaign");
+    if (fc) fc.addEventListener("change", () => { _xUsagePage = 1; loadXUsage(); });
+    const fs = document.getElementById("x-usage-filter-status");
+    if (fs) fs.addEventListener("change", () => { _xUsagePage = 1; loadXUsage(); });
+});

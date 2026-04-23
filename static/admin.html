@@ -251,6 +251,118 @@
         .admin-provider-ok {
             font-size: 0.7rem; color: var(--text-dim);
         }
+
+        /* X / Twitter campaign tab */
+        .admin-select {
+            padding: 0.4rem 0.6rem; font-size: 0.78rem; border-radius: 6px;
+            border: 1px solid var(--border); background: var(--bg-card, #12161e); color: var(--text);
+        }
+        .admin-select option { background: var(--bg-card, #12161e); color: var(--text); }
+        .btn-primary, .btn-secondary, .btn-danger {
+            padding: 0.4rem 0.85rem; font-size: 0.78rem; font-weight: 500; border-radius: 6px;
+            border: 1px solid var(--border); cursor: pointer;
+            transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+        }
+        .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .btn-primary:hover:not(:disabled) { opacity: 0.9; }
+        .btn-secondary { background: transparent; color: var(--text); }
+        .btn-secondary:hover:not(:disabled) { background: rgba(255,255,255,0.06); }
+        .btn-danger { background: rgba(220,38,38,0.12); color: #f87171; border-color: rgba(220,38,38,0.35); }
+        .btn-danger:hover:not(:disabled) { background: rgba(220,38,38,0.2); }
+        .btn-primary:disabled, .btn-secondary:disabled, .btn-danger:disabled { opacity: 0.45; cursor: not-allowed; }
+
+        .x-status-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.8rem;
+            margin-bottom: 1rem;
+        }
+        .x-status-cell {
+            background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px;
+            padding: 0.7rem 0.9rem;
+        }
+        .x-status-cell .label { font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+        .x-status-cell .value { font-size: 1rem; font-weight: 600; color: var(--text); margin-top: 0.2rem; word-break: break-word; }
+        .x-status-cell .hint { font-size: 0.65rem; color: var(--text-dim); margin-top: 0.15rem; }
+
+        .x-progress-row { display: flex; gap: 0.6rem; align-items: center; margin-top: 0.35rem; }
+        .x-progress-track {
+            flex: 1; height: 8px; background: rgba(255,255,255,0.06); border-radius: 4px; overflow: hidden;
+        }
+        .x-progress-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
+        .x-progress-fill.warn { background: #eab308; }
+        .x-progress-fill.danger { background: #dc2626; }
+        .x-progress-label { font-size: 0.7rem; color: var(--text-dim); min-width: 80px; text-align: right; }
+
+        .x-tier-form {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.6rem;
+            align-items: end; margin-top: 0.6rem;
+        }
+        .x-tier-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.72rem; color: var(--text-dim); }
+        .x-tier-form input[type=number], .x-tier-form select {
+            padding: 0.4rem 0.55rem; font-size: 0.82rem; border-radius: 6px;
+            border: 1px solid var(--border); background: var(--bg-card, #12161e); color: var(--text);
+        }
+        .x-tier-warn {
+            margin-top: 0.6rem; padding: 0.5rem 0.7rem; border-radius: 6px;
+            background: rgba(220,38,38,0.08); border: 1px solid rgba(220,38,38,0.25);
+            color: #fca5a5; font-size: 0.75rem;
+        }
+
+        .x-campaign-card {
+            border: 1px solid var(--border); border-radius: 8px; padding: 0.9rem 1rem;
+            background: rgba(255,255,255,0.02); margin-bottom: 0.85rem;
+        }
+        .x-campaign-head {
+            display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap;
+        }
+        .x-campaign-title { font-size: 0.92rem; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 0.4rem; }
+        .x-campaign-subtitle { font-size: 0.7rem; color: var(--text-dim); font-weight: 400; }
+        .x-campaign-body {
+            margin-top: 0.7rem;
+            display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem;
+        }
+        @media (max-width: 700px) { .x-campaign-body { grid-template-columns: 1fr; } }
+        .x-campaign-body label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.72rem; color: var(--text-dim); }
+        .x-campaign-body input[type=number],
+        .x-campaign-body input[type=text],
+        .x-campaign-body input[type=time],
+        .x-campaign-body select,
+        .x-campaign-body textarea {
+            padding: 0.4rem 0.55rem; font-size: 0.82rem; border-radius: 6px;
+            border: 1px solid var(--border); background: var(--bg-card, #12161e); color: var(--text);
+            font-family: inherit; resize: vertical;
+        }
+        .x-campaign-body textarea { min-height: 72px; }
+        .x-campaign-actions { display: flex; gap: 0.4rem; margin-top: 0.8rem; flex-wrap: wrap; align-items: center; }
+        .x-last-run { font-size: 0.7rem; color: var(--text-dim); margin-left: auto; }
+
+        .x-toggle { position: relative; display: inline-flex; align-items: center; gap: 0.5rem; }
+        .x-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+        .x-toggle-track {
+            width: 36px; height: 20px; border-radius: 999px; background: rgba(255,255,255,0.1);
+            position: relative; transition: background 0.15s; cursor: pointer;
+        }
+        .x-toggle-track::after {
+            content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+            border-radius: 50%; background: #e2e8f0; transition: left 0.15s;
+        }
+        .x-toggle input:checked + .x-toggle-track { background: var(--accent); }
+        .x-toggle input:checked + .x-toggle-track::after { left: 18px; }
+        .x-toggle-label { font-size: 0.78rem; color: var(--text); }
+
+        .x-status-badge {
+            font-size: 0.65rem; padding: 0.12rem 0.5rem; border-radius: 999px; font-weight: 600;
+            display: inline-block;
+        }
+        .x-status-badge.ok { background: rgba(13,148,136,0.15); color: #0d9488; }
+        .x-status-badge.error, .x-status-badge.rate_limited { background: rgba(220,38,38,0.15); color: #f87171; }
+        .x-status-badge.quota_exceeded, .x-status-badge.disabled_by_tier { background: rgba(234,179,8,0.15); color: #eab308; }
+        .x-status-badge.skipped { background: rgba(255,255,255,0.06); color: var(--text-dim); }
+
+        .x-hint {
+            font-size: 0.7rem; color: var(--text-dim); background: rgba(255,255,255,0.02);
+            border: 1px dashed var(--border); border-radius: 6px; padding: 0.4rem 0.6rem;
+            margin-top: 0.4rem; line-height: 1.35;
+        }
     </style>
 </head>
 <body>
@@ -284,6 +396,10 @@
         <button class="admin-tab" data-tab="costs">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
             Costos
+        </button>
+        <button class="admin-tab" data-tab="x">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-2px;margin-right:4px"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+            Campañas X
         </button>
     </div>
 
@@ -739,10 +855,64 @@
 
     </div><!-- /panel-logs -->
 
+    <!-- ═══ CAMPAÑAS X TAB ═══ -->
+    <div class="admin-tab-panel" id="panel-x">
+
+    <!-- Status / tier card -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                Cuenta y cupo
+            </h3>
+            <p class="admin-card-desc">
+                Tokens OAuth2 + tier contratado en X. El tier controla cuántos posts/día y por mes permite la API antes de cortar.
+                Cambiar a <strong>Free</strong> deshabilita automáticamente todas las campañas.
+            </p>
+            <div id="x-status-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
+    <!-- Campaigns list -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                Campañas
+            </h3>
+            <p class="admin-card-desc">
+                Una fila por tipo de publicación. La plantilla admite variables entre llaves:
+                <code>{title}</code>, <code>{url}</code>, <code>{date}</code>, <code>{top_words}</code>, <code>{topics_list}</code>,
+                <code>{summary}</code>, <code>{week_start}</code>, <code>{week_end}</code>, <code>{hashtags}</code>, <code>{category}</code>.
+            </p>
+            <div id="x-campaigns-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
+    <!-- Usage log -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                Historial de publicaciones
+            </h3>
+            <p class="admin-card-desc">Últimos intentos de posteo (ok / error / bloqueos por cupo). Las filas se purgan automáticamente pasados 90 días.</p>
+            <div class="admin-filters" id="x-usage-filters" style="margin-bottom:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+                <select id="x-usage-filter-campaign" class="admin-select"><option value="">Todas las campañas</option></select>
+                <select id="x-usage-filter-status" class="admin-select"><option value="">Cualquier estado</option></select>
+                <button class="btn-secondary" id="x-usage-refresh">Refrescar</button>
+            </div>
+            <div id="x-usage-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
+            <div class="admin-pagination" id="x-usage-pagination"></div>
+        </div>
+    </div>
+
+    </div><!-- /panel-x -->
+
     <!-- Invocation detail modal -->
     <div id="admin-modal-host"></div>
 </div>
 
-<script src="/static/js/admin.js?v=13"></script>
+<script src="/static/js/admin.js?v=14"></script>
 </body>
 </html>

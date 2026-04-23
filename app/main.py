@@ -89,7 +89,7 @@ from app.infra_cost_store import (
     purge_old_snapshots as purge_old_infra_snapshots,
     save_snapshot as save_infra_snapshot,
 )
-from app import railway_client
+from app import railway_client, x_campaigns, x_client, x_store
 from app.search_utils import build_fallback_summary, extract_keywords
 from app.wordcloud import build_wordcloud
 from app.metrics_store import init_db, query_metrics, save_group_metrics
@@ -234,6 +234,7 @@ async def refresh_news():
     )
     await refresh_wordcloud()
     asyncio.create_task(_post_refresh_catchup())
+    asyncio.create_task(_maybe_trigger_breaking())
 
 
 async def refresh_wordcloud():
@@ -430,6 +431,145 @@ def _wrap_job(func, component: str, event_type: str):
     return sync_wrapper
 
 
+# ── X campaign schedulers ────────────────────────────────────────────────────
+
+# Map de campaign_key → job id en el scheduler. Les damos un prefijo para no
+# chocar con los jobs del pipeline de IA / RSS.
+_X_JOB_PREFIX = "x_campaign_"
+
+_X_DAY_OF_WEEK_VALUES = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+
+
+async def _run_cloud_job():
+    async with _lock:
+        words = list(_wordcloud_cache)
+    return await asyncio.to_thread(x_campaigns.run_cloud_campaign, words)
+
+
+async def _run_topstory_job():
+    today = datetime.now(ART).strftime("%Y-%m-%d")
+    _articles_db, groups = load_groups_from_db(desde=today, hasta=today)
+    if not groups:
+        async with _lock:
+            groups = list(_groups)
+    result = await ai_top_story(groups, today)
+    story = result.get("story") if isinstance(result, dict) else None
+    return await asyncio.to_thread(x_campaigns.run_topstory_campaign, story)
+
+
+async def _run_weekly_job():
+    week_start, week_end = _current_week_bounds()
+    _articles_db, groups = load_groups_from_db(desde=week_start, hasta=week_end)
+    if len(groups) > 200:
+        groups = groups[:200]
+    weekly = await ai_weekly_summary(groups, week_start, week_end)
+    return await asyncio.to_thread(
+        x_campaigns.run_weekly_campaign, weekly,
+        week_start=week_start, week_end=week_end,
+    )
+
+
+async def _run_topics_job():
+    async with _lock:
+        grps = list(_groups)
+    topics = await ai_topics(grps) if grps else {"topics": []}
+    return await asyncio.to_thread(x_campaigns.run_topics_campaign, topics)
+
+
+_X_JOB_RUNNERS: dict[str, callable] = {
+    "cloud": _run_cloud_job,
+    "topstory": _run_topstory_job,
+    "weekly": _run_weekly_job,
+    "topics": _run_topics_job,
+}
+
+
+def _clamp_hour_minute(schedule: dict) -> tuple[int, int]:
+    try:
+        hour = int(schedule.get("hour", 9))
+        minute = int(schedule.get("minute", 0))
+    except (TypeError, ValueError):
+        hour, minute = 9, 0
+    hour = max(0, min(23, hour))
+    minute = max(0, min(59, minute))
+    return hour, minute
+
+
+def reschedule_x_campaigns() -> None:
+    """Sincroniza los jobs de X en el scheduler con la config actual en DB.
+
+    - Agrega/actualiza un job cron por cada campaña scheduled habilitada.
+    - Borra el job si la campaña está deshabilitada o cambió su tipo.
+    - ``breaking`` no tiene job: se dispara desde ``refresh_news``.
+    """
+    for campaign in x_store.list_campaigns():
+        key = campaign["campaign_key"]
+        job_id = f"{_X_JOB_PREFIX}{key}"
+
+        if key == "breaking" or key not in _X_JOB_RUNNERS:
+            _remove_job_safe(job_id)
+            continue
+
+        if not campaign["enabled"]:
+            _remove_job_safe(job_id)
+            continue
+
+        runner = _X_JOB_RUNNERS[key]
+        schedule = campaign.get("schedule") or {}
+        hour, minute = _clamp_hour_minute(schedule)
+
+        kwargs: dict = {"hour": hour, "minute": minute}
+        if key == "weekly":
+            dow = str(schedule.get("day_of_week", "mon")).lower()
+            if dow not in _X_DAY_OF_WEEK_VALUES:
+                dow = "mon"
+            kwargs["day_of_week"] = dow
+
+        try:
+            scheduler.add_job(
+                _wrap_job(runner, "x", f"campaign_{key}"),
+                "cron", id=job_id, replace_existing=True, **kwargs,
+            )
+            logger.info("X campaign %s scheduled (%s)", key, kwargs)
+        except Exception as exc:
+            logger.error("Failed to schedule x campaign %s: %s", key, exc)
+
+
+def _remove_job_safe(job_id: str) -> None:
+    try:
+        scheduler.remove_job(job_id)
+    except Exception:
+        pass
+
+
+async def _maybe_trigger_breaking():
+    """Evalúa si corresponde un breaking post con los grupos actuales."""
+    cfg = x_store.get_campaign_config("breaking")
+    if not cfg or not cfg.get("enabled"):
+        return
+    if not x_client.is_configured():
+        return
+
+    sched = cfg.get("schedule") or {}
+    min_sources = int(sched.get("min_source_count", 3) or 3)
+    cats = sched.get("categories") or []
+
+    async with _lock:
+        grps = list(_groups)
+
+    candidate = x_campaigns.pick_breaking_candidate(
+        grps,
+        min_source_count=min_sources,
+        allowed_categories=cats,
+    )
+    if not candidate:
+        return
+    try:
+        await asyncio.to_thread(x_campaigns.run_breaking_campaign, candidate)
+    except Exception as exc:
+        logger.warning("breaking campaign trigger failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _articles, _groups, _ASSET_HASHES, _HTML_CACHE
@@ -464,6 +604,10 @@ async def lifespan(_app: FastAPI):
         init_infra_cost_table()
     except Exception as exc:
         logger.error("init_infra_cost_table failed: %s", exc)
+    try:
+        x_store.init_x_tables()
+    except Exception as exc:
+        logger.error("init_x_tables failed: %s", exc)
 
     try:
         log_process_event(component="lifespan", event_type="startup", status="info",
@@ -519,6 +663,13 @@ async def lifespan(_app: FastAPI):
         scheduler.add_job(_wrap_job(purge_old_infra_snapshots, "railway", "purge_infra_snapshots"),
                           "cron", hour=7, minute=15)
         asyncio.create_task(_refresh_infra_costs())
+
+    try:
+        reschedule_x_campaigns()
+    except Exception as exc:
+        logger.error("reschedule_x_campaigns on startup failed: %s", exc)
+    scheduler.add_job(_wrap_job(x_store.purge_old_x_usage, "x", "purge_x_usage"),
+                      "cron", hour=7, minute=30)
 
     scheduler.start()
     try:
@@ -1569,6 +1720,379 @@ async def admin_ai_limits_set(
     if not ok:
         return JSONResponse({"error": "Failed to update"}, status_code=500)
     return {"ok": True, "item": _build_provider_limit_row(provider, model)}
+
+
+# ── X / Twitter admin ────────────────────────────────────────────────────────
+
+
+_X_CAMPAIGN_KEYS = sorted(x_store.VALID_CAMPAIGN_KEYS)
+_X_TIERS = sorted(x_store.VALID_TIERS)
+
+
+@app.get("/api/admin/x-status")
+async def admin_x_status(_admin: dict = Depends(require_admin)):
+    """Return current OAuth/account + tier/usage status for the admin panel."""
+    oauth = x_store.get_oauth_state()
+    tier = x_store.get_tier_config()
+    posts_today = x_store.count_posts_today()
+    posts_month = x_store.count_posts_this_month()
+
+    handle = oauth.get("handle") or os.environ.get("TWITTER_ACCOUNT_HANDLE") or None
+
+    return {
+        "configured": x_client.is_configured(),
+        "handle": handle,
+        "token_updated_at": oauth.get("updated_at"),
+        "token_expires_at": oauth.get("expires_at"),
+        "tier": tier,
+        "valid_tiers": _X_TIERS,
+        "tier_defaults": x_store.TIER_DEFAULTS,
+        "usage": {
+            "posts_today": posts_today,
+            "posts_this_month": posts_month,
+            "daily_cap": tier["daily_cap"],
+            "monthly_cap": tier["monthly_cap"],
+        },
+    }
+
+
+@app.post("/api/admin/x-refresh-handle")
+async def admin_x_refresh_handle(_admin: dict = Depends(require_admin)):
+    """Force a ``GET /2/users/me`` so the handle shown in the panel is fresh."""
+    if not x_client.is_configured():
+        return JSONResponse({"error": "not_configured"}, status_code=400)
+    try:
+        me = await asyncio.to_thread(x_client.get_me)
+    except x_client.XClientError as exc:
+        return JSONResponse(
+            {"error": "x_api_error", "message": str(exc), "status_code": exc.status_code},
+            status_code=502,
+        )
+    except Exception as exc:
+        return JSONResponse({"error": "unexpected", "message": str(exc)}, status_code=500)
+    return {"ok": True, "me": me}
+
+
+@app.get("/api/admin/x-campaigns")
+async def admin_x_campaigns(_admin: dict = Depends(require_admin)):
+    """List campaigns (enabled state, schedule, template, last run)."""
+    items = x_store.list_campaigns()
+    for item in items:
+        item["defaults"] = x_store.CAMPAIGN_DEFAULTS.get(item["campaign_key"], {})
+    return {
+        "items": items,
+        "valid_keys": _X_CAMPAIGN_KEYS,
+        "can_post": x_store.get_tier_config()["posting_allowed"],
+    }
+
+
+def _validate_schedule_payload(campaign_key: str, schedule: dict) -> tuple[bool, str]:
+    """Validate the schedule dict for a given campaign. Returns (ok, reason)."""
+    if not isinstance(schedule, dict):
+        return False, "schedule must be an object"
+
+    if campaign_key == "breaking":
+        msc = schedule.get("min_source_count", 3)
+        if not isinstance(msc, int) or isinstance(msc, bool) or not 1 <= msc <= 20:
+            return False, "min_source_count must be int in [1,20]"
+        cats = schedule.get("categories", [])
+        if not isinstance(cats, list) or not all(isinstance(c, str) for c in cats):
+            return False, "categories must be a list of strings"
+        cd = schedule.get("cooldown_minutes", 60)
+        if not isinstance(cd, int) or isinstance(cd, bool) or not 0 <= cd <= 24 * 60:
+            return False, "cooldown_minutes must be int in [0,1440]"
+        return True, "ok"
+
+    hour = schedule.get("hour", 9)
+    minute = schedule.get("minute", 0)
+    if not isinstance(hour, int) or isinstance(hour, bool) or not 0 <= hour <= 23:
+        return False, "hour must be int in [0,23]"
+    if not isinstance(minute, int) or isinstance(minute, bool) or not 0 <= minute <= 59:
+        return False, "minute must be int in [0,59]"
+    if campaign_key == "weekly":
+        dow = str(schedule.get("day_of_week", "mon")).lower()
+        if dow not in {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}:
+            return False, "day_of_week must be one of mon..sun"
+    return True, "ok"
+
+
+def _validate_template_payload(campaign_key: str, template: dict) -> tuple[bool, str]:
+    if not isinstance(template, dict):
+        return False, "template must be an object"
+    text = template.get("text", "")
+    if not isinstance(text, str) or not text.strip():
+        return False, "template.text must be a non-empty string"
+    if len(text) > 600:
+        return False, "template.text too long (max 600 chars)"
+    hashtags = template.get("hashtags", "")
+    if not isinstance(hashtags, str) or len(hashtags) > 200:
+        return False, "template.hashtags must be string ≤ 200 chars"
+    if "attach_image" in template and not isinstance(template["attach_image"], bool):
+        return False, "template.attach_image must be boolean"
+    if "thread" in template and not isinstance(template["thread"], bool):
+        return False, "template.thread must be boolean"
+    if "thread_max_posts" in template:
+        tmp = template["thread_max_posts"]
+        if not isinstance(tmp, int) or isinstance(tmp, bool) or not 1 <= tmp <= 10:
+            return False, "template.thread_max_posts must be int in [1,10]"
+    return True, "ok"
+
+
+@app.post("/api/admin/x-campaigns")
+async def admin_x_campaigns_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Update a single campaign's config and reschedule its job."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    campaign_key = body.get("campaign_key", "")
+    if campaign_key not in x_store.VALID_CAMPAIGN_KEYS:
+        return JSONResponse(
+            {"error": f"Invalid campaign_key. Valid: {_X_CAMPAIGN_KEYS}"},
+            status_code=400,
+        )
+
+    enabled = body.get("enabled")
+    schedule = body.get("schedule")
+    template = body.get("template")
+
+    if enabled is not None and not isinstance(enabled, bool):
+        return JSONResponse({"error": "enabled must be boolean"}, status_code=400)
+
+    if schedule is not None:
+        ok, reason = _validate_schedule_payload(campaign_key, schedule)
+        if not ok:
+            return JSONResponse({"error": reason}, status_code=400)
+
+    if template is not None:
+        ok, reason = _validate_template_payload(campaign_key, template)
+        if not ok:
+            return JSONResponse({"error": reason}, status_code=400)
+
+    if enabled and not x_store.get_tier_config()["posting_allowed"]:
+        return JSONResponse(
+            {"error": "Tier actual no permite postear (free). Cambiá el tier primero."},
+            status_code=400,
+        )
+
+    ok = x_store.set_campaign_config(
+        campaign_key,
+        enabled=enabled,
+        schedule=schedule,
+        template=template,
+    )
+    if not ok:
+        return JSONResponse({"error": "Failed to update"}, status_code=500)
+
+    try:
+        reschedule_x_campaigns()
+    except Exception as exc:
+        logger.warning("reschedule_x_campaigns after update failed: %s", exc)
+
+    return {"ok": True, "item": x_store.get_campaign_config(campaign_key)}
+
+
+@app.get("/api/admin/x-tier")
+async def admin_x_tier_get(_admin: dict = Depends(require_admin)):
+    return {
+        "tier": x_store.get_tier_config(),
+        "defaults": x_store.TIER_DEFAULTS,
+        "valid_tiers": _X_TIERS,
+    }
+
+
+@app.post("/api/admin/x-tier")
+async def admin_x_tier_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Update tier + caps. Moving to ``free`` disables all campaigns."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    tier = body.get("tier", "")
+    if tier not in x_store.VALID_TIERS:
+        return JSONResponse(
+            {"error": f"Invalid tier. Valid: {_X_TIERS}"},
+            status_code=400,
+        )
+
+    def _int_or_none(v):
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return "invalid"
+        if v < 0:
+            return "invalid"
+        return int(v)
+
+    daily_raw = _int_or_none(body.get("daily_cap"))
+    monthly_raw = _int_or_none(body.get("monthly_cap"))
+    if daily_raw == "invalid" or monthly_raw == "invalid":
+        return JSONResponse(
+            {"error": "daily_cap / monthly_cap must be non-negative integers"},
+            status_code=400,
+        )
+
+    usd = body.get("monthly_usd")
+    if usd is not None:
+        if isinstance(usd, bool) or not isinstance(usd, (int, float)) or usd < 0:
+            return JSONResponse({"error": "monthly_usd must be non-negative number"}, status_code=400)
+        usd = float(usd)
+
+    ok = x_store.set_tier_config(
+        tier,
+        daily_cap=daily_raw,
+        monthly_cap=monthly_raw,
+        monthly_usd=usd,
+    )
+    if not ok:
+        return JSONResponse({"error": "Failed to update"}, status_code=500)
+
+    try:
+        reschedule_x_campaigns()
+    except Exception as exc:
+        logger.warning("reschedule_x_campaigns after tier change failed: %s", exc)
+
+    return {"ok": True, "tier": x_store.get_tier_config()}
+
+
+@app.get("/api/admin/x-usage")
+async def admin_x_usage(
+    desde: str | None = None,
+    hasta: str | None = None,
+    campaign_key: str | None = None,
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    _admin: dict = Depends(require_admin),
+):
+    """Paginated X usage log (posts + errors) with cap counters."""
+    page, page_size = _clamp_page(page, page_size)
+    offset = (page - 1) * page_size
+
+    ck = campaign_key if campaign_key in x_store.VALID_CAMPAIGN_KEYS else None
+    st = status if status in x_store.VALID_CAMPAIGN_STATUSES else None
+
+    items = x_store.query_x_usage(
+        desde=desde, hasta=hasta, campaign_key=ck, status=st,
+        limit=page_size, offset=offset,
+    )
+    total = x_store.count_x_usage(
+        desde=desde, hasta=hasta, campaign_key=ck, status=st,
+    )
+    tier = x_store.get_tier_config()
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "counters": {
+            "posts_today": x_store.count_posts_today(),
+            "posts_this_month": x_store.count_posts_this_month(),
+            "daily_cap": tier["daily_cap"],
+            "monthly_cap": tier["monthly_cap"],
+        },
+        "filters": {
+            "campaigns": _X_CAMPAIGN_KEYS,
+            "statuses": sorted(x_store.VALID_CAMPAIGN_STATUSES),
+        },
+    }
+
+
+@app.post("/api/admin/x-test-post")
+async def admin_x_test_post(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Run a campaign right now bypassing the ``enabled`` flag (cap still applies)."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    campaign_key = body.get("campaign_key", "")
+    if campaign_key not in x_store.VALID_CAMPAIGN_KEYS:
+        return JSONResponse(
+            {"error": f"Invalid campaign_key. Valid: {_X_CAMPAIGN_KEYS}"},
+            status_code=400,
+        )
+    if not x_client.is_configured():
+        return JSONResponse(
+            {"error": "X client not configured (missing TWITTER_* env vars)"},
+            status_code=400,
+        )
+
+    try:
+        if campaign_key == "cloud":
+            async with _lock:
+                words = list(_wordcloud_cache)
+            result = await asyncio.to_thread(
+                x_campaigns.run_cloud_campaign, words, test=True,
+            )
+        elif campaign_key == "topstory":
+            today = datetime.now(ART).strftime("%Y-%m-%d")
+            _articles_db, groups = load_groups_from_db(desde=today, hasta=today)
+            if not groups:
+                async with _lock:
+                    groups = list(_groups)
+            ts = await ai_top_story(groups, today)
+            story = ts.get("story") if isinstance(ts, dict) else None
+            result = await asyncio.to_thread(
+                x_campaigns.run_topstory_campaign, story, test=True,
+            )
+        elif campaign_key == "weekly":
+            week_start, week_end = _current_week_bounds()
+            _articles_db, groups = load_groups_from_db(desde=week_start, hasta=week_end)
+            if len(groups) > 200:
+                groups = groups[:200]
+            weekly = await ai_weekly_summary(groups, week_start, week_end)
+            result = await asyncio.to_thread(
+                x_campaigns.run_weekly_campaign, weekly,
+                week_start=week_start, week_end=week_end, test=True,
+            )
+        elif campaign_key == "topics":
+            async with _lock:
+                grps = list(_groups)
+            topics = await ai_topics(grps) if grps else {"topics": []}
+            result = await asyncio.to_thread(
+                x_campaigns.run_topics_campaign, topics, test=True,
+            )
+        elif campaign_key == "breaking":
+            cfg = x_store.get_campaign_config("breaking") or {}
+            sched = cfg.get("schedule") or {}
+            async with _lock:
+                grps = list(_groups)
+            candidate = x_campaigns.pick_breaking_candidate(
+                grps,
+                min_source_count=int(sched.get("min_source_count", 3) or 3),
+                allowed_categories=sched.get("categories") or [],
+            )
+            if not candidate:
+                return {"ok": False, "status": "skipped", "reason": "no_candidate"}
+            result = await asyncio.to_thread(
+                x_campaigns.run_breaking_campaign, candidate, test=True,
+            )
+        else:
+            return JSONResponse({"error": "Unsupported campaign"}, status_code=400)
+    except Exception as exc:
+        logger.exception("admin_x_test_post failed")
+        return JSONResponse({"error": "unexpected", "message": str(exc)}, status_code=500)
+
+    return {
+        "ok": result.ok,
+        "status": result.status,
+        "reason": result.reason,
+        "post_ids": result.post_ids or [],
+        "message": result.message,
+    }
 
 
 # ── Health check ─────────────────────────────────────────────────────────────

@@ -147,6 +147,8 @@ flowchart LR
 | ORM / DB | **psycopg2-binary** (PG) / **sqlite3** (stdlib) | `app/db.py` y `*_store.py` |
 | Auth | **python-jose** (JWT), **authlib**, **itsdangerous** (magic links) | `app/auth.py` |
 | Email | **resend** | `app/auth.py` (magic link) |
+| Integración con X | **httpx** + OAuth2 refresh | `app/x_client.py`, `app/x_campaigns.py` |
+| Wordcloud PNG | **wordcloud 1.9** + **Pillow 11** | `app/wordcloud.py` |
 | Validación | **Pydantic v2** | `app/models.py` |
 | Frontend | HTML + CSS + JS vanilla | `static/` |
 | Tests | **pytest**, **pytest-asyncio**, **respx** (mock HTTPX), **pytest-cov** | `tests/` |
@@ -262,6 +264,13 @@ El scheduler arranca en el `lifespan` de FastAPI (`app/main.py` línea 492+). To
 | `purge_old_process_events` | `cron` | **06:45** (ART) | no | Limpia `process_events` (logs de jobs). |
 | `refresh_infra_costs` | `interval` | cada **1 h** | no | (Solo si `RAILWAY_API_TOKEN` está seteado) consulta costo por servicio a Railway GraphQL. |
 | `purge_infra_snapshots` | `cron` | **07:15** (ART) | no | Limpia snapshots viejos de infra. |
+| `x_campaign_cloud` | `cron` | configurable | sí | (Si `cloud` está activa) postea la nube del día en X. |
+| `x_campaign_topstory` | `cron` | configurable | sí | (Si `topstory` está activa) postea la noticia del día en X. |
+| `x_campaign_weekly` | `cron` | configurable (día + hora) | sí | (Si `weekly` está activa) postea el resumen semanal (hilo). |
+| `x_campaign_topics` | `cron` | configurable | sí | (Si `topics` está activa) postea los temas del día (hilo). |
+| `purge_x_usage` | `cron` | **07:30** (ART) | no | Limpia `x_usage_log` con más de 90 días. |
+
+La campaña `breaking` **no agenda un cron**: se dispara reactivamente al final de cada `refresh_news` cuando aparece un grupo multi-fuente que cumple los criterios (`min_source_count`, categorías permitidas, cooldown).
 
 Al arrancar también se dispara un `refresh_news()` inmediato y un **startup prefetch** de IA (si hay credenciales). Todas las corridas se loguean en `process_events` con `component`/`event_type`/`status` y se pueden consultar desde `/api/admin/process-events`.
 
@@ -304,6 +313,7 @@ class ArticleGroup(BaseModel):
 | `ai_usage_log`, `ai_runtime_config`, `ai_provider_limits`, `ai_schedule_config`, `ai_topics_cache`, `ai_topstory_cache` | `app/ai_store.py` | Uso, costo y configuración de IA. |
 | `process_events` | `app/process_events_store.py` | Log estructurado de jobs del scheduler. |
 | `infra_cost_snapshots` | `app/infra_cost_store.py` | Costo por servicio traído de Railway. |
+| `x_campaigns`, `x_tier_config`, `x_oauth_state`, `x_usage_log` | `app/x_store.py` | Config de campañas de X, tier contratado, tokens OAuth2 vigentes y log de posteos. |
 
 **Pricing de IA** en `MODEL_PRICING` (`app/ai_store.py`). Groq y Ollama cuestan 0 USD/token; Gemini tiene precios por 1M tokens input/output y se persiste el cálculo en `ai_usage_log.cost_total`.
 
@@ -346,6 +356,21 @@ Disponible en **`/admin`** (requiere JWT + rol `admin`). Sirve el archivo `stati
 - **Infra Costs**: snapshot de consumo por servicio en Railway (requiere token).
 - **Ollama Logs**: últimas líneas del container de Ollama traídas vía Railway GraphQL (requiere `RAILWAY_OLLAMA_SERVICE_NAME`, default `ollama`).
 - **Debug Headers / Purga de proxies**: utilidades para limpiar eventos con IPs de proxy que contaminan las métricas de visitantes anónimos.
+- **Campañas X**: configurar la integración con X (ex-Twitter). Una card "Cuenta y cupo" muestra el handle conectado, el tier contratado (Free/Basic/Pro/Custom) y los caps diarios/mensuales con barras de progreso. Cinco cards (una por tipo de campaña) permiten habilitarlas, elegir hora/día de posteo, editar la plantilla del tweet, y probar el runner con el botón "Probar ahora". Ver la sección específica más abajo.
+
+### Campañas X
+
+La tab **Campañas X** controla los 5 tipos de publicaciones automáticas:
+
+| Campaña | Trigger | Descripción |
+|---------|---------|-------------|
+| `cloud` (Nube del día) | cron diario | Renderiza la nube de palabras como PNG (vía `wordcloud` + Pillow), la sube a X y la postea con el listado top. |
+| `topstory` (Noticia del día) | cron diario | Tweet con título + link a la historia más cubierta del día (usa el cache de `ai_top_story`). |
+| `weekly` (Resumen semanal) | cron semanal (día + hora) | Hilo corto con los temas editoriales de la semana (reutiliza `ai_weekly_summary`). |
+| `topics` (Temas del día) | cron diario | Hilo con los trending topics detectados (reutiliza `ai_topics`). |
+| `breaking` (Breaking news) | reactivo (post-`refresh_news`) | Tweet puntual cuando aparece un grupo con ≥ `min_source_count` fuentes en las categorías permitidas y pasó el cooldown. |
+
+El tier (`Free` / `Basic` / `Pro` / `Custom`) pre-carga caps típicos de X Developer Portal pero siempre se pueden editar manualmente en `Custom`. Elegir `Free` desactiva todas las campañas y fuerza caps a 0. Los posteos se persisten en `x_usage_log` y los tokens OAuth2 renovados en `x_oauth_state` (sobreviven a redeploys).
 
 ---
 
@@ -409,6 +434,12 @@ Base URL: `http://localhost:8000` (local) o el dominio de Railway (prod).
 | `/api/admin/scheduler-config` | GET / POST | Intervalos de jobs en vivo. |
 | `/api/admin/process-events` | GET | Log de jobs. |
 | `/api/admin/infra-costs` | GET / POST `…/refresh` | Snapshots de costo de infra. |
+| `/api/admin/x-status` | GET | `is_configured`, handle conectado, último refresh, tier actual, caps y totales `today`/`month`. |
+| `/api/admin/x-refresh-handle` | POST | Fuerza un `GET /2/users/me` para refrescar el handle cacheado. |
+| `/api/admin/x-campaigns` | GET / POST | Config de las 5 campañas (`enabled`, schedule, template, opciones). Valida y re-agenda jobs. |
+| `/api/admin/x-tier` | GET / POST | Tier contratado y caps. `free` desactiva todas las campañas; `basic`/`pro` pre-cargan defaults; `custom` acepta lo que pase el admin. |
+| `/api/admin/x-usage` | GET | Log paginado de posteos (`ok`/`error`/`rate_limited`/`quota_exceeded`/`disabled_by_tier`). |
+| `/api/admin/x-test-post` | POST | Ejecuta el runner de una campaña puntual (respeta caps) para validar plantillas y tokens. |
 
 ### Auth (prefijo `/auth`)
 
@@ -452,6 +483,10 @@ Base URL: `http://localhost:8000` (local) o el dominio de Railway (prod).
 | `RESEND_API_KEY` | Envía magic links por email. Sin esto, el link sale por log (modo dev). |
 | `RAILWAY_API_TOKEN`, `RAILWAY_PROJECT_ID` | Habilita el panel de costos y logs de Ollama en `/admin`. |
 | `RAILWAY_OLLAMA_SERVICE_NAME` | Nombre del servicio de Ollama en Railway (default `ollama`). |
+| `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET` | App de X (OAuth2). Obligatorias para renovar tokens automáticamente. |
+| `TWITTER_ACCESS_TOKEN`, `TWITTER_REFRESH_TOKEN` | Bootstrap inicial de tokens OAuth2. Los valores rotados se persisten en `x_oauth_state` — no hace falta reeditar la env var tras el primer refresh. |
+| `TWITTER_ACCOUNT_HANDLE` | Opcional. Handle por defecto (sólo display), se sobreescribe al consultar `GET /2/users/me`. |
+| `TWITTER_API_BASE`, `TWITTER_UPLOAD_BASE` | Opcionales. Override de los endpoints base (útil para tests/mocks). |
 | `PORT` | Lo setea Railway. `Procfile` usa `${PORT:-8080}`. |
 
 Ejemplo de `.env` mínimo para desarrollo:
@@ -557,7 +592,10 @@ ComparadorNoticias/
 │   ├── ai_search.py            # Gemini / Groq / Ollama + provider chain
 │   ├── ai_store.py             # Config de IA, cuotas, quiet hours, costo
 │   ├── infra_cost_store.py     # Snapshots de costo de Railway
-│   └── railway_client.py       # Cliente GraphQL de Railway
+│   ├── railway_client.py       # Cliente GraphQL de Railway
+│   ├── x_client.py             # Cliente OAuth2 de X API v2 (auto-refresh)
+│   ├── x_store.py              # Config de campañas, tier, tokens y usage log de X
+│   └── x_campaigns.py          # Runners de las 5 campañas de X
 ├── static/
 │   ├── index.html              # SPA pública
 │   ├── admin.html              # Panel admin

@@ -1253,9 +1253,13 @@ async function loadWordCloud() {
         container.style.display = "";
         loading.hidden = true;
 
+        const cs = getComputedStyle(container);
+        const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+        const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
         const rect = container.getBoundingClientRect();
-        const w = Math.floor(rect.width) || 800;
-        const h = Math.min(Math.floor(w * 0.56), 520);
+        const w = Math.max(320, Math.floor(rect.width - padX) || 800);
+        const vh = (window.innerHeight || 800) - 200;
+        const h = Math.max(360, Math.min(vh, Math.floor(w * 0.6), 720));
         canvas.width = w * 2;
         canvas.height = h * 2;
         canvas.style.width = w + "px";
@@ -1266,7 +1270,7 @@ async function loadWordCloud() {
 
         WordCloud(canvas, {
             list: data.words,
-            weightFactor: (size) => Math.max(10, (size / maxCount) * 60 * scale),
+            weightFactor: (size) => Math.max(12, (size / maxCount) * 95 * scale),
             fontFamily: "Inter, system-ui, sans-serif",
             fontWeight: 600,
             color: (_word, _weight, _fontSize, _distance, theta) => {
@@ -1275,7 +1279,8 @@ async function loadWordCloud() {
             rotateRatio: 0.3,
             rotationSteps: 2,
             backgroundColor: "transparent",
-            gridSize: Math.round(8 * scale),
+            gridSize: Math.round(6 * scale),
+            shape: "square",
             shrinkToFit: true,
             drawOutOfBound: false,
         });

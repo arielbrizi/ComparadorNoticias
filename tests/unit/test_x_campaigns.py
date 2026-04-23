@@ -49,7 +49,7 @@ class TestTopstoryRunner:
         assert result.status == "skipped"
 
     def test_cap_reached_blocks_post(self, _init):
-        x_store.set_tier_config("custom", daily_cap=1, monthly_cap=100, monthly_usd=0)
+        x_store.set_tier_config("pay_per_use", daily_cap=1, monthly_cap=100, monthly_usd=0)
         x_store.set_campaign_config("topstory", enabled=True)
         x_store.log_x_post(campaign_key="topstory", status="ok", post_id="111")
 

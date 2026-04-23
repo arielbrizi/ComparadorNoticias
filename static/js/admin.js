@@ -2169,12 +2169,24 @@ async function loadXStatus() {
     }
 }
 
+const _X_TIER_LABELS = {
+    disabled: "Apagado",
+    basic: "Basic",
+    pro: "Pro",
+    pay_per_use: "Pay per Use",
+};
+
+function _xTierLabel(t) {
+    if (_X_TIER_LABELS[t]) return _X_TIER_LABELS[t];
+    return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+
 function renderXStatus(data) {
     const tier = data.tier || {};
     const usage = data.usage || {};
     const defaults = data.tier_defaults || {};
-    const tierOpts = (data.valid_tiers || ["free", "basic", "pro", "custom"])
-        .map(t => `<option value="${t}" ${t === tier.tier ? "selected" : ""}>${t.charAt(0).toUpperCase() + t.slice(1)}</option>`)
+    const tierOpts = (data.valid_tiers || ["disabled", "basic", "pro", "pay_per_use"])
+        .map(t => `<option value="${t}" ${t === tier.tier ? "selected" : ""}>${_xTierLabel(t)}</option>`)
         .join("");
 
     const dailyPct = tier.daily_cap > 0 ? Math.min(100, (usage.posts_today / tier.daily_cap) * 100) : 0;
@@ -2185,12 +2197,12 @@ function renderXStatus(data) {
         ? `<span class="x-status-badge ok">Conectada</span>`
         : `<span class="x-status-badge error">Sin tokens</span>`;
 
-    const freeWarn = tier.tier === "free"
-        ? `<div class="x-tier-warn">Tier <strong>Free</strong>: la API no permite publicar. Todas las campañas quedan deshabilitadas.</div>`
+    const disabledWarn = tier.tier === "disabled"
+        ? `<div class="x-tier-warn">Tier <strong>Apagado</strong>: kill-switch interno. Ninguna campaña postea. Cambiá a Basic/Pro/Pay per Use para habilitar posteo.</div>`
         : "";
 
-    const readOnly = tier.tier !== "custom" && tier.tier !== "free";
-    const capReadOnly = tier.tier === "free" ? "disabled" : (readOnly ? "readonly" : "");
+    const readOnly = tier.tier !== "pay_per_use" && tier.tier !== "disabled";
+    const capReadOnly = tier.tier === "disabled" ? "disabled" : (readOnly ? "readonly" : "");
 
     return `
         <div class="x-status-grid">
@@ -2234,16 +2246,16 @@ function renderXStatus(data) {
                 <input type="number" min="0" id="x-monthly-cap" value="${tier.monthly_cap ?? 0}" ${capReadOnly} />
             </label>
             <label>Costo mensual (USD)
-                <input type="number" min="0" step="0.01" id="x-monthly-usd" value="${Number(tier.monthly_usd || 0)}" ${tier.tier === "free" ? "disabled" : ""} />
+                <input type="number" min="0" step="0.01" id="x-monthly-usd" value="${Number(tier.monthly_usd || 0)}" ${tier.tier === "disabled" ? "disabled" : ""} />
             </label>
             <div>
                 <button class="btn-primary" id="x-save-tier">Guardar tier</button>
             </div>
         </div>
-        ${freeWarn}
+        ${disabledWarn}
 
         <div class="x-hint" data-defaults='${JSON.stringify(defaults)}'>
-            Free bloquea el posteo · Basic: 50/día, 1500/mes · Pro: 10k/día, 300k/mes · Custom: caps manuales.
+            Apagado: kill-switch · Basic: 50/día, 1500/mes · Pro: 10k/día, 300k/mes · Pay per Use: caps manuales (~USD 0.01 por tweet).
         </div>
     `;
 }
@@ -2268,14 +2280,14 @@ function onXTierChange(ev) {
     if (monthlyInput) monthlyInput.value = def.monthly_cap ?? 0;
     if (usdInput) usdInput.value = def.monthly_usd ?? 0;
 
-    const readOnly = tier !== "custom" && tier !== "free";
-    const disabled = tier === "free";
+    const readOnly = tier !== "pay_per_use" && tier !== "disabled";
+    const isDisabled = tier === "disabled";
     [dailyInput, monthlyInput].forEach(el => {
         if (!el) return;
-        el.readOnly = readOnly && !disabled;
-        el.disabled = disabled;
+        el.readOnly = readOnly && !isDisabled;
+        el.disabled = isDisabled;
     });
-    if (usdInput) usdInput.disabled = disabled;
+    if (usdInput) usdInput.disabled = isDisabled;
 }
 
 async function saveXTier() {

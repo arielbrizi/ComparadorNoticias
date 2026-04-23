@@ -1875,7 +1875,7 @@ async def admin_x_campaigns_set(
 
     if enabled and not x_store.get_tier_config()["posting_allowed"]:
         return JSONResponse(
-            {"error": "Tier actual no permite postear (free). Cambiá el tier primero."},
+            {"error": "Tier actual no permite postear (Apagado). Cambiá el tier primero."},
             status_code=400,
         )
 
@@ -1910,7 +1910,7 @@ async def admin_x_tier_set(
     request: Request,
     _admin: dict = Depends(require_admin),
 ):
-    """Update tier + caps. Moving to ``free`` disables all campaigns."""
+    """Update tier + caps. Moving to ``disabled`` apaga todas las campañas."""
     try:
         body = await request.json()
     except Exception:

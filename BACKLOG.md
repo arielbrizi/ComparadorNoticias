@@ -18,8 +18,8 @@ Se implementó la integración de salida con la API de X v2 para publicar
 La auth es OAuth 2.0 de cuenta única, con tokens iniciales en env vars y
 refresh automático persistido en la tabla `x_oauth_state` (los tokens rotados
 sobreviven a redeploys). El admin configura el **tier contratado**
-(Free / Basic / Pro / Custom) y los caps diarios/mensuales se enforcean en
-`x_store.check_cap` antes de cada posteo.
+(Apagado / Basic / Pro / Pay per Use; `Apagado` es kill-switch interno) y los
+caps diarios/mensuales se enforcean en `x_store.check_cap` antes de cada posteo.
 
 Módulos:
 

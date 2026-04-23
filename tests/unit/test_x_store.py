@@ -18,7 +18,7 @@ def _init(temp_db):
 class TestInit:
     def test_creates_all_tables(self, temp_db):
         x_store.init_x_tables()
-        assert x_store.get_tier_config()["tier"] == "free"
+        assert x_store.get_tier_config()["tier"] == "disabled"
         campaigns = x_store.list_campaigns()
         assert {c["campaign_key"] for c in campaigns} == set(x_store.VALID_CAMPAIGN_KEYS)
         for c in campaigns:
@@ -70,24 +70,43 @@ class TestTier:
         assert t["monthly_cap"] == 1500
         assert t["posting_allowed"] is True
 
-    def test_custom_respects_input(self, _init):
+    def test_pay_per_use_respects_input(self, _init):
         assert x_store.set_tier_config(
-            "custom", daily_cap=5, monthly_cap=100, monthly_usd=12.50,
+            "pay_per_use", daily_cap=5, monthly_cap=100, monthly_usd=12.50,
         ) is True
         t = x_store.get_tier_config()
+        assert t["tier"] == "pay_per_use"
         assert t["daily_cap"] == 5
         assert t["monthly_cap"] == 100
         assert t["monthly_usd"] == pytest.approx(12.50)
 
-    def test_free_forces_zero_and_disables_all(self, _init):
+    def test_legacy_custom_alias_maps_to_pay_per_use(self, _init):
+        # set_tier_config acepta el nombre viejo "custom" y lo normaliza.
+        assert x_store.set_tier_config(
+            "custom", daily_cap=3, monthly_cap=30, monthly_usd=0,
+        ) is True
+        t = x_store.get_tier_config()
+        assert t["tier"] == "pay_per_use"
+        assert t["daily_cap"] == 3
+
+    def test_disabled_forces_zero_and_disables_all(self, _init):
+        x_store.set_tier_config("basic")
         x_store.set_campaign_config("topstory", enabled=True)
         assert x_store.get_campaign_config("topstory")["enabled"] is True
 
-        assert x_store.set_tier_config("free") is True
+        assert x_store.set_tier_config("disabled") is True
         t = x_store.get_tier_config()
+        assert t["tier"] == "disabled"
         assert t["daily_cap"] == 0
         assert t["posting_allowed"] is False
         assert x_store.get_campaign_config("topstory")["enabled"] is False
+
+    def test_legacy_free_alias_maps_to_disabled(self, _init):
+        # set_tier_config acepta el nombre viejo "free" y lo normaliza.
+        assert x_store.set_tier_config("free") is True
+        t = x_store.get_tier_config()
+        assert t["tier"] == "disabled"
+        assert t["posting_allowed"] is False
 
     def test_invalid_tier_rejected(self, _init):
         assert x_store.set_tier_config("enterprise") is False
@@ -95,8 +114,8 @@ class TestTier:
 
 
 class TestCaps:
-    def test_free_blocks(self, _init):
-        x_store.set_tier_config("free")
+    def test_disabled_blocks(self, _init):
+        x_store.set_tier_config("disabled")
         ok, reason = x_store.check_cap()
         assert ok is False
         assert reason == "disabled_by_tier"
@@ -108,7 +127,7 @@ class TestCaps:
         assert reason == "ok"
 
     def test_daily_cap_reached(self, _init):
-        x_store.set_tier_config("custom", daily_cap=2, monthly_cap=100, monthly_usd=0)
+        x_store.set_tier_config("pay_per_use", daily_cap=2, monthly_cap=100, monthly_usd=0)
         for _ in range(2):
             x_store.log_x_post(campaign_key="topstory", status="ok")
         ok, reason = x_store.check_cap(extra_posts=1)
@@ -116,7 +135,7 @@ class TestCaps:
         assert reason == "daily_cap_reached"
 
     def test_monthly_cap_reached(self, _init):
-        x_store.set_tier_config("custom", daily_cap=1000, monthly_cap=3, monthly_usd=0)
+        x_store.set_tier_config("pay_per_use", daily_cap=1000, monthly_cap=3, monthly_usd=0)
         for _ in range(3):
             x_store.log_x_post(campaign_key="weekly", status="ok")
         ok, reason = x_store.check_cap()
@@ -124,7 +143,7 @@ class TestCaps:
         assert reason == "monthly_cap_reached"
 
     def test_only_ok_counts(self, _init):
-        x_store.set_tier_config("custom", daily_cap=2, monthly_cap=100, monthly_usd=0)
+        x_store.set_tier_config("pay_per_use", daily_cap=2, monthly_cap=100, monthly_usd=0)
         # errors y skipped no consumen cupo
         for _ in range(5):
             x_store.log_x_post(campaign_key="topstory", status="error")

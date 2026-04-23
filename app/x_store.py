@@ -36,12 +36,24 @@ VALID_CAMPAIGN_STATUSES: frozenset[str] = frozenset({
     "ok", "error", "rate_limited", "quota_exceeded", "disabled_by_tier", "skipped",
 })
 
-VALID_TIERS: frozenset[str] = frozenset({"free", "basic", "pro", "custom"})
+VALID_TIERS: frozenset[str] = frozenset({"disabled", "basic", "pro", "pay_per_use"})
 
-# Valores publicados por X (2026-04). Free bloquea el posteo; Basic/Pro traen
-# el cap típico del tier; custom deja que el admin defina los 3 campos.
+# Alias legacy: los tiers "custom" y "free" se renombraron a "pay_per_use" y
+# "disabled" respectivamente para reflejar lo que realmente hacen en la app
+# (Free dejó de existir como plan de X en feb-2026; internamente es un
+# kill-switch que apaga todas las campañas). Toda fila vieja se migra
+# on-read / on-init a la clave nueva.
+_LEGACY_TIER_ALIASES: dict[str, str] = {
+    "custom": "pay_per_use",
+    "free": "disabled",
+}
+
+# Valores publicados por X (2026-04). ``disabled`` es el kill-switch interno
+# (antes llamado "free") que apaga todas las campañas; Basic/Pro traen el cap
+# típico del tier; ``pay_per_use`` deja que el admin defina los 3 campos (se
+# cobra por request, ~USD 0.01 por tweet).
 TIER_DEFAULTS: dict[str, dict[str, Any]] = {
-    "free": {
+    "disabled": {
         "daily_cap": 0,
         "monthly_cap": 0,
         "monthly_usd": 0.0,
@@ -59,7 +71,7 @@ TIER_DEFAULTS: dict[str, dict[str, Any]] = {
         "monthly_usd": 5_000.0,
         "posting_allowed": True,
     },
-    "custom": {
+    "pay_per_use": {
         "daily_cap": 50,
         "monthly_cap": 1500,
         "monthly_usd": 0.0,
@@ -156,7 +168,7 @@ def init_x_tables() -> None:
                 """
                 CREATE TABLE IF NOT EXISTS x_tier_config (
                     id           INTEGER PRIMARY KEY DEFAULT 1,
-                    tier         TEXT NOT NULL DEFAULT 'free',
+                    tier         TEXT NOT NULL DEFAULT 'disabled',
                     daily_cap    INTEGER NOT NULL DEFAULT 0,
                     monthly_cap  INTEGER NOT NULL DEFAULT 0,
                     monthly_usd  REAL NOT NULL DEFAULT 0,
@@ -215,7 +227,7 @@ def init_x_tables() -> None:
                 """
                 CREATE TABLE IF NOT EXISTS x_tier_config (
                     id           INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-                    tier         TEXT NOT NULL DEFAULT 'free',
+                    tier         TEXT NOT NULL DEFAULT 'disabled',
                     daily_cap    INTEGER NOT NULL DEFAULT 0,
                     monthly_cap  INTEGER NOT NULL DEFAULT 0,
                     monthly_usd  REAL NOT NULL DEFAULT 0,
@@ -259,6 +271,7 @@ def init_x_tables() -> None:
 
         _seed_campaigns(conn)
         _seed_tier(conn)
+        _migrate_legacy_tiers(conn)
 
     backend = "PostgreSQL" if is_postgres() else "SQLite"
     logger.info("X tables ready — %s", backend)
@@ -293,10 +306,27 @@ def _seed_campaigns(conn) -> None:
         )
 
 
+def _migrate_legacy_tiers(conn) -> None:
+    """Renombra tiers obsoletos (``custom`` → ``pay_per_use``) si persisten en DB.
+
+    Es idempotente: si no hay filas con valores legacy, no pasa nada. Pensado
+    para corridas post-deploy donde la DB se arrastra desde una versión previa.
+    """
+    for legacy, new in _LEGACY_TIER_ALIASES.items():
+        try:
+            execute(
+                conn,
+                "UPDATE x_tier_config SET tier = ? WHERE tier = ?",
+                (new, legacy),
+            )
+        except Exception as exc:
+            logger.warning("Legacy tier migration %s→%s failed: %s", legacy, new, exc)
+
+
 def _seed_tier(conn) -> None:
-    """Inserta la fila única de tier_config con defaults de 'free' si falta."""
+    """Inserta la fila única de tier_config en estado ``disabled`` si falta."""
     now_iso = _now_iso()
-    defaults = TIER_DEFAULTS["free"]
+    defaults = TIER_DEFAULTS["disabled"]
     execute(
         conn,
         """
@@ -306,7 +336,7 @@ def _seed_tier(conn) -> None:
         WHERE NOT EXISTS (SELECT 1 FROM x_tier_config WHERE id = 1)
         """,
         (
-            "free",
+            "disabled",
             int(defaults["daily_cap"]),
             int(defaults["monthly_cap"]),
             float(defaults["monthly_usd"]),
@@ -465,7 +495,7 @@ def record_campaign_run(campaign_key: str, status: str) -> None:
 
 
 def disable_all_campaigns() -> int:
-    """Pone ``enabled=0`` en todas las campañas (usado al mover a tier=free)."""
+    """Pone ``enabled=0`` en todas las campañas (usado al mover a tier=disabled)."""
     global _campaign_cache_ts
     now_iso = _now_iso()
     try:
@@ -511,9 +541,9 @@ def get_tier_config() -> dict[str, Any]:
         row = None
 
     if not row:
-        defaults = TIER_DEFAULTS["free"]
+        defaults = TIER_DEFAULTS["disabled"]
         out = {
-            "tier": "free",
+            "tier": "disabled",
             "daily_cap": int(defaults["daily_cap"]),
             "monthly_cap": int(defaults["monthly_cap"]),
             "monthly_usd": float(defaults["monthly_usd"]),
@@ -521,14 +551,20 @@ def get_tier_config() -> dict[str, Any]:
             "updated_at": None,
         }
     else:
-        tier = row["tier"] if row["tier"] in VALID_TIERS else "free"
-        defaults = TIER_DEFAULTS.get(tier, TIER_DEFAULTS["free"])
+        raw_tier = row["tier"]
+        # Migración on-read: claves legacy (ej. "custom", "free") se traducen a
+        # su equivalente moderno. Si la clave no existe en ningún lado, caemos
+        # al kill-switch ("disabled") para no habilitar posteo por accidente.
+        tier = _LEGACY_TIER_ALIASES.get(raw_tier, raw_tier)
+        if tier not in VALID_TIERS:
+            tier = "disabled"
+        defaults = TIER_DEFAULTS.get(tier, TIER_DEFAULTS["disabled"])
         out = {
             "tier": tier,
             "daily_cap": int(row["daily_cap"] or 0),
             "monthly_cap": int(row["monthly_cap"] or 0),
             "monthly_usd": float(row["monthly_usd"] or 0),
-            "posting_allowed": bool(defaults["posting_allowed"]) and tier != "free",
+            "posting_allowed": bool(defaults["posting_allowed"]) and tier != "disabled",
             "updated_at": row["updated_at"],
         }
 
@@ -546,17 +582,21 @@ def set_tier_config(
 ) -> bool:
     """Actualiza la fila única de tier. Los caps se normalizan según el tier.
 
-    - ``free``: fuerza caps=0 e ignora el input.
+    - ``disabled``: kill-switch, fuerza caps=0 e ignora el input.
     - ``basic`` / ``pro``: si el admin no pasa cap, usa defaults; si pasa,
       respeta lo que mande (no hay tope hard porque el panel muestra warning).
-    - ``custom``: usa exactamente lo que pase el admin (default 0 si falta).
+    - ``pay_per_use``: usa exactamente lo que pase el admin (default 0 si falta).
+
+    Compat: acepta los aliases legacy ``"custom"`` → ``pay_per_use`` y
+    ``"free"`` → ``disabled`` y los normaliza antes de validar.
     """
     global _tier_cache_ts
+    tier = _LEGACY_TIER_ALIASES.get(tier, tier)
     if tier not in VALID_TIERS:
         return False
 
     defaults = TIER_DEFAULTS[tier]
-    if tier == "free":
+    if tier == "disabled":
         daily = 0
         monthly = 0
         usd = 0.0
@@ -606,7 +646,7 @@ def set_tier_config(
             "X tier updated: %s (daily=%d, monthly=%d, usd=%.2f)",
             tier, daily, monthly, usd,
         )
-        if tier == "free":
+        if tier == "disabled":
             disable_all_campaigns()
         return True
     except Exception as exc:

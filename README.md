@@ -356,7 +356,7 @@ Disponible en **`/admin`** (requiere JWT + rol `admin`). Sirve el archivo `stati
 - **Infra Costs**: snapshot de consumo por servicio en Railway (requiere token).
 - **Ollama Logs**: últimas líneas del container de Ollama traídas vía Railway GraphQL (requiere `RAILWAY_OLLAMA_SERVICE_NAME`, default `ollama`).
 - **Debug Headers / Purga de proxies**: utilidades para limpiar eventos con IPs de proxy que contaminan las métricas de visitantes anónimos.
-- **Campañas X**: configurar la integración con X (ex-Twitter). Una card "Cuenta y cupo" muestra el handle conectado, el tier contratado (Free/Basic/Pro/Custom) y los caps diarios/mensuales con barras de progreso. Cinco cards (una por tipo de campaña) permiten habilitarlas, elegir hora/día de posteo, editar la plantilla del tweet, y probar el runner con el botón "Probar ahora". Ver la sección específica más abajo.
+- **Campañas X**: configurar la integración con X (ex-Twitter). Una card "Cuenta y cupo" muestra el handle conectado, el tier contratado (Apagado/Basic/Pro/Pay per Use) y los caps diarios/mensuales con barras de progreso. Cinco cards (una por tipo de campaña) permiten habilitarlas, elegir hora/día de posteo, editar la plantilla del tweet, y probar el runner con el botón "Probar ahora". Ver la sección específica más abajo.
 
 ### Campañas X
 
@@ -370,7 +370,9 @@ La tab **Campañas X** controla los 5 tipos de publicaciones automáticas:
 | `topics` (Temas del día) | cron diario | Hilo con los trending topics detectados (reutiliza `ai_topics`). |
 | `breaking` (Breaking news) | reactivo (post-`refresh_news`) | Tweet puntual cuando aparece un grupo con ≥ `min_source_count` fuentes en las categorías permitidas y pasó el cooldown. |
 
-El tier (`Free` / `Basic` / `Pro` / `Custom`) pre-carga caps típicos de X Developer Portal pero siempre se pueden editar manualmente en `Custom`. Elegir `Free` desactiva todas las campañas y fuerza caps a 0. Los posteos se persisten en `x_usage_log` y los tokens OAuth2 renovados en `x_oauth_state` (sobreviven a redeploys).
+El tier (`Apagado` / `Basic` / `Pro` / `Pay per Use`) pre-carga caps típicos de X Developer Portal pero siempre se pueden editar manualmente en `Pay per Use` (billing por request, ~USD 0.01 por tweet según X). `Apagado` es el kill-switch interno: fuerza caps a 0, desactiva todas las campañas, y es el estado por defecto al arrancar. Los posteos se persisten en `x_usage_log` y los tokens OAuth2 renovados en `x_oauth_state` (sobreviven a redeploys).
+
+> **Migración**: instalaciones previas con tier `custom` o `free` se renombran automáticamente a `pay_per_use` y `disabled` respectivamente al inicializar las tablas (`init_x_tables` corre `UPDATE x_tier_config SET tier = '<nuevo>' WHERE tier = '<viejo>'`). Los aliases legacy también se aceptan en `set_tier_config(...)` para scripts/tests que los sigan usando.
 
 ---
 
@@ -437,7 +439,7 @@ Base URL: `http://localhost:8000` (local) o el dominio de Railway (prod).
 | `/api/admin/x-status` | GET | `is_configured`, handle conectado, último refresh, tier actual, caps y totales `today`/`month`. |
 | `/api/admin/x-refresh-handle` | POST | Fuerza un `GET /2/users/me` para refrescar el handle cacheado. |
 | `/api/admin/x-campaigns` | GET / POST | Config de las 5 campañas (`enabled`, schedule, template, opciones). Valida y re-agenda jobs. |
-| `/api/admin/x-tier` | GET / POST | Tier contratado y caps. `free` desactiva todas las campañas; `basic`/`pro` pre-cargan defaults; `custom` acepta lo que pase el admin. |
+| `/api/admin/x-tier` | GET / POST | Tier contratado y caps. `disabled` (antes `free`) es kill-switch y apaga todas las campañas; `basic`/`pro` pre-cargan defaults; `pay_per_use` (antes `custom`) acepta lo que pase el admin. |
 | `/api/admin/x-usage` | GET | Log paginado de posteos (`ok`/`error`/`rate_limited`/`quota_exceeded`/`disabled_by_tier`). |
 | `/api/admin/x-test-post` | POST | Ejecuta el runner de una campaña puntual (respeta caps) para validar plantillas y tokens. |
 

@@ -1,0 +1,103 @@
+---
+description: Mantener README.md (y docs relacionadas) sincronizados con el código en cada push
+globs:
+alwaysApply: true
+---
+
+# Protocolo de documentación en cada push
+
+El `README.md` es la **fuente de verdad pública** del proyecto y tiene que reflejar
+con exactitud qué hace el código en `master`. No se pushea un cambio relevante sin
+actualizar la documentación en el mismo commit/PR.
+
+## Regla general
+
+**Antes de cerrar cualquier cambio que se vaya a pushear**, el agente tiene que:
+
+1. Revisar si el cambio toca alguna de las áreas documentadas en `README.md`.
+2. Si sí, actualizar las secciones correspondientes en el mismo PR/commit.
+3. Si el cambio agrega o remueve funcionalidad visible, actualizar también
+   `BACKLOG.md` (marcando hecho / agregando follow-up) y, si corresponde,
+   otras reglas en `.cursor/rules/`.
+4. Correr la suite (`python -m pytest --tb=short -q`) para asegurar que la
+   referencia a endpoints/módulos sigue siendo válida.
+
+## Checklist por tipo de cambio
+
+Cuando se detecta un cambio en estos archivos, revisar la sección indicada del README:
+
+| Archivo(s) modificado(s) | Sección(es) a revisar en `README.md` |
+|--------------------------|---------------------------------------|
+| `app/config.py` (SOURCES, CATEGORIES, thresholds) | **Fuentes y categorías** — tabla de medios y parámetros |
+| `app/main.py` (nuevos `@app.get/post/...`) | **API REST** — agregar el endpoint a la tabla correcta |
+| `app/main.py` (scheduler.add_job / intervalos) | **Scheduler y horarios** — tabla de jobs |
+| `app/ai_search.py` (modelos, límites, chains) | **Proveedores de IA** — tabla de providers y defaults |
+| `app/ai_store.py` (VALID_PROVIDERS, VALID_EVENT_TYPES, MODEL_PRICING) | **Proveedores de IA** y **Modelo de datos** |
+| `app/auth.py` (nuevos mecanismos / cookies) | **Autenticación** |
+| `app/models.py` | **Modelo de datos** — snippet Pydantic |
+| `app/db.py` / nuevos `*_store.py` | **Modelo de datos** — tabla de tablas |
+| `requirements.txt` / `requirements-dev.txt` | **Stack tecnológico** — versiones |
+| `Procfile` / `railway.toml` | **Deploy en Railway** |
+| Nuevas env vars (`os.environ.get(...)`) | **Variables de entorno** — agregar la variable con su uso |
+| Cambios en `static/admin.html` (nuevas cards / secciones) | **Panel de administración** |
+| Nuevos tests o estructura en `tests/` | **Tests y calidad** |
+
+## Variables de entorno
+
+Cualquier `os.environ.get("NUEVA_VAR", ...)` nuevo obliga a agregar la fila
+correspondiente en la tabla **Variables de entorno** del README con:
+
+- Nombre exacto.
+- Si es obligatoria en producción u opcional.
+- Para qué sirve (una línea).
+
+## Endpoints
+
+Cualquier decorador `@app.get/post/put/delete("/api/...")` nuevo tiene que
+aparecer en la subtabla correspondiente (Noticias y comparación, IA,
+Tracking, Admin, Auth u Otros) de la sección **API REST**, incluyendo método,
+params principales y descripción breve.
+
+## Scheduler
+
+Cualquier `scheduler.add_job(...)` nuevo, o cambio de intervalo por default,
+tiene que reflejarse en la tabla **Scheduler y horarios**:
+
+- Nombre del job.
+- Trigger (`interval` / `cron`).
+- Default.
+- Si es configurable desde `/admin` o no.
+
+## Proveedores de IA
+
+Si se agrega un proveedor, cambia un modelo default, o se ajusta un límite
+(ej. `GROQ_MAX_PROMPT_CHARS`, `OLLAMA_MAX_PROMPT_CHARS`, `OLLAMA_TIMEOUT_*`,
+pricing en `MODEL_PRICING`):
+
+- Actualizar la tabla **Proveedores de IA** del README.
+- Revisar si la regla [`ai-providers.mdc`](./ai-providers.mdc) sigue siendo
+  correcta y ajustarla si hace falta.
+
+## BACKLOG.md
+
+- Si un cambio completa un ítem del backlog, marcarlo como **hecho**.
+- Si introduce follow-ups (TODOs, deuda técnica, trade-offs), agregarlos como
+  nuevo ítem en la lista priorizable.
+
+## Cuándo no hace falta actualizar docs
+
+- Refactors internos puros (renombrar una variable local, mover funciones
+  privadas) que no cambian la superficie pública ni la config.
+- Cambios solo en tests que validan comportamiento ya documentado.
+- Ajustes de estilo/formato sin cambio de comportamiento.
+
+En estos casos, dejarlo explícito en el mensaje del commit/PR con algo como
+`docs: no-op`.
+
+## Antes de pushear
+
+1. `git status` y `git diff` para ver qué cambió.
+2. Cotejar cada archivo modificado contra el checklist de arriba.
+3. Actualizar `README.md` / `BACKLOG.md` / reglas en el mismo commit.
+4. Correr `python -m pytest --tb=short -q`.
+5. Recién ahí, `git push`.

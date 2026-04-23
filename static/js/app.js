@@ -633,6 +633,7 @@ let _topicsCacheTs = 0;
 let _topicsLoadingSince = 0;
 let _topicsSearchCached = new Set();
 let _topicsGeneratedAt = null;
+let _topicsProvider = null;
 const _topicsTTL = 55 * 60 * 1000; // 55 min (slightly less than server's 1h TTL)
 const _topicsLoadingTimeout = 20_000;
 
@@ -742,6 +743,7 @@ function setupHeroSearch() {
             _topicsCacheTs = 0;
             _topicsSearchCached = new Set();
             _topicsGeneratedAt = null;
+            _topicsProvider = null;
             prefetchTopics();
         }
     }, 10 * 60 * 1000); // check every 10 min
@@ -762,6 +764,7 @@ function setupHeroSearch() {
         _topicsCacheTs = 0;
         _topicsSearchCached = new Set();
         _topicsGeneratedAt = null;
+        _topicsProvider = null;
         prefetchTopics();
     });
 }
@@ -782,6 +785,7 @@ async function prefetchTopics() {
             _topicsCacheTs = Date.now();
             _topicsSearchCached = new Set(data.search_cached || []);
             _topicsGeneratedAt = data.generated_at || null;
+            _topicsProvider = data.ai_provider || null;
             if (_topicsSearchCached.size < data.topics.length) {
                 _scheduleCachedRecheck();
             }
@@ -1987,7 +1991,7 @@ async function loadTemasView() {
 
     if (_isTopicsCacheValid() && _topicsCache?.length) {
         renderTemasCards(_topicsCache);
-        _setTemasAttr("static", "", null, _topicsGeneratedAt);
+        _setTemasAttr("static", "", _topicsProvider, _topicsGeneratedAt);
         return;
     }
 
@@ -2012,6 +2016,7 @@ async function loadTemasView() {
                 _topicsCacheTs = Date.now();
                 _topicsSearchCached = new Set(data.search_cached || []);
                 _topicsGeneratedAt = data.generated_at || null;
+                _topicsProvider = data.ai_provider || null;
                 renderTemasCards(data.topics);
                 _setTemasAttr("done", "", data.ai_provider, data.generated_at);
             } else if (data.ai_available) {

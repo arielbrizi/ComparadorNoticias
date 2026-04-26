@@ -664,8 +664,8 @@
     <!-- AI KPIs -->
     <div class="admin-kpis" id="ai-kpis" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
         <div class="admin-kpi"><div id="ai-kpi-calls" class="admin-kpi-value">-</div><div class="admin-kpi-label">Llamadas</div><div class="admin-kpi-desc">Total de llamadas a proveedores IA</div></div>
-        <div class="admin-kpi"><div id="ai-kpi-cost" class="admin-kpi-value">-</div><div class="admin-kpi-label">Costo (USD)</div><div class="admin-kpi-desc">Costo total en el período</div></div>
-        <div class="admin-kpi"><div id="ai-kpi-projection" class="admin-kpi-value" style="color:#0d9488">-</div><div class="admin-kpi-label">Proyección mes</div><div class="admin-kpi-desc">Estimado a fin de mes al ritmo actual</div></div>
+        <div class="admin-kpi"><div id="ai-kpi-cost" class="admin-kpi-value">-</div><div class="admin-kpi-label">Costo (USD)</div><div id="ai-kpi-cost-sub" class="admin-kpi-sub"></div><div class="admin-kpi-desc">Total IA + infra del período</div></div>
+        <div class="admin-kpi"><div id="ai-kpi-projection" class="admin-kpi-value" style="color:#0d9488">-</div><div class="admin-kpi-label">Proyección mes</div><div id="ai-kpi-projection-sub" class="admin-kpi-sub"></div><div class="admin-kpi-desc">IA al ritmo actual + infra mensual estimada</div></div>
         <div class="admin-kpi"><div id="ai-kpi-tokens-in" class="admin-kpi-value">-</div><div class="admin-kpi-label">Tokens entrada</div><div class="admin-kpi-desc">Total de tokens de input enviados</div></div>
         <div class="admin-kpi"><div id="ai-kpi-tokens-out" class="admin-kpi-value">-</div><div class="admin-kpi-label">Tokens salida</div><div class="admin-kpi-desc">Total de tokens de output recibidos</div></div>
     </div>
@@ -926,6 +926,6 @@
     <div id="admin-modal-host"></div>
 </div>
 
-<script src="/static/js/admin.js?v=15"></script>
+<script src="/static/js/admin.js?v=16"></script>
 </body>
 </html>

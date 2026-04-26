@@ -572,25 +572,50 @@ function fmtTokens(n) {
     return String(n);
 }
 
+// Inclusive day count between `desde`/`hasta` (YYYY-MM-DD). Returns days in
+// the current month when the range is open (e.g. "Todo" filter) so the
+// infra prorate keeps the same magnitude as the cumulative month figure.
+function _periodDaysBetween(desde, hasta) {
+    const now = new Date();
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    if (!desde || !hasta) return daysInMonth;
+    const d = new Date(desde + "T00:00:00");
+    const h = new Date(hasta + "T00:00:00");
+    if (isNaN(d) || isNaN(h)) return daysInMonth;
+    const diff = Math.round((h - d) / 86_400_000) + 1;
+    return diff > 0 ? diff : daysInMonth;
+}
+
 async function loadAICosts(desde, hasta) {
     try {
         const now = new Date();
         const mesDesde = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
         const mesHasta = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
-        const [resp, respMes] = await Promise.all([
+        const [resp, respMes, respInfra] = await Promise.all([
             fetch(`/api/admin/ai-cost${qs(desde, hasta)}`),
             fetch(`/api/admin/ai-cost${qs(mesDesde, mesHasta)}`),
+            fetch(`/api/admin/infra-costs`).catch(() => null),
         ]);
         if (resp.status === 403) { window.location.href = "/"; return; }
         const data = await resp.json();
         const dataMes = await respMes.json();
+        let infraMonth = 0;
+        let infraAvailable = false;
+        if (respInfra && respInfra.ok) {
+            try {
+                const infraData = await respInfra.json();
+                if (infraData && infraData.available) {
+                    infraMonth = Number(infraData.total_usd_month) || 0;
+                    infraAvailable = true;
+                }
+            } catch (_) { /* ignore */ }
+        }
 
         const s = data.summary;
         const t = s.totals;
 
         $("#ai-kpi-calls").textContent = t.calls;
-        $("#ai-kpi-cost").textContent = fmtUSD(t.cost_total);
         $("#ai-kpi-tokens-in").textContent = fmtTokens(t.input_tokens);
         $("#ai-kpi-tokens-out").textContent = fmtTokens(t.output_tokens);
 
@@ -598,8 +623,35 @@ async function loadAICosts(desde, hasta) {
         const costMes = mesTotals.cost_total || 0;
         const daysWithData = mesTotals.distinct_days || 0;
         const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-        const projected = daysWithData > 0 ? (costMes / daysWithData) * daysInMonth : 0;
-        $("#ai-kpi-projection").textContent = fmtUSD(projected);
+        const projectedAI = daysWithData > 0 ? (costMes / daysWithData) * daysInMonth : 0;
+
+        // Pro-rate the Railway monthly estimate to the selected period so the
+        // "Costo (USD)" KPI mixes apples with apples (AI period cost + infra
+        // share for the same span). Falls back to month-to-date when we can't
+        // determine the period length.
+        const periodDays = _periodDaysBetween(desde, hasta);
+        const infraPeriod = infraAvailable && periodDays > 0
+            ? infraMonth * (periodDays / daysInMonth)
+            : 0;
+
+        const aiCostPeriod = Number(t.cost_total) || 0;
+        const totalCostPeriod = aiCostPeriod + infraPeriod;
+        $("#ai-kpi-cost").textContent = fmtUSD(totalCostPeriod);
+        const costSub = $("#ai-kpi-cost-sub");
+        if (costSub) {
+            costSub.innerHTML = infraAvailable
+                ? `IA ${fmtUSD(aiCostPeriod)} <span style="opacity:.5">·</span> Infra ${fmtUSD(infraPeriod)}`
+                : `IA ${fmtUSD(aiCostPeriod)} <span style="opacity:.5">·</span> <span style="opacity:.5">infra n/d</span>`;
+        }
+
+        const totalProjection = projectedAI + (infraAvailable ? infraMonth : 0);
+        $("#ai-kpi-projection").textContent = fmtUSD(totalProjection);
+        const projSub = $("#ai-kpi-projection-sub");
+        if (projSub) {
+            projSub.innerHTML = infraAvailable
+                ? `IA ${fmtUSD(projectedAI)} <span style="opacity:.5">·</span> Infra ${fmtUSD(infraMonth)}`
+                : `IA ${fmtUSD(projectedAI)} <span style="opacity:.5">·</span> <span style="opacity:.5">infra n/d</span>`;
+        }
 
         const strip = $("#ai-providers-strip");
         if (s.by_provider.length) {

@@ -239,7 +239,8 @@ Soportamos **tres** proveedores (`app/ai_search.py`) y cada evento arma su propi
 **Mecanismos de control** (todos modificables desde `/admin` sin redeploy):
 
 - **Cadena de providers por evento** (`ai_provider_config`): panel con 4 combos ordenados por evento (1ro / 2do / 3ro / 4to); cada slot excluye los proveedores ya elegidos en slots anteriores.
-- **Cuotas por proveedor** (`ai_provider_limits`): RPM, TPM, RPD, TPD. Si se exceden, `_run_provider_chain` salta al siguiente de la cadena y lo loguea.
+- **Cuotas por proveedor** (`ai_provider_limits`): RPM, TPM, RPD, TPD y un presupuesto opcional `monthly_usd` por par `(provider, model)`. Si alguno se excede, `_run_provider_chain` salta al siguiente de la cadena y lo loguea.
+- **Presupuesto USD/mes (global)** (`ai_runtime_config["monthly_budget_usd_global"]`): techo total de la cuenta sumado sobre todos los providers. De ese mensual se deriva un cap diario auto-ajustado: `daily_cap = max(0, (presupuesto - gastado_en_el_mes) / días_restantes)`. Si gastás menos un día, el siguiente sube; si te pasás, baja. Ambos USD limits (global y per-pair) se evalúan antes que las cuotas RPM/TPM/RPD/TPD del portal del proveedor.
 - **Quiet hours** (`ai_schedule_config`): ventana horaria por evento (zona horaria ART) en la que no se corre IA. Útil para apagar prefetch de madrugada.
 - **Timeout de Ollama** (`OLLAMA_TIMEOUT_MIN=30` / `MAX=900`, default 120 s): se lee en cada invocación desde `get_ollama_timeout()`. La primera llamada tras idle puede tardar 15–40 s (cold start del modelo); mantené `OLLAMA_KEEP_ALIVE=10m` en el servicio.
 - **Logging de prompts** (`AI_LOG_PREVIEWS=1`): guarda prompt/respuesta completos en `ai_usage_log`. Los fallos de Ollama persisten el preview **siempre**, para poder debuggear post-mortem.
@@ -349,7 +350,7 @@ Disponible en **`/admin`** (requiere JWT + rol `admin`). Sirve el archivo `stati
 
 - **Dashboard**: usuarios activos, eventos por hora, actividad diaria, secciones visitadas, búsquedas populares, contenido top.
 - **AI Monitor**: últimas invocaciones a IA (tokens, latencia, error, proveedor), con drill-down al prompt/respuesta si está habilitado `AI_LOG_PREVIEWS`.
-- **AI Config**: cambiar el provider por evento, ajustar cuotas RPM/TPM/RPD/TPD, definir quiet hours por evento, cambiar el timeout de Ollama.
+- **AI Config**: cambiar el provider por evento, ajustar cuotas RPM/TPM/RPD/TPD y el presupuesto USD/mes (global y por par `provider/model`, con cap diario auto-derivado), definir quiet hours por evento, cambiar el timeout de Ollama.
 - **AI Cost**: costo diario total y por proveedor.
 - **Scheduler Config**: ajustar intervalos de `refresh_news` y `prefetch_topics` en vivo.
 - **Process Events**: log de jobs del scheduler (inicio, fin, error, duración).
@@ -428,7 +429,8 @@ Base URL: `http://localhost:8000` (local) o el dominio de Railway (prod).
 | `/api/admin/ai-cost` | GET | Costo acumulado por proveedor/día. |
 | `/api/admin/ai-config` | GET / POST | Cadena ordenada de providers por evento (hasta 4 entradas). |
 | `/api/admin/ai-schedule` | POST | Quiet hours por evento. |
-| `/api/admin/ai-limits` | GET / POST | Cuotas RPM/TPM/RPD/TPD por proveedor. |
+| `/api/admin/ai-limits` | GET / POST | Cuotas RPM/TPM/RPD/TPD y presupuesto USD/mes por proveedor; el GET incluye el bloque `global` con el presupuesto compartido y el cap diario derivado. |
+| `/api/admin/ai-budget-global` | GET / POST | Presupuesto USD/mes global compartido por todos los proveedores (`{"monthly_usd": …}` o `{"reset": true}`). |
 | `/api/admin/ai-monitor` | GET | Últimas invocaciones. |
 | `/api/admin/ai-invocations` | GET | Búsqueda paginada de invocaciones. |
 | `/api/admin/ollama-config` | GET / POST | Timeout de invocación Ollama. |

@@ -78,7 +78,7 @@ MAX_PROVIDER_CHAIN = 4
 #       reporte comunidad abr-2026 para gemini-3-flash-preview.
 #   - Groq free tier (console.groq.com/docs/rate-limits).
 # Lookup: 2026-04-22. Repetir una vez al mes y actualizar la fecha.
-PROVIDER_LIMIT_DEFAULTS: dict[tuple[str, str], dict[str, int | None]] = {
+PROVIDER_LIMIT_DEFAULTS: dict[tuple[str, str], dict[str, int | float | None]] = {
     ("gemini", "gemini-3-flash-preview"): {
         # Preview free tier — Google no publica tabla estática; los números
         # coinciden con lo que devuelve aistudio.google.com/rate-limit para
@@ -88,6 +88,7 @@ PROVIDER_LIMIT_DEFAULTS: dict[tuple[str, str], dict[str, int | None]] = {
         "tpm": 250_000,
         "rpd": 20,
         "tpd": None,
+        "monthly_usd": None,
     },
     ("groq", "llama-3.3-70b-versatile"): {
         # Free tier Groq Console. TPM/RPD confirmados en docs oficiales.
@@ -95,15 +96,19 @@ PROVIDER_LIMIT_DEFAULTS: dict[tuple[str, str], dict[str, int | None]] = {
         "tpm": 12_000,
         "rpd": 1_000,
         "tpd": 100_000,
+        "monthly_usd": None,
     },
     # Ollama: self-hosted, sin límite externo. Lo dejamos explícito para que
     # get_provider_limits devuelva algo en vez de "desconocido".
     ("ollama", "qwen3:8b"): {
         "rpm": None, "tpm": None, "rpd": None, "tpd": None,
+        "monthly_usd": None,
     },
 }
 
 _LIMIT_FIELDS: tuple[str, ...] = ("rpm", "tpm", "rpd", "tpd")
+_BUDGET_FIELDS: tuple[str, ...] = ("monthly_usd",)
+_ALL_LIMIT_FIELDS: tuple[str, ...] = _LIMIT_FIELDS + _BUDGET_FIELDS
 
 # ── Table init ────────────────────────────────────────────────────────────────
 
@@ -194,17 +199,19 @@ def init_ai_tables() -> None:
             conn,
             """
             CREATE TABLE IF NOT EXISTS ai_provider_limits (
-                provider   TEXT NOT NULL,
-                model      TEXT NOT NULL,
-                rpm        INTEGER,
-                tpm        INTEGER,
-                rpd        INTEGER,
-                tpd        INTEGER,
-                updated_at TEXT NOT NULL,
+                provider    TEXT NOT NULL,
+                model       TEXT NOT NULL,
+                rpm         INTEGER,
+                tpm         INTEGER,
+                rpd         INTEGER,
+                tpd         INTEGER,
+                monthly_usd REAL,
+                updated_at  TEXT NOT NULL,
                 PRIMARY KEY (provider, model)
             )
             """,
         )
+        _migrate_ai_provider_limits_budget(conn)
 
         execute(
             conn,
@@ -287,6 +294,31 @@ def _migrate_ai_usage_log_previews(conn) -> None:
                 execute(conn, "ALTER TABLE ai_usage_log ADD COLUMN response_preview TEXT")
     except Exception as exc:
         logger.warning("ai_usage_log preview migration failed: %s", exc)
+
+
+def _migrate_ai_provider_limits_budget(conn) -> None:
+    """Add the ``monthly_usd`` column to pre-existing ai_provider_limits rows.
+
+    The column was added together with the monthly USD budget feature. On a
+    fresh install the ``CREATE TABLE`` already includes it; this migration
+    only kicks in when the table was created by an older version of the app.
+    """
+    try:
+        if is_postgres():
+            execute(
+                conn,
+                "ALTER TABLE ai_provider_limits ADD COLUMN IF NOT EXISTS monthly_usd REAL",
+            )
+        else:
+            cur = query(conn, "PRAGMA table_info(ai_provider_limits)")
+            cols = {row["name"] for row in cur.fetchall()}
+            if "monthly_usd" not in cols:
+                execute(
+                    conn,
+                    "ALTER TABLE ai_provider_limits ADD COLUMN monthly_usd REAL",
+                )
+    except Exception as exc:
+        logger.warning("ai_provider_limits monthly_usd migration failed: %s", exc)
 
 
 def _migrate_ai_usage_log_errors(conn) -> None:
@@ -1281,13 +1313,23 @@ _LIMITS_CACHE_TTL = 30
 _usage_cache: dict[str, tuple[float, dict[str, int]]] = {}
 _USAGE_CACHE_TTL = 10
 
+# Costo por mes/día por proveedor (y "__global__" para el agregado). Se consulta
+# en cada precheck del cuota-guard cuando hay un presupuesto USD configurado,
+# así que cacheamos con el mismo TTL que ``_usage_cache`` para no martillar la
+# DB con un SUM(cost_total) por cada llamada.
+_cost_cache: dict[str, tuple[float, dict[str, float]]] = {}
+_COST_CACHE_TTL = 10
+_GLOBAL_COST_KEY = "__global__"
 
-def _default_limits(provider: str, model: str) -> dict[str, int | None]:
+_GLOBAL_MONTHLY_BUDGET_KEY = "monthly_budget_usd_global"
+
+
+def _default_limits(provider: str, model: str) -> dict[str, int | float | None]:
     """Return the hardcoded defaults for (provider, model), or all-None."""
     base = PROVIDER_LIMIT_DEFAULTS.get((provider, model))
     if base:
-        return {k: base.get(k) for k in _LIMIT_FIELDS}
-    return {k: None for k in _LIMIT_FIELDS}
+        return {k: base.get(k) for k in _ALL_LIMIT_FIELDS}
+    return {k: None for k in _ALL_LIMIT_FIELDS}
 
 
 def _parse_limit_field(value) -> int | None:
@@ -1314,31 +1356,33 @@ def _parse_limit_field(value) -> int | None:
     return None
 
 
-def _load_provider_limits_from_db() -> dict[tuple[str, str], dict[str, int | None]]:
+def _load_provider_limits_from_db() -> dict[tuple[str, str], dict[str, int | float | None]]:
     """Return overrides stored in ``ai_provider_limits`` (only fields present)."""
-    out: dict[tuple[str, str], dict[str, int | None]] = {}
+    out: dict[tuple[str, str], dict[str, int | float | None]] = {}
     try:
         with get_conn() as conn:
             rows = query(
                 conn,
-                "SELECT provider, model, rpm, tpm, rpd, tpd FROM ai_provider_limits",
+                "SELECT provider, model, rpm, tpm, rpd, tpd, monthly_usd "
+                "FROM ai_provider_limits",
             ).fetchall()
     except Exception as exc:
         logger.warning("Failed to read ai_provider_limits: %s", exc)
         return out
     for r in rows:
         key = (r["provider"], r["model"])
-        out[key] = {f: r[f] for f in _LIMIT_FIELDS}
+        out[key] = {f: r[f] for f in _ALL_LIMIT_FIELDS}
     return out
 
 
-def get_provider_limits() -> dict[tuple[str, str], dict[str, int | None]]:
+def get_provider_limits() -> dict[tuple[str, str], dict[str, int | float | None]]:
     """Return the merged view of provider limits (defaults + DB overrides).
 
     The resulting dict is keyed by ``(provider, model)``. A row in the DB is
-    authoritative in its entirety: if it exists, the 4 fields replace the
-    defaults for that pair (``None`` in a field means "no limit"). If no row
-    exists, the hardcoded ``PROVIDER_LIMIT_DEFAULTS`` for that pair apply.
+    authoritative in its entirety: if it exists, the 5 fields (rpm/tpm/rpd/
+    tpd/monthly_usd) replace the defaults for that pair (``None`` in a field
+    means "no limit"). If no row exists, the hardcoded
+    ``PROVIDER_LIMIT_DEFAULTS`` for that pair apply.
     Cached for ``_LIMITS_CACHE_TTL`` seconds.
     """
     global _limits_cache, _limits_cache_ts
@@ -1346,19 +1390,19 @@ def get_provider_limits() -> dict[tuple[str, str], dict[str, int | None]]:
     if _limits_cache and (now - _limits_cache_ts) < _LIMITS_CACHE_TTL:
         return {k: dict(v) for k, v in _limits_cache.items()}
 
-    merged: dict[tuple[str, str], dict[str, int | None]] = {
+    merged: dict[tuple[str, str], dict[str, int | float | None]] = {
         key: dict(vals) for key, vals in PROVIDER_LIMIT_DEFAULTS.items()
     }
     overrides = _load_provider_limits_from_db()
     for key, vals in overrides.items():
-        merged[key] = {f: vals.get(f) for f in _LIMIT_FIELDS}
+        merged[key] = {f: vals.get(f) for f in _ALL_LIMIT_FIELDS}
 
     _limits_cache = {k: dict(v) for k, v in merged.items()}
     _limits_cache_ts = now
     return {k: dict(v) for k, v in merged.items()}
 
 
-def get_provider_limit(provider: str, model: str) -> dict[str, int | None]:
+def get_provider_limit(provider: str, model: str) -> dict[str, int | float | None]:
     """Return the limits for a specific ``(provider, model)`` pair."""
     all_limits = get_provider_limits()
     if (provider, model) in all_limits:
@@ -1379,21 +1423,39 @@ def set_provider_limits(
     tpm: int | None,
     rpd: int | None,
     tpd: int | None,
+    monthly_usd: float | int | None = None,
 ) -> bool:
-    """Persist an override row. ``None`` in a field means "sin límite"."""
-    global _limits_cache_ts, _usage_cache
+    """Persist an override row. ``None`` in a field means "sin límite".
+
+    ``monthly_usd`` es el presupuesto en USD que la cuenta puede gastar en
+    ese par ``(provider, model)`` durante el mes calendario en curso (ART).
+    De ese mensual se deriva un cap diario auto-ajustado: ver
+    :func:`compute_daily_cap`.
+    """
+    global _limits_cache_ts, _usage_cache, _cost_cache
     if provider not in _BASE_PROVIDERS:
         return False
     if not isinstance(model, str) or not model.strip():
         return False
 
-    values: dict[str, int | None] = {}
+    values: dict[str, int | float | None] = {}
     for field, raw in (("rpm", rpm), ("tpm", tpm), ("rpd", rpd), ("tpd", tpd)):
         if raw is not None and (
             isinstance(raw, bool) or not isinstance(raw, int) or raw < 0
         ):
             return False
         values[field] = raw
+
+    if monthly_usd is None:
+        values["monthly_usd"] = None
+    elif isinstance(monthly_usd, bool):
+        return False
+    elif isinstance(monthly_usd, (int, float)):
+        if monthly_usd < 0:
+            return False
+        values["monthly_usd"] = float(monthly_usd)
+    else:
+        return False
 
     now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
     try:
@@ -1403,19 +1465,21 @@ def set_provider_limits(
                     conn,
                     """
                     INSERT INTO ai_provider_limits
-                        (provider, model, rpm, tpm, rpd, tpd, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (provider, model, rpm, tpm, rpd, tpd, monthly_usd, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (provider, model) DO UPDATE SET
                         rpm = EXCLUDED.rpm,
                         tpm = EXCLUDED.tpm,
                         rpd = EXCLUDED.rpd,
                         tpd = EXCLUDED.tpd,
+                        monthly_usd = EXCLUDED.monthly_usd,
                         updated_at = EXCLUDED.updated_at
                     """,
                     (
                         provider, model,
                         values["rpm"], values["tpm"],
                         values["rpd"], values["tpd"],
+                        values["monthly_usd"],
                         now_iso,
                     ),
                 )
@@ -1424,28 +1488,32 @@ def set_provider_limits(
                     conn,
                     """
                     INSERT INTO ai_provider_limits
-                        (provider, model, rpm, tpm, rpd, tpd, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (provider, model, rpm, tpm, rpd, tpd, monthly_usd, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(provider, model) DO UPDATE SET
                         rpm = excluded.rpm,
                         tpm = excluded.tpm,
                         rpd = excluded.rpd,
                         tpd = excluded.tpd,
+                        monthly_usd = excluded.monthly_usd,
                         updated_at = excluded.updated_at
                     """,
                     (
                         provider, model,
                         values["rpm"], values["tpm"],
                         values["rpd"], values["tpd"],
+                        values["monthly_usd"],
                         now_iso,
                     ),
                 )
         _limits_cache_ts = 0
         _usage_cache = {}
+        _cost_cache = {}
         logger.info(
-            "AI provider limit updated: %s/%s → rpm=%s tpm=%s rpd=%s tpd=%s",
+            "AI provider limit updated: %s/%s → rpm=%s tpm=%s rpd=%s tpd=%s monthly_usd=%s",
             provider, model,
             values["rpm"], values["tpm"], values["rpd"], values["tpd"],
+            values["monthly_usd"],
         )
         return True
     except Exception as exc:
@@ -1455,7 +1523,7 @@ def set_provider_limits(
 
 def reset_provider_limits(provider: str, model: str) -> bool:
     """Delete the override row, making the defaults authoritative again."""
-    global _limits_cache_ts, _usage_cache
+    global _limits_cache_ts, _usage_cache, _cost_cache
     if provider not in _BASE_PROVIDERS:
         return False
     try:
@@ -1467,6 +1535,7 @@ def reset_provider_limits(provider: str, model: str) -> bool:
             )
         _limits_cache_ts = 0
         _usage_cache = {}
+        _cost_cache = {}
         logger.info("AI provider limit reset to defaults: %s/%s", provider, model)
         return True
     except Exception as exc:
@@ -1532,9 +1601,191 @@ def query_provider_usage(provider: str) -> dict[str, int]:
 
 
 def invalidate_provider_usage_cache(provider: str | None = None) -> None:
-    """Drop the usage cache entry for ``provider`` (or all if ``None``)."""
-    global _usage_cache
+    """Drop the usage and cost cache entries for ``provider`` (or all if ``None``)."""
+    global _usage_cache, _cost_cache
     if provider is None:
         _usage_cache = {}
+        _cost_cache = {}
     else:
         _usage_cache.pop(provider, None)
+        _cost_cache.pop(provider, None)
+        _cost_cache.pop(_GLOBAL_COST_KEY, None)
+
+
+# ── Cost budget (USD/mes) ─────────────────────────────────────────────────────
+
+
+def _month_cutoff() -> str:
+    """Return the ISO start of the current calendar month in ART."""
+    now = datetime.now(ART)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return start.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _today_cutoff() -> str:
+    """Return the ISO start of the current day in ART."""
+    now = datetime.now(ART)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _days_remaining_in_month(now: datetime | None = None) -> int:
+    """Days remaining in the current month including today (≥1)."""
+    if now is None:
+        now = datetime.now(ART)
+    if now.month == 12:
+        next_month = now.replace(year=now.year + 1, month=1, day=1)
+    else:
+        next_month = now.replace(month=now.month + 1, day=1)
+    last_day = (next_month - timedelta(days=1)).day
+    return max(1, last_day - now.day + 1)
+
+
+def compute_daily_cap(
+    monthly_budget: float | None,
+    month_used: float,
+    now: datetime | None = None,
+) -> float | None:
+    """Return today's USD cap derived from the monthly budget.
+
+    ``daily_cap = max(0, (monthly_budget - month_used) / days_remaining)``
+
+    Si gastamos menos en días previos, ``days_remaining`` repartido sobre la
+    plata que sobró deja un cap más grande para hoy. Si nos pasamos, baja a
+    cero. Devuelve ``None`` cuando no hay presupuesto configurado para que
+    los callers sepan que no hay nada que enforce-ar.
+    """
+    if monthly_budget is None:
+        return None
+    try:
+        budget = float(monthly_budget)
+    except (TypeError, ValueError):
+        return None
+    if budget < 0:
+        return None
+    remaining = budget - max(0.0, float(month_used or 0.0))
+    if remaining <= 0:
+        return 0.0
+    days = _days_remaining_in_month(now)
+    return remaining / days
+
+
+def query_provider_cost_window(provider: str, since_iso: str) -> float:
+    """Return the total ``cost_total`` (USD, success=1) for ``provider`` since ``since_iso``."""
+    try:
+        with get_conn() as conn:
+            row = query(
+                conn,
+                """SELECT COALESCE(SUM(cost_total), 0) AS c
+                     FROM ai_usage_log
+                    WHERE provider = ? AND success = 1 AND created_at >= ?""",
+                (provider, since_iso),
+            ).fetchone()
+        if row is None:
+            return 0.0
+        return float(row["c"] or 0.0)
+    except Exception as exc:
+        logger.warning("query_provider_cost_window(%s) failed: %s", provider, exc)
+        return 0.0
+
+
+def query_total_cost_window(since_iso: str) -> float:
+    """Return the total ``cost_total`` (USD, success=1) across all providers since ``since_iso``."""
+    try:
+        with get_conn() as conn:
+            row = query(
+                conn,
+                """SELECT COALESCE(SUM(cost_total), 0) AS c
+                     FROM ai_usage_log
+                    WHERE success = 1 AND created_at >= ?""",
+                (since_iso,),
+            ).fetchone()
+        if row is None:
+            return 0.0
+        return float(row["c"] or 0.0)
+    except Exception as exc:
+        logger.warning("query_total_cost_window failed: %s", exc)
+        return 0.0
+
+
+def query_provider_cost_summary(provider: str) -> dict[str, float]:
+    """Return ``{"month_used": float, "today_used": float}`` for ``provider``.
+
+    Cached per provider for ``_COST_CACHE_TTL`` seconds.
+    """
+    global _cost_cache
+    now = time.time()
+    cached = _cost_cache.get(provider)
+    if cached and (now - cached[0]) < _COST_CACHE_TTL:
+        return dict(cached[1])
+
+    result = {
+        "month_used": query_provider_cost_window(provider, _month_cutoff()),
+        "today_used": query_provider_cost_window(provider, _today_cutoff()),
+    }
+    _cost_cache[provider] = (now, dict(result))
+    return result
+
+
+def query_global_cost_summary() -> dict[str, float]:
+    """Return ``{"month_used": float, "today_used": float}`` aggregated across all providers."""
+    global _cost_cache
+    now = time.time()
+    cached = _cost_cache.get(_GLOBAL_COST_KEY)
+    if cached and (now - cached[0]) < _COST_CACHE_TTL:
+        return dict(cached[1])
+
+    result = {
+        "month_used": query_total_cost_window(_month_cutoff()),
+        "today_used": query_total_cost_window(_today_cutoff()),
+    }
+    _cost_cache[_GLOBAL_COST_KEY] = (now, dict(result))
+    return result
+
+
+def get_global_monthly_budget() -> float | None:
+    """Return the configured global USD/month budget, or ``None`` if unset."""
+    raw = _get_runtime_value(_GLOBAL_MONTHLY_BUDGET_KEY)
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val < 0:
+        return None
+    return val
+
+
+def set_global_monthly_budget(value: float | int | None) -> bool:
+    """Persist the global USD/month budget. ``None`` deletes the row.
+
+    Returns ``False`` on invalid values (negative or non-numeric).
+    """
+    global _runtime_cache_ts, _cost_cache
+    if value is None:
+        try:
+            with get_conn() as conn:
+                execute(
+                    conn,
+                    "DELETE FROM ai_runtime_config WHERE key = ?",
+                    (_GLOBAL_MONTHLY_BUDGET_KEY,),
+                )
+            _runtime_cache_ts = 0
+            _cost_cache = {}
+            logger.info("Global monthly USD budget cleared")
+            return True
+        except Exception as exc:
+            logger.error("Failed to clear global monthly budget: %s", exc)
+            return False
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if value < 0:
+        return False
+
+    ok = _set_runtime_value(_GLOBAL_MONTHLY_BUDGET_KEY, str(float(value)))
+    if ok:
+        _cost_cache = {}
+        logger.info("Global monthly USD budget updated: $%.4f", float(value))
+    return ok

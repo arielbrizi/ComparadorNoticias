@@ -56,39 +56,70 @@ compatibility.
 - Filter by `_available_providers()` before trying — missing credentials
   skip the provider and fall through to the next.
 
-## Quota guard (proactive RPM/TPM/RPD/TPD)
+## Quota guard (proactive RPM/TPM/RPD/TPD + USD/mes)
 
-To avoid hammering providers with known-bad requests (429s from portals),
-`_run_provider_chain` runs a **local precheck** before every invocation:
+To avoid hammering providers with known-bad requests (429s from portals) and
+to keep paid tiers within budget, `_run_provider_chain` runs a **local
+precheck** before every invocation:
 
 - `app.ai_store.PROVIDER_LIMIT_DEFAULTS` holds hardcoded monthly-researched
-  defaults per `(provider, model)` for RPM/TPM/RPD/TPD. Ollama defaults are
-  all `None` (self-hosted → no external cap).
-- Admin overrides live in the `ai_provider_limits` table and are edited from
-  the "Límites de proveedores IA" card (Administración tab). Setting a field
-  to empty reverts that field to the default; "Restaurar default" deletes the
-  whole row.
+  defaults per `(provider, model)` for RPM/TPM/RPD/TPD plus a `monthly_usd`
+  USD budget (default `None` → unlimited). Ollama defaults are all `None`
+  (self-hosted → no external cap).
+- Admin overrides live in the `ai_provider_limits` table (5 nullable columns:
+  `rpm`, `tpm`, `rpd`, `tpd`, `monthly_usd`) and are edited from the "Límites
+  de proveedores IA" card (Administración tab). Setting a field to empty
+  reverts that field to the default; "Restaurar default" deletes the whole
+  row.
+- A separate **global** USD budget lives in `ai_runtime_config` under
+  `monthly_budget_usd_global` (helpers `get_global_monthly_budget` /
+  `set_global_monthly_budget`, edited from the same UI block above the
+  per-card grid). It's the techo total de la cuenta, sumado sobre todos los
+  proveedores.
 - `get_provider_limit(provider, model)` merges defaults + overrides and is
   cached for 30 s (`_limits_cache`).
 - `query_provider_usage(provider)` counts successful rows in `ai_usage_log`
   inside two rolling windows — 60 s for RPM/TPM and 24 h for RPD/TPD — using
   the `idx_aul_provider_created` index. Cached 10 s per provider
   (`_usage_cache`).
-- `_quota_blocked(provider)` returns the name of the tripped limit
-  (`"rpm"`/`"tpm"`/`"rpd"`/`"tpd"`) or `None`. Always returns `None` for
-  `ollama` and swallows any DB error safely (fail-open).
-- In `_run_provider_chain`, if `_quota_blocked` returns non-`None` **and the
-  provider is not the last in the chain**, the step is skipped and logged as
-  `error_type="QuotaExhausted:<field>"`, `error_phase="precheck"`, zero
-  tokens. The last provider is always attempted as a last-resort fallback so
-  the user still gets an answer.
-- `GET /api/admin/ai-limits` returns the merged `{limits, usage, blocked_by,
-  is_default}` payload consumed by `static/js/admin.js`. `POST` with a null
-  field clears that field (back to default); body with all four nulls is
-  equivalent to reset.
-- When editing quotas, invalidate caches via `invalidate_provider_limits()`
-  and `invalidate_provider_usage_cache()` — both are called automatically
-  from the admin endpoint.
+- `query_provider_cost_summary(provider)` and `query_global_cost_summary()`
+  suman `cost_total` (filtrado por `success=1`) en dos ventanas: el mes
+  calendario en curso (ART) y el día en curso. Cacheados 10 s en
+  `_cost_cache`.
+- `compute_daily_cap(monthly_budget, month_used)` deriva un cap diario
+  auto-ajustado:
+  `daily_cap = max(0, (monthly_budget - month_used) / days_remaining)`. Si
+  gastás menos un día, el siguiente sube; si te pasás, baja. No se persiste,
+  se calcula en cada precheck.
+- `_quota_blocked(provider)` evalúa, en este orden, y devuelve el primer
+  nombre que dispare:
+  1. `monthly_usd_global` — `month_cost_global >= global_budget`
+  2. `daily_usd_global` — `today_cost_global >= compute_daily_cap(global)`
+  3. `monthly_usd` — `month_cost_provider >= pair_budget`
+  4. `daily_usd` — `today_cost_provider >= compute_daily_cap(pair)`
+  5. `rpm` / `tpm` / `rpd` / `tpd` — los cupos del portal del proveedor.
+
+  Devuelve `None` cuando todo está OK y swallow-ea DB errors fail-open.
+- En `_run_provider_chain`, si `_quota_blocked` devuelve non-`None` **y el
+  provider no es el último de la cadena**, el step se saltea y se loggea como
+  `error_type="QuotaExhausted:<field>"`, `error_phase="precheck"`, cero
+  tokens. El último provider siempre se intenta como last-resort fallback.
+- `GET /api/admin/ai-limits` devuelve `{items, defaults, global}`. Cada item
+  incluye `monthly_usd`, `monthly_usd_used`, `daily_usd_cap`, `daily_usd_used`
+  además de los conteos RPM/TPM/RPD/TPD; `blocked_by` puede ahora contener
+  `"monthly_usd"` o `"daily_usd"`. El bloque `global` tiene la misma forma con
+  los nombres `monthly_usd_global` / `daily_usd_global` en `blocked_by`.
+- `POST /api/admin/ai-limits` acepta `monthly_usd` como float ≥0 o `null`.
+- `GET/POST /api/admin/ai-budget-global` administran el presupuesto global
+  (`{"monthly_usd": 50.0}`, `{"monthly_usd": null}` o `{"reset": true}`).
+- Cualquier write invalida `_limits_cache`, `_usage_cache` y `_cost_cache`.
+  Para reset manual, usar `invalidate_provider_limits()` y
+  `invalidate_provider_usage_cache()` — ambos se llaman automáticamente desde
+  los endpoints admin.
+
+> **Nota sobre Ollama y Groq free tier**: como `MODEL_PRICING` los marca como
+> $0/token, los presupuestos USD nunca los bloquean. Si en el futuro alguno
+> deja de ser free, basta actualizar `MODEL_PRICING` y el cap se aplica solo.
 
 ### Monthly research TODO
 

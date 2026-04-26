@@ -761,7 +761,8 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 5-5"/></svg>
                 Límites de proveedores IA
             </h3>
-            <p class="admin-card-desc">Cupos publicados por cada proveedor (RPM/TPM/RPD/TPD). Si un proveedor supera su cupo, el sistema salta al siguiente de la cadena definida más arriba en lugar de devolver error. Vacío = sin límite.</p>
+            <p class="admin-card-desc">Cupos publicados por cada proveedor (RPM/TPM/RPD/TPD) y presupuesto en USD/mes (con cap diario auto-ajustado en base a lo que ya gastaste). Si un proveedor supera su cupo, el sistema salta al siguiente de la cadena en lugar de devolver error. Vacío = sin límite.</p>
+            <div id="ai-budget-global-wrap" style="margin-bottom:1rem"><div class="admin-loading"><div class="spinner"></div></div></div>
             <div id="ai-limits-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
         </div>
     </div>

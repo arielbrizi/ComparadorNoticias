@@ -43,7 +43,9 @@ from app.ai_search import (
     restore_last_good_topics,
 )
 from app.ai_store import (
+    compute_daily_cap,
     count_ai_invocations,
+    get_global_monthly_budget,
     get_ollama_timeout,
     get_provider_config,
     get_provider_limits,
@@ -56,10 +58,13 @@ from app.ai_store import (
     query_ai_cost_summary,
     query_ai_daily_cost,
     query_ai_invocations,
+    query_global_cost_summary,
+    query_provider_cost_summary,
     query_provider_health,
     query_provider_usage,
     query_recent_ai_calls,
     reset_provider_limits,
+    set_global_monthly_budget,
     set_ollama_timeout,
     set_provider_config,
     set_provider_limits,
@@ -1615,6 +1620,7 @@ def _build_provider_limit_row(provider: str, model: str) -> dict:
     """Merge configured limits with live usage for the UI."""
     limits = get_provider_limits().get((provider, model)) or {}
     usage = query_provider_usage(provider)
+    cost = query_provider_cost_summary(provider)
 
     blocked_by: list[str] = []
     for f in _QUOTA_LIMIT_FIELDS:
@@ -1623,6 +1629,16 @@ def _build_provider_limit_row(provider: str, model: str) -> dict:
         if lim is not None and used >= lim:
             blocked_by.append(f)
 
+    monthly_usd = limits.get("monthly_usd")
+    month_used = float(cost.get("month_used", 0.0) or 0.0)
+    today_used = float(cost.get("today_used", 0.0) or 0.0)
+    daily_cap = compute_daily_cap(monthly_usd, month_used) if monthly_usd is not None else None
+
+    if monthly_usd is not None and month_used >= float(monthly_usd):
+        blocked_by.append("monthly_usd")
+    if daily_cap is not None and today_used >= daily_cap:
+        blocked_by.append("daily_usd")
+
     return {
         "provider": provider,
         "model": model,
@@ -1630,11 +1646,38 @@ def _build_provider_limit_row(provider: str, model: str) -> dict:
         "tpm": limits.get("tpm"),
         "rpd": limits.get("rpd"),
         "tpd": limits.get("tpd"),
+        "monthly_usd": monthly_usd,
         "rpm_used": usage.get("rpm_used", 0),
         "tpm_used": usage.get("tpm_used", 0),
         "rpd_used": usage.get("rpd_used", 0),
         "tpd_used": usage.get("tpd_used", 0),
+        "monthly_usd_used": round(month_used, 6),
+        "daily_usd_used": round(today_used, 6),
+        "daily_usd_cap": round(daily_cap, 6) if daily_cap is not None else None,
         "is_default": is_default_provider_limit(provider, model),
+        "blocked_by": blocked_by,
+    }
+
+
+def _build_global_budget_row() -> dict:
+    """Snapshot of the global USD budget + live cost (month/day)."""
+    budget = get_global_monthly_budget()
+    cost = query_global_cost_summary()
+    month_used = float(cost.get("month_used", 0.0) or 0.0)
+    today_used = float(cost.get("today_used", 0.0) or 0.0)
+    daily_cap = compute_daily_cap(budget, month_used) if budget is not None else None
+
+    blocked_by: list[str] = []
+    if budget is not None and month_used >= float(budget):
+        blocked_by.append("monthly_usd_global")
+    if daily_cap is not None and today_used >= daily_cap:
+        blocked_by.append("daily_usd_global")
+
+    return {
+        "monthly_usd": budget,
+        "monthly_usd_used": round(month_used, 6),
+        "daily_usd_used": round(today_used, 6),
+        "daily_usd_cap": round(daily_cap, 6) if daily_cap is not None else None,
         "blocked_by": blocked_by,
     }
 
@@ -1651,6 +1694,7 @@ async def admin_ai_limits_get(_admin: dict = Depends(require_admin)):
         "defaults": {
             f"{p}/{m}": dict(v) for (p, m), v in PROVIDER_LIMIT_DEFAULTS.items()
         },
+        "global": _build_global_budget_row(),
     }
 
 
@@ -1713,13 +1757,82 @@ async def admin_ai_limits_set(
             )
         parsed[field] = raw
 
+    monthly_raw = body.get("monthly_usd", None)
+    monthly_value: float | None
+    if monthly_raw is None:
+        monthly_value = None
+    elif isinstance(monthly_raw, bool) or not isinstance(monthly_raw, (int, float)):
+        return JSONResponse(
+            {"error": "monthly_usd must be a non-negative number or null"},
+            status_code=400,
+        )
+    else:
+        if monthly_raw < 0:
+            return JSONResponse(
+                {"error": "monthly_usd must be a non-negative number or null"},
+                status_code=400,
+            )
+        monthly_value = float(monthly_raw)
+
     ok = set_provider_limits(
         provider, model,
         parsed["rpm"], parsed["tpm"], parsed["rpd"], parsed["tpd"],
+        monthly_usd=monthly_value,
     )
     if not ok:
         return JSONResponse({"error": "Failed to update"}, status_code=500)
     return {"ok": True, "item": _build_provider_limit_row(provider, model)}
+
+
+@app.get("/api/admin/ai-budget-global")
+async def admin_ai_budget_global_get(_admin: dict = Depends(require_admin)):
+    """Return the global USD/month budget + live month/day spend."""
+    return {"global": _build_global_budget_row()}
+
+
+@app.post("/api/admin/ai-budget-global")
+async def admin_ai_budget_global_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Update or reset the global USD/month budget.
+
+    Body shape::
+
+        {"monthly_usd": 50.0}     # set
+        {"monthly_usd": null}     # clear
+        {"reset": true}           # alias for clear
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    if body.get("reset"):
+        ok = set_global_monthly_budget(None)
+        if not ok:
+            return JSONResponse({"error": "Failed to reset"}, status_code=500)
+        return {"ok": True, "reset": True, "global": _build_global_budget_row()}
+
+    raw = body.get("monthly_usd", None)
+    if raw is None:
+        ok = set_global_monthly_budget(None)
+    elif isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return JSONResponse(
+            {"error": "monthly_usd must be a non-negative number or null"},
+            status_code=400,
+        )
+    elif raw < 0:
+        return JSONResponse(
+            {"error": "monthly_usd must be a non-negative number or null"},
+            status_code=400,
+        )
+    else:
+        ok = set_global_monthly_budget(float(raw))
+
+    if not ok:
+        return JSONResponse({"error": "Failed to update"}, status_code=500)
+    return {"ok": True, "global": _build_global_budget_row()}
 
 
 # ── X / Twitter admin ────────────────────────────────────────────────────────

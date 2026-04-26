@@ -21,12 +21,16 @@ from groq import AsyncGroq
 
 from app.ai_store import (
     ART,
+    compute_daily_cap,
+    get_global_monthly_budget,
     get_ollama_timeout,
     get_provider_config,
     get_provider_limit,
     is_in_quiet_hours,
     load_last_good_topics,
     log_ai_usage,
+    query_global_cost_summary,
+    query_provider_cost_summary,
     query_provider_usage,
     save_last_good_topics,
 )
@@ -559,6 +563,10 @@ _QUOTA_FIELD_WINDOW: dict[str, str] = {
     "tpm": "últimos 60s",
     "rpd": "últimas 24h",
     "tpd": "últimas 24h",
+    "monthly_usd": "mes en curso",
+    "daily_usd": "hoy",
+    "monthly_usd_global": "mes en curso (global)",
+    "daily_usd_global": "hoy (global)",
 }
 
 
@@ -567,19 +575,68 @@ def _quota_blocked(provider: str) -> str | None:
 
     Consulta los límites configurados para ``(provider, modelo_actual)`` y los
     compara contra el consumo reciente registrado en ``ai_usage_log``. Ollama
-    es self-hosted y siempre devuelve ``None`` porque no tiene cupo externo.
+    es self-hosted y nunca dispara los límites RPM/TPM/RPD/TPD, pero el
+    presupuesto USD/mes (per-pair o global) sí puede aplicarle si en el
+    futuro su `MODEL_PRICING` deja de ser cero.
+
+    Orden de prioridad:
+
+    1. ``monthly_usd_global`` / ``daily_usd_global`` — techo total de la cuenta.
+    2. ``monthly_usd`` / ``daily_usd`` — techo del par ``(provider, model)``.
+    3. ``rpm`` / ``tpm`` / ``rpd`` / ``tpd`` — cupos del portal del proveedor.
+
     Errores inesperados caen en "no bloquear" — preferimos una llamada real
     fallida a una falsa alarma que deje al usuario sin respuesta.
     """
+    # Presupuesto USD global: aplica antes de mirar el par.
+    try:
+        global_budget = get_global_monthly_budget()
+        if global_budget is not None:
+            global_cost = query_global_cost_summary()
+            if global_cost.get("month_used", 0.0) >= global_budget:
+                return "monthly_usd_global"
+            global_daily_cap = compute_daily_cap(global_budget, global_cost.get("month_used", 0.0))
+            if global_daily_cap is not None and global_cost.get("today_used", 0.0) >= global_daily_cap:
+                return "daily_usd_global"
+    except Exception as exc:
+        logger.warning("Global budget precheck failed: %s", exc)
+
     if provider == "ollama":
-        return None
+        # Las quotas RPM/TPM/RPD/TPD no aplican a Ollama. El budget USD ya se
+        # evaluó arriba como global; per-pair sólo lo evaluamos si el modelo
+        # tiene pricing > 0 en el futuro — hoy es 0 y query_provider_cost
+        # devuelve 0, así que no bloquea.
+        pass
+
     model = _PROVIDER_MODELS.get(provider)
     if not model:
         return None
     try:
         limits = get_provider_limit(provider, model)
-        if not any(limits.get(f) is not None for f in ("rpm", "tpm", "rpd", "tpd")):
-            return None
+    except Exception as exc:
+        logger.warning("Quota precheck failed for %s: %s", provider, exc)
+        return None
+
+    # Presupuesto USD per-pair.
+    pair_budget = limits.get("monthly_usd")
+    if pair_budget is not None:
+        try:
+            pair_cost = query_provider_cost_summary(provider)
+            if pair_cost.get("month_used", 0.0) >= float(pair_budget):
+                return "monthly_usd"
+            pair_daily_cap = compute_daily_cap(float(pair_budget), pair_cost.get("month_used", 0.0))
+            if pair_daily_cap is not None and pair_cost.get("today_used", 0.0) >= pair_daily_cap:
+                return "daily_usd"
+        except Exception as exc:
+            logger.warning("Per-pair budget precheck failed for %s: %s", provider, exc)
+
+    if provider == "ollama":
+        # Ollama no tiene cupos externos RPM/TPM/RPD/TPD.
+        return None
+
+    if not any(limits.get(f) is not None for f in ("rpm", "tpm", "rpd", "tpd")):
+        return None
+    try:
         usage = query_provider_usage(provider)
     except Exception as exc:
         logger.warning("Quota precheck failed for %s: %s", provider, exc)

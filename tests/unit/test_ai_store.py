@@ -12,7 +12,9 @@ from app.ai_store import (
     VALID_EVENT_TYPES,
     VALID_PROVIDERS,
     compute_cost,
+    compute_daily_cap,
     count_ai_invocations,
+    get_global_monthly_budget,
     get_ollama_timeout,
     get_provider_config,
     get_provider_limit,
@@ -27,8 +29,11 @@ from app.ai_store import (
     query_ai_cost_summary,
     query_ai_daily_cost,
     query_ai_invocations,
+    query_global_cost_summary,
+    query_provider_cost_summary,
     query_provider_usage,
     reset_provider_limits,
+    set_global_monthly_budget,
     set_ollama_timeout,
     set_provider_config,
     set_provider_limits,
@@ -46,6 +51,7 @@ def _reset_cache(monkeypatch):
     monkeypatch.setattr("app.ai_store._limits_cache", {})
     monkeypatch.setattr("app.ai_store._limits_cache_ts", 0)
     monkeypatch.setattr("app.ai_store._usage_cache", {})
+    monkeypatch.setattr("app.ai_store._cost_cache", {})
 
 
 class TestComputeCost:
@@ -617,7 +623,10 @@ class TestProviderLimits:
         ok = set_provider_limits("gemini", "gemini-3-flash-preview", 5, None, 100, None)
         assert ok is True
         lim = get_provider_limit("gemini", "gemini-3-flash-preview")
-        assert lim == {"rpm": 5, "tpm": None, "rpd": 100, "tpd": None}
+        assert lim == {
+            "rpm": 5, "tpm": None, "rpd": 100, "tpd": None,
+            "monthly_usd": None,
+        }
 
     def test_reset_restores_defaults(self):
         set_provider_limits("gemini", "gemini-3-flash-preview", 1, 1, 1, 1)
@@ -648,17 +657,26 @@ class TestProviderLimits:
         ok = set_provider_limits("gemini", "m1", None, None, None, None)
         assert ok is True
         lim = get_provider_limit("gemini", "m1")
-        assert lim == {"rpm": None, "tpm": None, "rpd": None, "tpd": None}
+        assert lim == {
+            "rpm": None, "tpm": None, "rpd": None, "tpd": None,
+            "monthly_usd": None,
+        }
 
     def test_update_overwrites_previous_row(self):
         set_provider_limits("gemini", "gemini-3-flash-preview", 1, 2, 3, 4)
         set_provider_limits("gemini", "gemini-3-flash-preview", 10, 20, 30, 40)
         lim = get_provider_limit("gemini", "gemini-3-flash-preview")
-        assert lim == {"rpm": 10, "tpm": 20, "rpd": 30, "tpd": 40}
+        assert lim == {
+            "rpm": 10, "tpm": 20, "rpd": 30, "tpd": 40,
+            "monthly_usd": None,
+        }
 
     def test_unknown_pair_returns_all_none(self):
         lim = get_provider_limit("gemini", "totally-fake-model")
-        assert lim == {"rpm": None, "tpm": None, "rpd": None, "tpd": None}
+        assert lim == {
+            "rpm": None, "tpm": None, "rpd": None, "tpd": None,
+            "monthly_usd": None,
+        }
 
     def test_set_invalidates_cache(self):
         # Prime the cache with defaults.
@@ -770,3 +788,243 @@ class TestProviderUsage:
         invalidate_provider_usage_cache("gemini")
         refreshed = query_provider_usage("gemini")
         assert refreshed["rpm_used"] > first["rpm_used"]
+
+
+class TestComputeDailyCap:
+    """Pure-function tests for the dynamic daily cap derivation."""
+
+    def _fake_now(self, day, last_day=30):
+        from datetime import datetime, timedelta, timezone
+        ART = timezone(timedelta(hours=-3))
+        return datetime(2026, 4, day, 12, 0, tzinfo=ART)
+
+    def test_returns_none_when_budget_unset(self):
+        assert compute_daily_cap(None, 0.0, self._fake_now(1)) is None
+
+    def test_returns_none_for_negative_budget(self):
+        assert compute_daily_cap(-1.0, 0.0, self._fake_now(1)) is None
+
+    def test_returns_zero_when_budget_already_consumed(self):
+        # Mes en curso ya gastado todo → cap 0 para hoy.
+        cap = compute_daily_cap(50.0, 50.0, self._fake_now(15))
+        assert cap == 0.0
+
+    def test_returns_zero_when_overspent(self):
+        cap = compute_daily_cap(50.0, 70.0, self._fake_now(15))
+        assert cap == 0.0
+
+    def test_first_day_of_month_30_day(self):
+        # 1 abril (30 días) → 30 días incluyendo hoy → cap = 30/30 = 1.
+        cap = compute_daily_cap(30.0, 0.0, self._fake_now(1, last_day=30))
+        assert cap == pytest.approx(1.0)
+
+    def test_mid_month_with_savings(self):
+        # 15 abril, gastado 5/30 → restan 25 USD para 16 días (15..30) = 1.5625.
+        cap = compute_daily_cap(30.0, 5.0, self._fake_now(15))
+        assert cap == pytest.approx(25.0 / 16)
+
+    def test_last_day_of_month(self):
+        # 30 abril, gastado 10/30 → 1 día restante → cap = 20.
+        cap = compute_daily_cap(30.0, 10.0, self._fake_now(30))
+        assert cap == pytest.approx(20.0)
+
+    def test_december_wraps_to_january(self):
+        # 25 dic → últimos 7 días (25..31).
+        from datetime import datetime, timedelta, timezone
+        ART = timezone(timedelta(hours=-3))
+        now = datetime(2026, 12, 25, 12, 0, tzinfo=ART)
+        cap = compute_daily_cap(70.0, 0.0, now)
+        assert cap == pytest.approx(10.0)
+
+
+class TestGlobalMonthlyBudget:
+    """The global USD/month budget is stored in ai_runtime_config."""
+
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def test_default_is_none(self):
+        assert get_global_monthly_budget() is None
+
+    def test_set_and_get_roundtrip(self):
+        assert set_global_monthly_budget(50.0) is True
+        assert get_global_monthly_budget() == pytest.approx(50.0)
+
+    def test_set_int_accepted(self):
+        assert set_global_monthly_budget(100) is True
+        assert get_global_monthly_budget() == pytest.approx(100.0)
+
+    def test_set_zero_is_valid(self):
+        assert set_global_monthly_budget(0) is True
+        assert get_global_monthly_budget() == 0.0
+
+    def test_overwrite_previous_value(self):
+        set_global_monthly_budget(20.0)
+        set_global_monthly_budget(75.0)
+        assert get_global_monthly_budget() == pytest.approx(75.0)
+
+    def test_set_none_clears(self):
+        set_global_monthly_budget(50.0)
+        assert set_global_monthly_budget(None) is True
+        assert get_global_monthly_budget() is None
+
+    def test_rejects_negative(self):
+        assert set_global_monthly_budget(-1.0) is False
+        assert get_global_monthly_budget() is None
+
+    def test_rejects_bool(self):
+        assert set_global_monthly_budget(True) is False
+        assert get_global_monthly_budget() is None
+
+    def test_rejects_non_numeric(self):
+        assert set_global_monthly_budget("50") is False  # type: ignore[arg-type]
+
+
+class TestProviderCostSummary:
+    """Per-provider month/day cost aggregation, used by the budget guard."""
+
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def test_empty_returns_zero(self):
+        summary = query_provider_cost_summary("gemini")
+        assert summary == {"month_used": 0.0, "today_used": 0.0}
+
+    def test_counts_only_successful_calls(self):
+        # 1M input + 1M output @ Gemini pricing = $0.50 + $3.00 = $3.50
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=1_000_000, output_tokens=1_000_000, latency_ms=10,
+        )
+        # Failed call: should NOT count toward the budget.
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=1_000_000, output_tokens=1_000_000, latency_ms=10,
+            success=False, error_message="429",
+        )
+        invalidate_provider_usage_cache()
+        summary = query_provider_cost_summary("gemini")
+        assert summary["month_used"] == pytest.approx(3.50, rel=1e-3)
+        assert summary["today_used"] == pytest.approx(3.50, rel=1e-3)
+
+    def test_isolated_per_provider(self):
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=1_000_000, output_tokens=0, latency_ms=10,
+        )
+        log_ai_usage(
+            event_type="topics", provider="groq",
+            model="llama-3.3-70b-versatile",
+            input_tokens=10_000_000, output_tokens=10_000_000, latency_ms=10,
+        )
+        invalidate_provider_usage_cache()
+        gemini = query_provider_cost_summary("gemini")
+        groq = query_provider_cost_summary("groq")
+        assert gemini["month_used"] == pytest.approx(0.50, rel=1e-3)
+        # Groq pricing is 0 in MODEL_PRICING.
+        assert groq["month_used"] == 0.0
+
+
+class TestGlobalCostSummary:
+    """Aggregated month/day spend across all providers."""
+
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def test_empty_returns_zero(self):
+        summary = query_global_cost_summary()
+        assert summary == {"month_used": 0.0, "today_used": 0.0}
+
+    def test_sums_across_providers(self):
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=1_000_000, output_tokens=0, latency_ms=10,
+        )
+        log_ai_usage(
+            event_type="search", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=0, output_tokens=1_000_000, latency_ms=10,
+        )
+        log_ai_usage(
+            event_type="topics", provider="groq",
+            model="llama-3.3-70b-versatile",
+            input_tokens=1_000_000, output_tokens=1_000_000, latency_ms=10,
+        )
+        invalidate_provider_usage_cache()
+        summary = query_global_cost_summary()
+        assert summary["month_used"] == pytest.approx(0.50 + 3.00, rel=1e-3)
+        assert summary["today_used"] == pytest.approx(0.50 + 3.00, rel=1e-3)
+
+
+class TestProviderLimitsBudget:
+    """Round-trip the new monthly_usd column through set/get/reset."""
+
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def test_default_monthly_usd_is_none(self):
+        lim = get_provider_limit("gemini", "gemini-3-flash-preview")
+        assert lim["monthly_usd"] is None
+
+    def test_set_and_get_budget(self):
+        ok = set_provider_limits(
+            "gemini", "gemini-3-flash-preview", None, None, None, None,
+            monthly_usd=25.0,
+        )
+        assert ok is True
+        lim = get_provider_limit("gemini", "gemini-3-flash-preview")
+        assert lim["monthly_usd"] == pytest.approx(25.0)
+
+    def test_set_budget_zero_valid(self):
+        ok = set_provider_limits(
+            "gemini", "m1", None, None, None, None, monthly_usd=0,
+        )
+        assert ok is True
+        lim = get_provider_limit("gemini", "m1")
+        assert lim["monthly_usd"] == 0.0
+
+    def test_set_rejects_negative_budget(self):
+        ok = set_provider_limits(
+            "gemini", "m1", None, None, None, None, monthly_usd=-1.0,
+        )
+        assert ok is False
+
+    def test_set_rejects_bool_budget(self):
+        ok = set_provider_limits(
+            "gemini", "m1", None, None, None, None, monthly_usd=True,  # type: ignore[arg-type]
+        )
+        assert ok is False
+
+    def test_set_accepts_int_budget(self):
+        ok = set_provider_limits(
+            "gemini", "m1", None, None, None, None, monthly_usd=10,
+        )
+        assert ok is True
+        lim = get_provider_limit("gemini", "m1")
+        assert lim["monthly_usd"] == pytest.approx(10.0)
+
+    def test_reset_clears_budget(self):
+        set_provider_limits(
+            "gemini", "gemini-3-flash-preview", 1, 1, 1, 1, monthly_usd=42.0,
+        )
+        reset_provider_limits("gemini", "gemini-3-flash-preview")
+        lim = get_provider_limit("gemini", "gemini-3-flash-preview")
+        assert lim["monthly_usd"] is None
+
+    def test_update_only_budget_keeps_other_fields(self):
+        set_provider_limits("gemini", "m1", 5, 100, 50, None)
+        set_provider_limits("gemini", "m1", 5, 100, 50, None, monthly_usd=20.0)
+        lim = get_provider_limit("gemini", "m1")
+        assert lim["rpm"] == 5
+        assert lim["tpm"] == 100
+        assert lim["rpd"] == 50
+        assert lim["tpd"] is None
+        assert lim["monthly_usd"] == pytest.approx(20.0)

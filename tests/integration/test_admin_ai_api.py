@@ -10,11 +10,15 @@ from httpx import ASGITransport, AsyncClient
 from jose import jwt
 
 from app.ai_store import (
+    get_global_monthly_budget,
+    get_provider_limit,
     get_scheduler_config,
     init_ai_tables,
     load_last_good_topics,
     log_ai_usage,
     save_last_good_topics,
+    set_global_monthly_budget,
+    set_provider_limits,
     set_scheduler_interval,
     SCHEDULER_DEFAULTS,
     VALID_SCHEDULER_INTERVALS,
@@ -43,6 +47,17 @@ async def client(tmp_path, monkeypatch):
     init_users_table()
     init_tracking_table()
     init_ai_tables()
+
+    # Reset module-level caches so a fresh ``temp_db`` per test isn't shadowed
+    # by data from previous tests still living in process memory.
+    monkeypatch.setattr("app.ai_store._limits_cache", {})
+    monkeypatch.setattr("app.ai_store._limits_cache_ts", 0)
+    monkeypatch.setattr("app.ai_store._usage_cache", {})
+    monkeypatch.setattr("app.ai_store._cost_cache", {})
+    monkeypatch.setattr("app.ai_store._runtime_cache", {})
+    monkeypatch.setattr("app.ai_store._runtime_cache_ts", 0)
+    monkeypatch.setattr("app.ai_store._config_cache", {})
+    monkeypatch.setattr("app.ai_store._config_cache_ts", 0)
 
     from app import main
 
@@ -496,3 +511,216 @@ class TestSchedulerConfigEndpoint:
 
         resp = await client.get("/api/admin/scheduler-config", cookies={"vs_token": token})
         assert resp.json()["config"]["prefetch_topics"] == 120
+
+
+class TestAILimitsBudget:
+    """The /api/admin/ai-limits endpoint exposes the monthly_usd field per pair
+    plus the global budget block; both are settable via POST."""
+
+    async def test_get_includes_monthly_usd_and_global(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.get("/api/admin/ai-limits", cookies={"vs_token": token})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "items" in data
+        assert "global" in data
+        gemini = next(i for i in data["items"] if i["provider"] == "gemini")
+        assert "monthly_usd" in gemini
+        assert "monthly_usd_used" in gemini
+        assert "daily_usd_used" in gemini
+        assert "daily_usd_cap" in gemini
+        # Defaults: no presupuesto.
+        assert gemini["monthly_usd"] is None
+        assert gemini["daily_usd_cap"] is None
+        assert data["global"]["monthly_usd"] is None
+        assert data["global"]["daily_usd_cap"] is None
+
+    async def test_post_sets_monthly_usd(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-limits",
+            json={
+                "provider": "gemini",
+                "model": "gemini-3-flash-preview",
+                "rpm": None, "tpm": None, "rpd": None, "tpd": None,
+                "monthly_usd": 25.5,
+            },
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["item"]["monthly_usd"] == 25.5
+        assert body["item"]["daily_usd_cap"] is not None  # cap derivado activo
+        # Persistencia a través de get_provider_limit.
+        lim = get_provider_limit("gemini", "gemini-3-flash-preview")
+        assert lim["monthly_usd"] == 25.5
+
+    async def test_post_clears_monthly_usd_with_null(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        # Primero seteamos algo.
+        set_provider_limits(
+            "gemini", "gemini-3-flash-preview", None, None, None, None,
+            monthly_usd=42.0,
+        )
+        resp = await client.post(
+            "/api/admin/ai-limits",
+            json={
+                "provider": "gemini",
+                "model": "gemini-3-flash-preview",
+                "rpm": None, "tpm": None, "rpd": None, "tpd": None,
+                "monthly_usd": None,
+            },
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        lim = get_provider_limit("gemini", "gemini-3-flash-preview")
+        assert lim["monthly_usd"] is None
+
+    async def test_post_rejects_negative_budget(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-limits",
+            json={
+                "provider": "gemini",
+                "model": "gemini-3-flash-preview",
+                "rpm": None, "tpm": None, "rpd": None, "tpd": None,
+                "monthly_usd": -5,
+            },
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+    async def test_blocked_by_includes_daily_usd_when_overspent(
+        self, client, monkeypatch,
+    ):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        # Presupuesto chiquito y un consumo que ya lo agotó.
+        set_provider_limits(
+            "gemini", "gemini-3-flash-preview", None, None, None, None,
+            monthly_usd=0.01,
+        )
+        # 1M input + 1M output @ Gemini = $3.50, mucho mayor a $0.01.
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=1_000_000, output_tokens=1_000_000, latency_ms=10,
+        )
+        # Cache de costo: el helper se invalida con el set_provider_limits, pero
+        # log_ai_usage no toca el cache. Forzamos invalidación pre-test.
+        from app.ai_store import invalidate_provider_usage_cache
+        invalidate_provider_usage_cache()
+
+        resp = await client.get("/api/admin/ai-limits", cookies={"vs_token": token})
+        data = resp.json()
+        gemini = next(i for i in data["items"] if i["provider"] == "gemini")
+        assert "monthly_usd" in gemini["blocked_by"]
+        # daily_usd también dispara porque cap deriva en 0 al agotarse el mes.
+        assert "daily_usd" in gemini["blocked_by"]
+
+
+class TestAIBudgetGlobalEndpoint:
+    async def test_get_requires_admin(self, client):
+        resp = await client.get("/api/admin/ai-budget-global")
+        assert resp.status_code == 403
+
+    async def test_post_requires_admin(self, client):
+        resp = await client.post(
+            "/api/admin/ai-budget-global", json={"monthly_usd": 50.0},
+        )
+        assert resp.status_code == 403
+
+    async def test_get_returns_global_block(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.get(
+            "/api/admin/ai-budget-global", cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "global" in data
+        assert data["global"]["monthly_usd"] is None
+        assert data["global"]["monthly_usd_used"] == 0.0
+
+    async def test_set_and_get_roundtrip(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-budget-global", json={"monthly_usd": 100.0},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["global"]["monthly_usd"] == 100.0
+        assert body["global"]["daily_usd_cap"] is not None
+
+        assert get_global_monthly_budget() == 100.0
+
+    async def test_reset_clears_budget(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        set_global_monthly_budget(75.0)
+        resp = await client.post(
+            "/api/admin/ai-budget-global", json={"reset": True},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["global"]["monthly_usd"] is None
+        assert get_global_monthly_budget() is None
+
+    async def test_null_clears_budget(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        set_global_monthly_budget(75.0)
+        resp = await client.post(
+            "/api/admin/ai-budget-global", json={"monthly_usd": None},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        assert get_global_monthly_budget() is None
+
+    async def test_rejects_negative(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-budget-global", json={"monthly_usd": -1},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+    async def test_rejects_non_numeric(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-budget-global", json={"monthly_usd": "fifty"},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400

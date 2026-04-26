@@ -1135,6 +1135,10 @@ const _limitFieldLabels = {
     tpm: "TPM",
     rpd: "RPD",
     tpd: "TPD",
+    monthly_usd: "USD/mes",
+    daily_usd: "USD/día",
+    monthly_usd_global: "USD/mes (global)",
+    daily_usd_global: "USD/día (global)",
 };
 
 const _limitFieldDescs = {
@@ -1151,6 +1155,17 @@ function _fmtLimitNum(n) {
     return String(n);
 }
 
+function _fmtUsd(n) {
+    if (n === null || n === undefined) return "—";
+    const num = Number(n);
+    if (!Number.isFinite(num)) return "—";
+    if (num >= 1000) return "$" + num.toFixed(0);
+    if (num >= 10) return "$" + num.toFixed(2);
+    if (num >= 0.01) return "$" + num.toFixed(3);
+    if (num === 0) return "$0";
+    return "$" + num.toFixed(4);
+}
+
 async function loadAILimits() {
     const container = $("#ai-limits-wrap");
     if (!container) return;
@@ -1160,10 +1175,148 @@ async function loadAILimits() {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         renderAILimits(data.items || []);
+        renderAIGlobalBudget(data.global || null);
     } catch (err) {
         console.error("AI limits load failed:", err);
         container.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error al cargar límites</div>`;
     }
+}
+
+function _renderUsdProgress(used, cap, blocked) {
+    const pct = cap && cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : 0;
+    const barColor = blocked ? "#dc2626" : pct >= 80 ? "#ea580c" : "#0d9488";
+    const barWidth = cap && cap > 0 ? pct : 0;
+    return `<div style="height:4px;border-radius:2px;background:var(--border);overflow:hidden">
+        <div style="height:100%;width:${barWidth}%;background:${barColor};transition:width .3s"></div>
+    </div>`;
+}
+
+function renderAIGlobalBudget(g) {
+    const container = $("#ai-budget-global-wrap");
+    if (!container) return;
+    if (!g) {
+        container.innerHTML = "";
+        return;
+    }
+    const monthly = g.monthly_usd;
+    const monthUsed = Number(g.monthly_usd_used || 0);
+    const todayUsed = Number(g.daily_usd_used || 0);
+    const dailyCap = g.daily_usd_cap;
+    const blockedMonth = (g.blocked_by || []).includes("monthly_usd_global");
+    const blockedDay = (g.blocked_by || []).includes("daily_usd_global");
+    const val = monthly === null || monthly === undefined ? "" : monthly;
+
+    const blockedBadge = (g.blocked_by || []).length
+        ? `<span style="background:#fee2e2;color:#991b1b;padding:0.15rem 0.45rem;border-radius:999px;font-size:0.62rem;font-weight:600">
+             Bloqueado: ${(g.blocked_by || []).map(f => _limitFieldLabels[f] || f).join(", ")}
+           </span>`
+        : "";
+
+    container.innerHTML = `
+        <div class="admin-eng-card" style="flex-direction:column;align-items:stretch;gap:0.5rem">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:0.4rem;flex-wrap:wrap">
+                <div style="display:flex;flex-direction:column;gap:0.1rem">
+                    <div style="font-size:0.82rem;font-weight:600;color:var(--text)">Presupuesto USD/mes (global)</div>
+                    <div style="font-size:0.65rem;color:var(--text-dim)">Techo total para todos los proveedores juntos. El cap diario se ajusta solo según lo gastado.</div>
+                </div>
+                ${blockedBadge}
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.6rem">
+                <div style="display:flex;flex-direction:column;gap:0.25rem">
+                    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:0.4rem">
+                        <label style="font-size:0.7rem;font-weight:600;color:var(--text)">USD/mes</label>
+                        <span style="font-size:0.62rem;color:var(--text-dim)">${escHtml(_fmtUsd(monthUsed))}${monthly !== null && monthly !== undefined ? " / " + escHtml(_fmtUsd(monthly)) : ""}</span>
+                    </div>
+                    <input type="number" min="0" step="0.01" id="ai-budget-global-input"
+                        value="${val}" placeholder="sin límite"
+                        style="width:100%;padding:0.3rem 0.4rem;font-size:0.75rem">
+                    ${_renderUsdProgress(monthUsed, monthly, blockedMonth)}
+                </div>
+                <div style="display:flex;flex-direction:column;gap:0.25rem">
+                    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:0.4rem">
+                        <label style="font-size:0.7rem;font-weight:600;color:var(--text)">USD/día (auto)</label>
+                        <span style="font-size:0.62rem;color:var(--text-dim)">${escHtml(_fmtUsd(todayUsed))}${dailyCap !== null && dailyCap !== undefined ? " / " + escHtml(_fmtUsd(dailyCap)) : ""}</span>
+                    </div>
+                    <div style="padding:0.3rem 0.4rem;font-size:0.7rem;color:var(--text-dim);background:var(--border);border-radius:4px">
+                        ${dailyCap === null || dailyCap === undefined ? "Sin presupuesto" : "Hoy: " + escHtml(_fmtUsd(dailyCap))}
+                    </div>
+                    ${_renderUsdProgress(todayUsed, dailyCap, blockedDay)}
+                </div>
+            </div>
+            <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+                <button id="ai-budget-global-save" class="ai-config-select" style="cursor:pointer;padding:0.35rem 0.8rem">Guardar</button>
+                <button id="ai-budget-global-reset" style="cursor:pointer;padding:0.35rem 0.8rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);font-size:0.72rem">
+                    Quitar presupuesto
+                </button>
+                <div id="ai-budget-global-status" style="font-size:0.65rem;color:var(--text-dim);flex:1;min-width:100px"></div>
+            </div>
+        </div>`;
+
+    const saveBtn = $("#ai-budget-global-save");
+    const resetBtn = $("#ai-budget-global-reset");
+    const status = $("#ai-budget-global-status");
+
+    saveBtn?.addEventListener("click", async () => {
+        const input = $("#ai-budget-global-input");
+        const raw = (input?.value ?? "").trim();
+        let payload;
+        if (raw === "") {
+            payload = { monthly_usd: null };
+        } else {
+            const n = Number(raw);
+            if (!Number.isFinite(n) || n < 0) {
+                status.textContent = "USD/mes inválido";
+                status.style.color = "#ea580c";
+                return;
+            }
+            payload = { monthly_usd: n };
+        }
+        status.textContent = "Guardando...";
+        status.style.color = "var(--text-dim)";
+        try {
+            const resp = await fetch("/api/admin/ai-budget-global", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (resp.ok) {
+                status.textContent = "Guardado";
+                status.style.color = "#0d9488";
+                setTimeout(loadAILimits, 800);
+            } else {
+                const err = await resp.json().catch(() => ({}));
+                status.textContent = err.error || "Error";
+                status.style.color = "#ea580c";
+            }
+        } catch (err) {
+            status.textContent = "Error de red";
+            status.style.color = "#ea580c";
+        }
+    });
+
+    resetBtn?.addEventListener("click", async () => {
+        status.textContent = "Quitando...";
+        status.style.color = "var(--text-dim)";
+        try {
+            const resp = await fetch("/api/admin/ai-budget-global", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ reset: true }),
+            });
+            if (resp.ok) {
+                status.textContent = "Sin presupuesto";
+                status.style.color = "#0d9488";
+                setTimeout(loadAILimits, 800);
+            } else {
+                const err = await resp.json().catch(() => ({}));
+                status.textContent = err.error || "Error";
+                status.style.color = "#ea580c";
+            }
+        } catch (err) {
+            status.textContent = "Error de red";
+            status.style.color = "#ea580c";
+        }
+    });
 }
 
 function _renderLimitField(item, field) {
@@ -1191,6 +1344,48 @@ function _renderLimitField(item, field) {
                 style="width:100%;padding:0.3rem 0.4rem;font-size:0.75rem">
             <div style="height:4px;border-radius:2px;background:var(--border);overflow:hidden">
                 <div style="height:100%;width:${barWidth}%;background:${barColor};transition:width .3s"></div>
+            </div>
+        </div>`;
+}
+
+function _renderBudgetField(item) {
+    const monthly = item.monthly_usd;
+    const monthUsed = Number(item.monthly_usd_used || 0);
+    const todayUsed = Number(item.daily_usd_used || 0);
+    const dailyCap = item.daily_usd_cap;
+    const blockedMonth = (item.blocked_by || []).includes("monthly_usd");
+    const blockedDay = (item.blocked_by || []).includes("daily_usd");
+    const val = monthly === null || monthly === undefined ? "" : monthly;
+
+    return `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.6rem">
+            <div style="display:flex;flex-direction:column;gap:0.25rem">
+                <div style="display:flex;justify-content:space-between;align-items:baseline;gap:0.4rem">
+                    <label style="font-size:0.7rem;font-weight:600;color:var(--text)"
+                           title="Presupuesto en USD para todo el mes calendario">USD/mes</label>
+                    <span style="font-size:0.62rem;color:var(--text-dim)">
+                        ${escHtml(_fmtUsd(monthUsed))}${monthly !== null && monthly !== undefined ? " / " + escHtml(_fmtUsd(monthly)) : ""}
+                    </span>
+                </div>
+                <input type="number" min="0" step="0.01"
+                    class="ai-limit-budget-input" data-provider="${escHtml(item.provider)}"
+                    data-model="${escHtml(item.model)}"
+                    value="${val}" placeholder="sin límite"
+                    style="width:100%;padding:0.3rem 0.4rem;font-size:0.75rem">
+                ${_renderUsdProgress(monthUsed, monthly, blockedMonth)}
+            </div>
+            <div style="display:flex;flex-direction:column;gap:0.25rem">
+                <div style="display:flex;justify-content:space-between;align-items:baseline;gap:0.4rem">
+                    <label style="font-size:0.7rem;font-weight:600;color:var(--text)"
+                           title="Cap diario derivado del presupuesto mensual restante / días que faltan">USD/día (auto)</label>
+                    <span style="font-size:0.62rem;color:var(--text-dim)">
+                        ${escHtml(_fmtUsd(todayUsed))}${dailyCap !== null && dailyCap !== undefined ? " / " + escHtml(_fmtUsd(dailyCap)) : ""}
+                    </span>
+                </div>
+                <div style="padding:0.3rem 0.4rem;font-size:0.7rem;color:var(--text-dim);background:var(--border);border-radius:4px;text-align:center">
+                    ${dailyCap === null || dailyCap === undefined ? "Sin presupuesto" : "Hoy: " + escHtml(_fmtUsd(dailyCap))}
+                </div>
+                ${_renderUsdProgress(todayUsed, dailyCap, blockedDay)}
             </div>
         </div>`;
 }
@@ -1238,6 +1433,7 @@ function renderAILimits(items) {
                     ${_renderLimitField(item, "rpd")}
                     ${_renderLimitField(item, "tpd")}
                 </div>
+                ${_renderBudgetField(item)}
                 <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
                     <button class="ai-limit-save ai-config-select" data-provider="${escHtml(item.provider)}"
                             data-model="${escHtml(item.model)}"
@@ -1278,6 +1474,22 @@ function renderAILimits(items) {
                     }
                     payload[field] = n;
                 }
+            }
+
+            const budgetInput = document.querySelector(
+                `.ai-limit-budget-input[data-provider="${provider}"][data-model="${model}"]`
+            );
+            const budgetRaw = (budgetInput?.value ?? "").trim();
+            if (budgetRaw === "") {
+                payload.monthly_usd = null;
+            } else {
+                const n = Number(budgetRaw);
+                if (!Number.isFinite(n) || n < 0) {
+                    status.textContent = "USD/mes inválido";
+                    status.style.color = "#ea580c";
+                    return;
+                }
+                payload.monthly_usd = n;
             }
 
             status.textContent = "Guardando...";

@@ -385,6 +385,40 @@ def _query_total_at_or_after(since_iso: str) -> tuple[str | None, float | None]:
     return ts, (None if val is None else float(val))
 
 
+def _query_last_total_before(before_iso: str) -> tuple[str | None, float | None]:
+    """Return ``(fetched_at, total_usd_month)`` of the **latest** aggregate
+    snapshot strictly before ``before_iso`` (or ``(None, None)`` if missing).
+
+    Used as a fallback baseline for ``today_usd`` when the project has
+    snapshots from previous days but only one (or none) from today: we
+    prefer to compute ``today_usd = latest_total - last_total_before_today``
+    instead of returning ``None`` and forcing the user to take two
+    snapshots within the same day before any spend can be attributed.
+    """
+    try:
+        with get_conn() as conn:
+            row = query(
+                conn,
+                """
+                SELECT fetched_at, estimated_usd_month
+                  FROM infra_cost_snapshot
+                 WHERE fetched_at < ?
+                   AND raw_json LIKE '%"_aggregate":%true%'
+                 ORDER BY fetched_at DESC
+                 LIMIT 1
+                """,
+                (before_iso,),
+            ).fetchone()
+    except Exception as exc:
+        logger.warning("infra previous-day spend lookup failed: %s", exc)
+        return None, None
+    if row is None:
+        return None, None
+    ts = row["fetched_at"]
+    val = row["estimated_usd_month"]
+    return ts, (None if val is None else float(val))
+
+
 def _query_latest_total() -> tuple[str | None, float | None]:
     """Return ``(fetched_at, total_usd_month)`` of the latest aggregate row."""
     try:
@@ -414,10 +448,15 @@ def get_current_spend() -> dict[str, float | None | str]:
 
     - ``month_usd`` = ``estimated_usd_month`` of the latest snapshot
       (Railway already reports cumulative spend for the billing period).
-    - ``today_usd`` = ``month_usd_now − month_usd_at_start_of_day``. If
-      there's no snapshot from before today, returns ``None`` for
-      ``today_usd`` so the caller can show "—" and the guard stays
-      permissive (no enforcement when we lack baseline data).
+    - ``today_usd`` = ``month_usd_now − baseline``, donde la baseline se
+      elige así, de mejor a peor:
+          1. último snapshot **antes** del comienzo del día actual (típico
+             del cron horario de ayer); permite computar gasto diario con
+             solo 1 snapshot nuevo de hoy;
+          2. primer snapshot del día actual, si no hay historia previa
+             y ya hay al menos 2 snapshots dentro del día;
+          3. ``None`` si solo hay 1 snapshot total y nada anterior.
+      Es ``None`` cuando no podemos garantizar el delta.
     - ``fetched_at`` = timestamp of the latest snapshot used for ``month_usd``.
 
     Cached for ``_SPEND_CACHE_TTL`` seconds (the guard hits this on every
@@ -430,20 +469,27 @@ def get_current_spend() -> dict[str, float | None | str]:
 
     latest_ts, latest_total = _query_latest_total()
     today_start = _today_start_iso()
-    base_ts, base_total = _query_total_at_or_after(today_start)
 
     today_usd: float | None
     if latest_total is None:
         today_usd = None
-    elif base_ts is None or base_total is None:
-        # No hay snapshot anterior al día actual -> no podemos calcular el delta.
-        today_usd = None
-    elif base_ts == latest_ts:
-        # Único snapshot del día = arrancó hoy con ese valor; aún no podemos
-        # imputar gasto al día porque no sabemos cuánto traía de antes.
-        today_usd = None
     else:
-        today_usd = max(0.0, float(latest_total) - float(base_total))
+        # Preferimos el último snapshot ANTES de hoy (mejor baseline:
+        # representa lo gastado al cierre de ayer).
+        prev_ts, prev_total = _query_last_total_before(today_start)
+        if prev_ts is not None and prev_total is not None:
+            today_usd = max(0.0, float(latest_total) - float(prev_total))
+        else:
+            # No hay historia previa al día -> caemos a usar el primer
+            # snapshot de hoy como baseline. Esto requiere 2 snapshots
+            # dentro del día para devolver algo distinto de None.
+            base_ts, base_total = _query_total_at_or_after(today_start)
+            if base_ts is None or base_total is None:
+                today_usd = None
+            elif base_ts == latest_ts:
+                today_usd = None
+            else:
+                today_usd = max(0.0, float(latest_total) - float(base_total))
 
     result: dict[str, float | None | str] = {
         "today_usd": None if today_usd is None else round(today_usd, 4),

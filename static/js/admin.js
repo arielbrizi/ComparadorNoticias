@@ -1909,7 +1909,7 @@ function renderInfraLimits(data) {
                 <button id="infra-limits-reset" style="cursor:pointer;padding:0.35rem 0.8rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);font-size:0.72rem">
                     Quitar límites
                 </button>
-                <button id="infra-limits-snapshot" title="Consulta Railway ahora y guarda un snapshot. Necesario al menos 2 por día para calcular el gasto diario." style="cursor:pointer;padding:0.35rem 0.8rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);font-size:0.72rem">
+                <button id="infra-limits-snapshot" title="Consulta Railway ahora y guarda un snapshot. Si ya hay snapshots de días previos, alcanza con uno solo de hoy para calcular el gasto del día." style="cursor:pointer;padding:0.35rem 0.8rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);font-size:0.72rem">
                     Tomar snapshot
                 </button>
                 <div id="infra-limits-status" style="font-size:0.65rem;color:var(--text-dim);flex:1;min-width:100px">

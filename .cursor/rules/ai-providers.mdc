@@ -167,9 +167,15 @@ precheck** before every invocation:
 - `get_current_spend()` devuelve `{today_usd, month_usd, fetched_at}`:
   - `month_usd` = `estimated_usd_month` del último snapshot agregado
     (Railway ya reporta acumulado del período de billing).
-  - `today_usd` = `month_usd_now − month_usd_at_start_of_day`. Si no hay
-    snapshot anterior al día actual, devuelve `None` y el guard se queda
-    permisivo (necesita ≥2 snapshots por día para enforcement).
+  - `today_usd` = `month_usd_now − baseline`. La baseline se elige así, de
+    mejor a peor:
+      1. último snapshot **anterior al día actual** (típico del cron de
+         ayer): permite calcular gasto diario con 1 solo snapshot nuevo
+         de hoy, ideal cuando hay historia continua;
+      2. primer snapshot del día actual, si no hay nada anterior y ya
+         existen ≥2 snapshots dentro del día;
+      3. `None` (guard permisivo) si solo hay 1 snapshot total y nada
+         antes.
 - `get_blocked_keys()` devuelve un subset de `["daily", "monthly"]`. Cache
   de 30 s (`_spend_cache`) que se resetea cuando se guarda un snapshot
   nuevo o se cambian los límites.

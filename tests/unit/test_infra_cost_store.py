@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timedelta
 
 import pytest
 
 from app.ai_store import init_ai_tables
+from app.db import execute, get_conn
 from app.infra_cost_store import (
     ART,
     get_blocked_keys,
@@ -21,6 +23,25 @@ from app.infra_cost_store import (
     save_snapshot,
     set_infra_limits,
 )
+
+
+def _insert_aggregate_at(fetched_at: str, usd_month: float) -> None:
+    """Insert a synthetic aggregate row at an arbitrary timestamp.
+
+    Used by tests that need to simulate snapshots from previous days
+    (``save_snapshot`` always uses ``datetime.now(ART)``).
+    """
+    raw = json.dumps({"_aggregate": True, "breakdown": {}})
+    with get_conn() as conn:
+        execute(
+            conn,
+            """
+            INSERT INTO infra_cost_snapshot
+                (fetched_at, service_name, service_id, estimated_usd_month, raw_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (fetched_at, "Proyecto", "proj-1", float(usd_month), raw),
+        )
 
 
 @pytest.fixture
@@ -208,6 +229,33 @@ class TestCurrentSpend:
         spend = get_current_spend()
         # month_usd uses the aggregate row, not the per-service value.
         assert spend["month_usd"] == pytest.approx(8.0)
+
+    def test_today_uses_yesterday_snapshot_as_baseline(self, _init_full):
+        """With history from previous days, a single snapshot today is enough
+        to compute ``today_usd`` (we use yesterday's last snapshot as baseline).
+        """
+        yesterday = (datetime.now(ART) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        _insert_aggregate_at(yesterday, 8.0)
+        save_snapshot([_aggregate_row(10.0)])  # only one snapshot today
+        reset_spend_cache()
+        spend = get_current_spend()
+        assert spend["month_usd"] == pytest.approx(10.0)
+        assert spend["today_usd"] == pytest.approx(2.0)
+
+    def test_today_prefers_pre_today_baseline_over_first_of_day(self, _init_full):
+        """When both pre-today and intra-day baselines exist, prefer pre-today
+        so the user sees the gain from yesterday onwards (not from the first
+        intraday refresh)."""
+        yesterday = (datetime.now(ART) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        _insert_aggregate_at(yesterday, 5.0)
+        save_snapshot([_aggregate_row(7.0)])  # first intraday
+        time.sleep(1.1)
+        save_snapshot([_aggregate_row(9.0)])  # latest
+        reset_spend_cache()
+        spend = get_current_spend()
+        # Uses pre-today baseline 5.0 → today_usd = 9.0 - 5.0 = 4.0
+        # (NOT 9.0 - 7.0 = 2.0 which would be the intraday-only baseline)
+        assert spend["today_usd"] == pytest.approx(4.0)
 
 
 class TestBlockedKeys:

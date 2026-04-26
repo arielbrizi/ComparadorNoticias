@@ -1909,6 +1909,9 @@ function renderInfraLimits(data) {
                 <button id="infra-limits-reset" style="cursor:pointer;padding:0.35rem 0.8rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);font-size:0.72rem">
                     Quitar límites
                 </button>
+                <button id="infra-limits-snapshot" title="Consulta Railway ahora y guarda un snapshot. Necesario al menos 2 por día para calcular el gasto diario." style="cursor:pointer;padding:0.35rem 0.8rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);font-size:0.72rem">
+                    Tomar snapshot
+                </button>
                 <div id="infra-limits-status" style="font-size:0.65rem;color:var(--text-dim);flex:1;min-width:100px">
                     ${fetchedAt ? "Último snapshot: " + escHtml(formatDatetimeART(fetchedAt)) : ""}
                 </div>
@@ -1987,6 +1990,40 @@ function renderInfraLimits(data) {
         } catch (err) {
             status.textContent = "Error de red";
             status.style.color = "#ea580c";
+        }
+    });
+
+    $("#infra-limits-snapshot")?.addEventListener("click", async () => {
+        const btn = $("#infra-limits-snapshot");
+        const status = $("#infra-limits-status");
+        if (!btn) return;
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Consultando…";
+        status.textContent = "Consultando Railway…";
+        status.style.color = "var(--text-dim)";
+        try {
+            const resp = await fetch("/api/admin/infra-costs/refresh", { method: "POST" });
+            if (resp.status === 403) { window.location.href = "/"; return; }
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            if (!data.available) {
+                status.textContent = "Falló: " + (data.reason || "no disponible");
+                status.style.color = "#ea580c";
+            } else if ((data.saved_rows || 0) === 0) {
+                status.textContent = "Railway respondió OK pero sin servicios";
+                status.style.color = "#ea580c";
+            } else {
+                status.textContent = `Snapshot guardado (${data.saved_rows} filas)`;
+                status.style.color = "#0d9488";
+                setTimeout(loadInfraLimits, 600);
+            }
+        } catch (err) {
+            status.textContent = "Error de red";
+            status.style.color = "#ea580c";
+        } finally {
+            btn.disabled = false;
+            btn.textContent = originalText;
         }
     });
 }

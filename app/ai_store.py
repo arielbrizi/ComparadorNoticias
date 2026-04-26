@@ -39,7 +39,13 @@ def _should_persist_prompt_on_error(provider: str) -> bool:
     return "ollama" in (provider or "").lower()
 
 # ── Pricing (USD per 1M tokens) ──────────────────────────────────────────────
-
+#
+# Defaults hardcodeados. Estos valores son el fallback cuando la tabla
+# ``ai_model_pricing`` no tiene un row para el modelo (cosa que pasa hasta
+# que el seeder corre por primera vez, o cuando se agrega un modelo nuevo).
+# El admin puede sobreescribirlos desde /admin con el botón "Actualizar
+# valores" — guardamos el override en DB con la URL de la página oficial
+# de pricing como referencia (`source_url`) para poder volver a chequear.
 MODEL_PRICING: dict[str, dict[str, float]] = {
     "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
     "llama-3.3-70b-versatile": {"input": 0.00, "output": 0.00},
@@ -51,6 +57,15 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     "llama3.1:8b": {"input": 0.00, "output": 0.00},
     "llama3.2:3b": {"input": 0.00, "output": 0.00},
     "mistral:7b-instruct": {"input": 0.00, "output": 0.00},
+}
+
+# Provider → URL pública de pricing oficial. La usamos como
+# ``source_url`` cuando seedeamos ``ai_model_pricing`` y como link
+# del botón "Actualizar valores" en el admin.
+PRICING_SOURCE_URLS: dict[str, str] = {
+    "gemini": "https://ai.google.dev/gemini-api/docs/pricing",
+    "groq": "https://groq.com/pricing/",
+    "ollama": "",  # self-hosted — no aplica
 }
 
 VALID_EVENT_TYPES = frozenset(
@@ -216,6 +231,22 @@ def init_ai_tables() -> None:
         execute(
             conn,
             """
+            CREATE TABLE IF NOT EXISTS ai_model_pricing (
+                provider          TEXT NOT NULL,
+                model             TEXT NOT NULL,
+                input_usd_per_1m  REAL NOT NULL,
+                output_usd_per_1m REAL NOT NULL,
+                source_url        TEXT,
+                updated_at        TEXT NOT NULL,
+                PRIMARY KEY (provider, model)
+            )
+            """,
+        )
+        _seed_ai_model_pricing(conn)
+
+        execute(
+            conn,
+            """
             CREATE TABLE IF NOT EXISTS ai_schedule_config (
                 event_type  TEXT PRIMARY KEY,
                 quiet_start TEXT NOT NULL DEFAULT '',
@@ -371,15 +402,265 @@ def _seed_provider_config(conn) -> None:
         )
 
 
+# (provider, model) → URL de pricing oficial — usado para el seed.
+# El modelo concreto de Ollama lo lee la app por env var (`OLLAMA_MODEL`),
+# pero acá necesitamos un seed determinista, así que ponemos los modelos
+# que están en ``MODEL_PRICING`` arriba.
+_PRICING_SEED_PAIRS: tuple[tuple[str, str], ...] = (
+    ("gemini", "gemini-3-flash-preview"),
+    ("groq", "llama-3.3-70b-versatile"),
+    ("ollama", "qwen3:8b"),
+    ("ollama", "qwen2.5:7b-instruct"),
+    ("ollama", "llama3.1:8b"),
+    ("ollama", "llama3.2:3b"),
+    ("ollama", "mistral:7b-instruct"),
+)
+
+
+def _seed_ai_model_pricing(conn) -> None:
+    """Insert default pricing rows for known (provider, model) pairs.
+
+    On a fresh install (or when a new model is added to
+    ``_PRICING_SEED_PAIRS``) this populates ``ai_model_pricing`` with the
+    hardcoded values from ``MODEL_PRICING``. Existing rows are left intact
+    so admin overrides survive a restart.
+    """
+    now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+    for provider, model in _PRICING_SEED_PAIRS:
+        pricing = MODEL_PRICING.get(model, {"input": 0.0, "output": 0.0})
+        url = PRICING_SOURCE_URLS.get(provider, "") or ""
+        execute(
+            conn,
+            """
+            INSERT INTO ai_model_pricing
+                (provider, model, input_usd_per_1m, output_usd_per_1m, source_url, updated_at)
+            SELECT ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM ai_model_pricing WHERE provider = ? AND model = ?
+            )
+            """,
+            (
+                provider,
+                model,
+                float(pricing.get("input", 0.0)),
+                float(pricing.get("output", 0.0)),
+                url,
+                now_iso,
+                provider,
+                model,
+            ),
+        )
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 
+# Cache del pricing por modelo (clave = model). Lo reseteamos cada vez que
+# el admin guarda un nuevo valor desde el panel; entre tanto, el TTL evita
+# que ``compute_cost`` (hot-path en cada log_ai_usage) golpee la DB.
+_pricing_cache: dict[str, tuple[float, float]] = {}
+_pricing_cache_ts: float = 0
+_PRICING_CACHE_TTL = 30
+
+
+def _load_pricing_from_db() -> dict[str, tuple[float, float]]:
+    """Return ``{model: (input_per_1m, output_per_1m)}`` from the DB.
+
+    Falls back to the hardcoded ``MODEL_PRICING`` defaults for models that
+    don't have a row yet. If the query itself fails we return only the
+    defaults so the caller never crashes a logging call over pricing.
+    """
+    out: dict[str, tuple[float, float]] = {
+        m: (float(v.get("input", 0.0)), float(v.get("output", 0.0)))
+        for m, v in MODEL_PRICING.items()
+    }
+    try:
+        with get_conn() as conn:
+            rows = query(
+                conn,
+                "SELECT model, input_usd_per_1m, output_usd_per_1m FROM ai_model_pricing",
+            ).fetchall()
+        for r in rows:
+            try:
+                out[r["model"]] = (
+                    float(r["input_usd_per_1m"] or 0.0),
+                    float(r["output_usd_per_1m"] or 0.0),
+                )
+            except (TypeError, ValueError):
+                continue
+    except Exception as exc:
+        logger.warning("Failed to read ai_model_pricing: %s", exc)
+    return out
+
+
+def _get_cached_pricing() -> dict[str, tuple[float, float]]:
+    global _pricing_cache, _pricing_cache_ts
+    now = time.time()
+    if _pricing_cache and (now - _pricing_cache_ts) < _PRICING_CACHE_TTL:
+        return _pricing_cache
+    _pricing_cache = _load_pricing_from_db()
+    _pricing_cache_ts = now
+    return _pricing_cache
+
+
 def compute_cost(model: str, input_tokens: int, output_tokens: int) -> tuple[float, float]:
-    """Return (cost_input, cost_output) in USD."""
-    pricing = MODEL_PRICING.get(model, {"input": 0.0, "output": 0.0})
-    cost_in = input_tokens * pricing["input"] / 1_000_000
-    cost_out = output_tokens * pricing["output"] / 1_000_000
+    """Return (cost_input, cost_output) in USD.
+
+    Reads pricing from ``ai_model_pricing`` (with a 30s in-memory cache);
+    falls back to the hardcoded ``MODEL_PRICING`` for models that don't
+    have a DB row yet, and ultimately to ``(0.0, 0.0)`` for fully unknown
+    models so a missing seed never crashes a logging call.
+    """
+    pricing = _get_cached_pricing().get(model)
+    if pricing is None:
+        legacy = MODEL_PRICING.get(model, {"input": 0.0, "output": 0.0})
+        pricing = (float(legacy.get("input", 0.0)), float(legacy.get("output", 0.0)))
+    cost_in = input_tokens * pricing[0] / 1_000_000
+    cost_out = output_tokens * pricing[1] / 1_000_000
     return cost_in, cost_out
+
+
+def get_model_pricing() -> list[dict]:
+    """Return all rows from ``ai_model_pricing`` as a list of dicts.
+
+    Each entry has ``provider``, ``model``, ``input_usd_per_1m``,
+    ``output_usd_per_1m``, ``source_url``, ``updated_at`` and an
+    ``is_default`` flag (True when the values match ``MODEL_PRICING``).
+    """
+    try:
+        with get_conn() as conn:
+            rows = query(
+                conn,
+                """SELECT provider, model, input_usd_per_1m, output_usd_per_1m,
+                          source_url, updated_at
+                     FROM ai_model_pricing
+                    ORDER BY provider, model""",
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("Failed to query ai_model_pricing: %s", exc)
+        return []
+
+    out: list[dict] = []
+    for r in rows:
+        model = r["model"]
+        default_pair = MODEL_PRICING.get(model)
+        is_default = bool(
+            default_pair
+            and abs(float(r["input_usd_per_1m"] or 0.0) - float(default_pair.get("input", 0.0))) < 1e-9
+            and abs(float(r["output_usd_per_1m"] or 0.0) - float(default_pair.get("output", 0.0))) < 1e-9
+        )
+        out.append({
+            "provider": r["provider"],
+            "model": model,
+            "input_usd_per_1m": float(r["input_usd_per_1m"] or 0.0),
+            "output_usd_per_1m": float(r["output_usd_per_1m"] or 0.0),
+            "source_url": r["source_url"] or "",
+            "updated_at": r["updated_at"],
+            "is_default": is_default,
+        })
+    return out
+
+
+def get_model_pricing_for(provider: str, model: str) -> dict | None:
+    """Return a single pricing row, or ``None`` if not present."""
+    for row in get_model_pricing():
+        if row["provider"] == provider and row["model"] == model:
+            return row
+    return None
+
+
+def set_model_pricing(
+    provider: str,
+    model: str,
+    input_usd_per_1m: float | int,
+    output_usd_per_1m: float | int,
+) -> bool:
+    """Upsert a pricing row. Validates types and non-negative values.
+
+    Returns ``True`` on success. The cache is invalidated so the next
+    ``compute_cost`` re-reads from DB.
+    """
+    global _pricing_cache_ts
+    if provider not in VALID_PROVIDERS:
+        return False
+    if not isinstance(model, str) or not model.strip():
+        return False
+    if isinstance(input_usd_per_1m, bool) or isinstance(output_usd_per_1m, bool):
+        return False
+    if not isinstance(input_usd_per_1m, (int, float)):
+        return False
+    if not isinstance(output_usd_per_1m, (int, float)):
+        return False
+    if input_usd_per_1m < 0 or output_usd_per_1m < 0:
+        return False
+
+    url = PRICING_SOURCE_URLS.get(provider, "") or ""
+    now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        with get_conn() as conn:
+            if is_postgres():
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_model_pricing
+                        (provider, model, input_usd_per_1m, output_usd_per_1m, source_url, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (provider, model) DO UPDATE SET
+                        input_usd_per_1m  = EXCLUDED.input_usd_per_1m,
+                        output_usd_per_1m = EXCLUDED.output_usd_per_1m,
+                        source_url        = EXCLUDED.source_url,
+                        updated_at        = EXCLUDED.updated_at
+                    """,
+                    (provider, model, float(input_usd_per_1m), float(output_usd_per_1m), url, now_iso),
+                )
+            else:
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_model_pricing
+                        (provider, model, input_usd_per_1m, output_usd_per_1m, source_url, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(provider, model) DO UPDATE SET
+                        input_usd_per_1m  = excluded.input_usd_per_1m,
+                        output_usd_per_1m = excluded.output_usd_per_1m,
+                        source_url        = excluded.source_url,
+                        updated_at        = excluded.updated_at
+                    """,
+                    (provider, model, float(input_usd_per_1m), float(output_usd_per_1m), url, now_iso),
+                )
+        _pricing_cache_ts = 0
+        logger.info(
+            "Model pricing updated: %s/%s → in=$%.4f/1M, out=$%.4f/1M",
+            provider, model, float(input_usd_per_1m), float(output_usd_per_1m),
+        )
+        return True
+    except Exception as exc:
+        logger.error("Failed to upsert ai_model_pricing (%s/%s): %s", provider, model, exc)
+        return False
+
+
+def reset_model_pricing(provider: str, model: str) -> bool:
+    """Restore the hardcoded default for a (provider, model) pair.
+
+    Equivalent to calling ``set_model_pricing`` with the values from
+    ``MODEL_PRICING``. Returns ``True`` on success.
+    """
+    default = MODEL_PRICING.get(model)
+    if default is None:
+        return False
+    return set_model_pricing(
+        provider, model,
+        float(default.get("input", 0.0)),
+        float(default.get("output", 0.0)),
+    )
+
+
+def is_default_model_pricing(provider: str, model: str) -> bool:
+    """Whether the stored pricing matches the hardcoded ``MODEL_PRICING`` value."""
+    row = get_model_pricing_for(provider, model)
+    if row is None:
+        return True  # no row = nothing to override
+    return bool(row.get("is_default"))
 
 
 def log_ai_usage(

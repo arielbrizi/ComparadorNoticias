@@ -46,15 +46,18 @@ from app.ai_store import (
     compute_daily_cap,
     count_ai_invocations,
     get_global_monthly_budget,
+    get_model_pricing,
     get_ollama_timeout,
     get_provider_config,
     get_provider_limits,
     get_schedule_config,
     get_scheduler_config,
     init_ai_tables,
+    is_default_model_pricing,
     is_default_provider_limit,
     list_distinct_providers,
     MAX_PROVIDER_CHAIN,
+    PRICING_SOURCE_URLS,
     query_ai_cost_summary,
     query_ai_daily_cost,
     query_ai_invocations,
@@ -63,8 +66,10 @@ from app.ai_store import (
     query_provider_health,
     query_provider_usage,
     query_recent_ai_calls,
+    reset_model_pricing,
     reset_provider_limits,
     set_global_monthly_budget,
+    set_model_pricing,
     set_ollama_timeout,
     set_provider_config,
     set_provider_limits,
@@ -88,11 +93,15 @@ from app.process_events_store import (
     purge_old_events as purge_old_process_events,
 )
 from app.infra_cost_store import (
+    get_blocked_keys as infra_get_blocked_keys,
+    get_current_spend as infra_get_current_spend,
+    get_infra_limits,
     history as infra_cost_history,
     init_infra_cost_table,
     latest_snapshot as infra_latest_snapshot,
     purge_old_snapshots as purge_old_infra_snapshots,
     save_snapshot as save_infra_snapshot,
+    set_infra_limits,
 )
 from app import railway_client, x_campaigns, x_client, x_store
 from app.search_utils import build_fallback_summary, extract_keywords
@@ -1833,6 +1842,186 @@ async def admin_ai_budget_global_set(
     if not ok:
         return JSONResponse({"error": "Failed to update"}, status_code=500)
     return {"ok": True, "global": _build_global_budget_row()}
+
+
+# ── AI model pricing (admin) ─────────────────────────────────────────────────
+
+
+@app.get("/api/admin/ai-pricing")
+async def admin_ai_pricing_get(_admin: dict = Depends(require_admin)):
+    """Return all (provider, model) pricing rows + the official pricing URLs.
+
+    Each item has ``provider``, ``model``, ``input_usd_per_1m``,
+    ``output_usd_per_1m``, ``source_url``, ``updated_at`` and ``is_default``
+    (True when the stored value matches the hardcoded ``MODEL_PRICING``).
+    The admin UI uses ``source_url`` for the "Actualizar valores" link.
+    """
+    return {
+        "items": get_model_pricing(),
+        "source_urls": dict(PRICING_SOURCE_URLS),
+    }
+
+
+@app.post("/api/admin/ai-pricing")
+async def admin_ai_pricing_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Update pricing for a (provider, model) pair.
+
+    Body shape::
+
+        {
+            "provider": "gemini",
+            "model": "gemini-3-flash-preview",
+            "input_usd_per_1m": 0.5,
+            "output_usd_per_1m": 3.0,
+            "reset": false
+        }
+
+    ``reset: true`` restores the hardcoded default. Otherwise both fields
+    are required and must be non-negative numbers.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    provider = body.get("provider", "")
+    model = body.get("model", "")
+
+    if provider not in {"gemini", "groq", "ollama"}:
+        return JSONResponse(
+            {"error": "Invalid provider. Valid: gemini, groq, ollama"},
+            status_code=400,
+        )
+    if not isinstance(model, str) or not model.strip():
+        return JSONResponse({"error": "model is required"}, status_code=400)
+
+    if body.get("reset"):
+        ok = reset_model_pricing(provider, model)
+        if not ok:
+            return JSONResponse(
+                {"error": "No default available for this model"},
+                status_code=400,
+            )
+        return {"ok": True, "reset": True, "is_default": is_default_model_pricing(provider, model)}
+
+    in_raw = body.get("input_usd_per_1m")
+    out_raw = body.get("output_usd_per_1m")
+    for label, val in (("input_usd_per_1m", in_raw), ("output_usd_per_1m", out_raw)):
+        if val is None:
+            return JSONResponse({"error": f"{label} is required"}, status_code=400)
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or val < 0:
+            return JSONResponse(
+                {"error": f"{label} must be a non-negative number"},
+                status_code=400,
+            )
+
+    ok = set_model_pricing(provider, model, float(in_raw), float(out_raw))
+    if not ok:
+        return JSONResponse({"error": "Failed to update"}, status_code=500)
+    return {"ok": True, "is_default": is_default_model_pricing(provider, model)}
+
+
+# ── Railway infra limits (admin) ─────────────────────────────────────────────
+
+
+def _build_infra_limits_row() -> dict:
+    """Snapshot of the configured USD limits + current Railway spend."""
+    limits = get_infra_limits()
+    spend = infra_get_current_spend()
+    blocked = infra_get_blocked_keys()
+    return {
+        "limits": {
+            "daily_max": limits.get("daily_max"),
+            "monthly_max": limits.get("monthly_max"),
+        },
+        "spend": {
+            "today_usd": spend.get("today_usd"),
+            "month_usd": spend.get("month_usd"),
+            "fetched_at": spend.get("fetched_at"),
+        },
+        "blocked": blocked,
+        "available": railway_client.is_configured(),
+    }
+
+
+@app.get("/api/admin/infra-limits")
+async def admin_infra_limits_get(_admin: dict = Depends(require_admin)):
+    """Return the configured Railway USD limits and current spend.
+
+    Shape::
+
+        {
+          "limits":   {"daily_max": 1.0 | null, "monthly_max": 30.0 | null},
+          "spend":    {"today_usd": 0.18 | null, "month_usd": 12.4 | null,
+                       "fetched_at": "2026-04-25T...",}
+          "blocked":  ["daily" | "monthly"],
+          "available": true
+        }
+
+    ``today_usd`` is ``null`` when there's no snapshot from earlier in the
+    day to compute a delta against. ``available=false`` means Railway is
+    not configured (no API token / project ID); the guard stays permissive
+    in that case.
+    """
+    return _build_infra_limits_row()
+
+
+@app.post("/api/admin/infra-limits")
+async def admin_infra_limits_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Update the Railway USD limits.
+
+    Body shape::
+
+        {"daily_max": 1.5, "monthly_max": 30.0}        # set both
+        {"daily_max": null, "monthly_max": null}       # clear both
+        {"reset": true}                                 # alias for clear
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    if body.get("reset"):
+        ok = set_infra_limits(daily_max=None, monthly_max=None)
+        if not ok:
+            return JSONResponse({"error": "Failed to reset"}, status_code=500)
+        return {"ok": True, "reset": True, **_build_infra_limits_row()}
+
+    def _coerce(field: str):
+        if field not in body:
+            return True, None  # missing key = clear
+        raw = body.get(field)
+        if raw is None:
+            return True, None
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return False, None
+        if raw < 0:
+            return False, None
+        return True, float(raw)
+
+    ok_d, daily_val = _coerce("daily_max")
+    if not ok_d:
+        return JSONResponse(
+            {"error": "daily_max must be a non-negative number or null"},
+            status_code=400,
+        )
+    ok_m, monthly_val = _coerce("monthly_max")
+    if not ok_m:
+        return JSONResponse(
+            {"error": "monthly_max must be a non-negative number or null"},
+            status_code=400,
+        )
+
+    ok = set_infra_limits(daily_max=daily_val, monthly_max=monthly_val)
+    if not ok:
+        return JSONResponse({"error": "Failed to update"}, status_code=500)
+    return {"ok": True, **_build_infra_limits_row()}
 
 
 # ── X / Twitter admin ────────────────────────────────────────────────────────

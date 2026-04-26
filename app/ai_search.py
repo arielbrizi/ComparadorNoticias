@@ -567,23 +567,54 @@ _QUOTA_FIELD_WINDOW: dict[str, str] = {
     "daily_usd": "hoy",
     "monthly_usd_global": "mes en curso (global)",
     "daily_usd_global": "hoy (global)",
+    "infra_usd_daily": "hoy (Railway)",
+    "infra_usd_monthly": "mes en curso (Railway)",
 }
+
+
+def _infra_block_reason(provider: str) -> str | None:
+    """Return ``"infra_usd_daily"`` / ``"infra_usd_monthly"`` if the Railway
+    spend cap is exceeded for *provider*, or ``None`` otherwise.
+
+    Solo aplica a ``ollama`` — los providers cloud (gemini/groq) no corren
+    en Railway, así que su consumo no impacta la factura de infra. Si
+    Railway no está configurado o todavía no hay datos suficientes, el
+    guard se queda permisivo (devuelve ``None``) y el llamador procede
+    normalmente.
+    """
+    if provider != "ollama":
+        return None
+    try:
+        from app import infra_cost_store
+        from app import railway_client
+
+        if not railway_client.is_configured():
+            return None
+        blocked = infra_cost_store.get_blocked_keys()
+        if "monthly" in blocked:
+            return "infra_usd_monthly"
+        if "daily" in blocked:
+            return "infra_usd_daily"
+    except Exception as exc:
+        logger.warning("Infra precheck failed for %s: %s", provider, exc)
+    return None
 
 
 def _quota_blocked(provider: str) -> str | None:
     """Return the name of the first tripped limit, or ``None`` if OK.
 
     Consulta los límites configurados para ``(provider, modelo_actual)`` y los
-    compara contra el consumo reciente registrado en ``ai_usage_log``. Ollama
-    es self-hosted y nunca dispara los límites RPM/TPM/RPD/TPD, pero el
-    presupuesto USD/mes (per-pair o global) sí puede aplicarle si en el
-    futuro su `MODEL_PRICING` deja de ser cero.
+    compara contra el consumo reciente registrado en ``ai_usage_log``. Para
+    Ollama los defaults son ``None`` (self-hosted, sin cupo del portal), pero
+    si el admin configura RPM/TPM/RPD/TPD a mano en el panel los tratamos
+    como un **hard cap intencional** para acotar el gasto de CPU/Railway.
 
     Orden de prioridad:
 
     1. ``monthly_usd_global`` / ``daily_usd_global`` — techo total de la cuenta.
-    2. ``monthly_usd`` / ``daily_usd`` — techo del par ``(provider, model)``.
-    3. ``rpm`` / ``tpm`` / ``rpd`` / ``tpd`` — cupos del portal del proveedor.
+    2. ``infra_usd_daily`` / ``infra_usd_monthly`` — tope de Railway (solo Ollama).
+    3. ``monthly_usd`` / ``daily_usd`` — techo del par ``(provider, model)``.
+    4. ``rpm`` / ``tpm`` / ``rpd`` / ``tpd`` — cupos del portal o caps manuales.
 
     Errores inesperados caen en "no bloquear" — preferimos una llamada real
     fallida a una falsa alarma que deje al usuario sin respuesta.
@@ -601,12 +632,11 @@ def _quota_blocked(provider: str) -> str | None:
     except Exception as exc:
         logger.warning("Global budget precheck failed: %s", exc)
 
-    if provider == "ollama":
-        # Las quotas RPM/TPM/RPD/TPD no aplican a Ollama. El budget USD ya se
-        # evaluó arriba como global; per-pair sólo lo evaluamos si el modelo
-        # tiene pricing > 0 en el futuro — hoy es 0 y query_provider_cost
-        # devuelve 0, así que no bloquea.
-        pass
+    # Tope de infra Railway: solo afecta a Ollama (es lo único que corre
+    # ahí). Lo evaluamos antes de los cupos del par para fallar fast.
+    infra_reason = _infra_block_reason(provider)
+    if infra_reason:
+        return infra_reason
 
     model = _PROVIDER_MODELS.get(provider)
     if not model:
@@ -629,10 +659,6 @@ def _quota_blocked(provider: str) -> str | None:
                 return "daily_usd"
         except Exception as exc:
             logger.warning("Per-pair budget precheck failed for %s: %s", provider, exc)
-
-    if provider == "ollama":
-        # Ollama no tiene cupos externos RPM/TPM/RPD/TPD.
-        return None
 
     if not any(limits.get(f) is not None for f in ("rpm", "tpm", "rpd", "tpd")):
         return None
@@ -666,8 +692,11 @@ async def _run_provider_chain(
     - ``prompt_for(provider)`` returns the prompt tailored to that provider
       (Groq/Ollama typically get a shorter one to fit their context budget).
     - Antes de llamar a un proveedor consulta ``_quota_blocked`` y, si está
-      excedido, lo saltea sin gastar API (salvo que sea el último de la
-      cadena: en ese caso intentamos igual como última bala).
+      excedido, lo saltea sin gastar API. El corte aplica siempre, incluso
+      para el último de la cadena: si todos los proveedores están sobre su
+      cupo, el chain levanta ``QuotaExhaustedError`` para que el caller use
+      el fallback que tenga (``_last_good_topics``, cache, etc.) en vez de
+      pegarle al provider con un 429 garantizado.
     - On success, logs via ``_log_success`` and returns immediately.
     - On failure, logs via ``_log_error`` and falls through to the next
       provider. Re-raises the last exception if every provider fails.
@@ -687,16 +716,17 @@ async def _run_provider_chain(
         model = _PROVIDER_MODELS[provider]
         prompt = prompt_for(provider)
 
-        is_last = idx + 1 >= len(filtered)
         blocked_by = _quota_blocked(provider)
-        if blocked_by and not is_last:
+        if blocked_by:
             window = _QUOTA_FIELD_WINDOW.get(blocked_by, "")
-            next_provider = filtered[idx + 1]
+            next_label = (
+                _PROVIDER_DISPLAY[filtered[idx + 1]]
+                if idx + 1 < len(filtered) else "—"
+            )
             logger.info(
                 "quota guard: skipping %s (%s excedido en %s), "
                 "pasando a %s",
-                _PROVIDER_DISPLAY[provider], blocked_by, window,
-                _PROVIDER_DISPLAY[next_provider],
+                _PROVIDER_DISPLAY[provider], blocked_by, window, next_label,
             )
             exc = QuotaExhaustedError(
                 f"Cupo local agotado: {blocked_by} ({window})",

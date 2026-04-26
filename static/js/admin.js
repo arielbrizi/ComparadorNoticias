@@ -170,6 +170,7 @@ function loadAll() {
         loadSchedulerConfig();
         loadOllamaTimeout();
         loadAILimits();
+        loadInfraLimits();
     } else if (_activeTab === "costs") {
         loadAICosts(desde, hasta);
         loadInfraCosts();
@@ -1166,14 +1167,30 @@ function _fmtUsd(n) {
     return "$" + num.toFixed(4);
 }
 
+// Pricing por (provider, model) cargado junto con los límites para que la
+// card pueda mostrar el costo actual y abrir el form inline. Se rebuildea
+// completo cada vez que se llama loadAILimits().
+let _aiPricingCache = { items: [], source_urls: {} };
+
+function _pricingForRow(provider, model) {
+    return (_aiPricingCache.items || []).find(
+        p => p.provider === provider && p.model === model
+    ) || null;
+}
+
 async function loadAILimits() {
     const container = $("#ai-limits-wrap");
     if (!container) return;
     try {
-        const resp = await fetch("/api/admin/ai-limits");
-        if (resp.status === 403) return;
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
+        const [limitsResp, pricingResp] = await Promise.all([
+            fetch("/api/admin/ai-limits"),
+            fetch("/api/admin/ai-pricing"),
+        ]);
+        if (limitsResp.status === 403 || pricingResp.status === 403) return;
+        if (!limitsResp.ok) throw new Error(`HTTP ${limitsResp.status}`);
+        if (!pricingResp.ok) throw new Error(`HTTP ${pricingResp.status}`);
+        const data = await limitsResp.json();
+        _aiPricingCache = await pricingResp.json();
         renderAILimits(data.items || []);
         renderAIGlobalBudget(data.global || null);
     } catch (err) {
@@ -1390,6 +1407,205 @@ function _renderBudgetField(item) {
         </div>`;
 }
 
+function _renderPricingBlock(item) {
+    const pricing = _pricingForRow(item.provider, item.model);
+    const url = (_aiPricingCache.source_urls || {})[item.provider] || "";
+    const inUsd = pricing ? Number(pricing.input_usd_per_1m) : null;
+    const outUsd = pricing ? Number(pricing.output_usd_per_1m) : null;
+    const isDefault = pricing ? !!pricing.is_default : true;
+    const updatedAt = pricing && pricing.updated_at ? formatDatetimeART(pricing.updated_at) : "—";
+
+    const tooltip =
+        "Costo USD por llamada = (tokens_in × in_$/1M + tokens_out × out_$/1M) / 1.000.000. " +
+        "Estos valores se aplican a cada log_ai_usage y alimentan los totales mensual/diario " +
+        "que ves arriba. Ollama suele ser $0 (self-hosted) salvo que cargues un valor manual.";
+
+    const updateBtn = url
+        ? `<a class="ai-pricing-source" data-provider="${escHtml(item.provider)}"
+              data-model="${escHtml(item.model)}"
+              href="${escHtml(url)}" target="_blank" rel="noopener noreferrer"
+              title="Se buscará en internet el valor actual"
+              style="font-size:0.62rem;color:#0d9488;text-decoration:underline">
+              Actualizar valores ↗
+           </a>`
+        : `<span style="font-size:0.62rem;color:var(--text-dim);font-style:italic">
+              Sin pricing externo (self-hosted)
+           </span>`;
+
+    const customBadge = isDefault
+        ? ""
+        : `<span style="background:#dbeafe;color:#1e40af;padding:0.1rem 0.35rem;border-radius:999px;font-size:0.58rem">
+              custom
+           </span>`;
+
+    const inDisplay = inUsd === null || isNaN(inUsd) ? "—" : "$" + inUsd.toFixed(4) + "/1M";
+    const outDisplay = outUsd === null || isNaN(outUsd) ? "—" : "$" + outUsd.toFixed(4) + "/1M";
+
+    return `
+        <div class="admin-pricing-block" data-provider="${escHtml(item.provider)}" data-model="${escHtml(item.model)}"
+             style="border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.55rem;display:flex;flex-direction:column;gap:0.35rem">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:0.4rem;flex-wrap:wrap">
+                <div style="display:flex;align-items:center;gap:0.3rem">
+                    <span style="font-size:0.7rem;font-weight:600;color:var(--text)" title="${escHtml(tooltip)}">
+                        Precio por 1M tokens ⓘ
+                    </span>
+                    ${customBadge}
+                </div>
+                ${updateBtn}
+            </div>
+            <div style="display:flex;justify-content:space-between;gap:0.4rem;font-size:0.65rem;color:var(--text-dim)">
+                <span>in: <b style="color:var(--text)">${escHtml(inDisplay)}</b></span>
+                <span>out: <b style="color:var(--text)">${escHtml(outDisplay)}</b></span>
+                <span title="Última actualización del pricing">act.: ${escHtml(updatedAt)}</span>
+            </div>
+            <div class="ai-pricing-form" data-provider="${escHtml(item.provider)}" data-model="${escHtml(item.model)}"
+                 style="display:none;flex-direction:column;gap:0.3rem;background:var(--bg);padding:0.4rem;border-radius:4px">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem">
+                    <label style="font-size:0.62rem;color:var(--text-dim);display:flex;flex-direction:column;gap:0.15rem">
+                        Input USD/1M
+                        <input type="number" min="0" step="0.0001"
+                               class="ai-pricing-input-in" data-provider="${escHtml(item.provider)}"
+                               data-model="${escHtml(item.model)}"
+                               value="${inUsd === null || isNaN(inUsd) ? "" : inUsd}"
+                               placeholder="0.0000"
+                               style="width:100%;padding:0.25rem 0.35rem;font-size:0.72rem">
+                    </label>
+                    <label style="font-size:0.62rem;color:var(--text-dim);display:flex;flex-direction:column;gap:0.15rem">
+                        Output USD/1M
+                        <input type="number" min="0" step="0.0001"
+                               class="ai-pricing-input-out" data-provider="${escHtml(item.provider)}"
+                               data-model="${escHtml(item.model)}"
+                               value="${outUsd === null || isNaN(outUsd) ? "" : outUsd}"
+                               placeholder="0.0000"
+                               style="width:100%;padding:0.25rem 0.35rem;font-size:0.72rem">
+                    </label>
+                </div>
+                <div style="display:flex;gap:0.3rem;align-items:center;flex-wrap:wrap">
+                    <button class="ai-pricing-save ai-config-select"
+                            data-provider="${escHtml(item.provider)}" data-model="${escHtml(item.model)}"
+                            style="cursor:pointer;padding:0.25rem 0.6rem;font-size:0.7rem">Guardar pricing</button>
+                    <button class="ai-pricing-reset"
+                            data-provider="${escHtml(item.provider)}" data-model="${escHtml(item.model)}"
+                            style="cursor:pointer;padding:0.25rem 0.6rem;font-size:0.65rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-dim)">
+                        Restaurar default
+                    </button>
+                    <button class="ai-pricing-cancel"
+                            data-provider="${escHtml(item.provider)}" data-model="${escHtml(item.model)}"
+                            style="cursor:pointer;padding:0.25rem 0.6rem;font-size:0.65rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-dim)">
+                        Cerrar
+                    </button>
+                    <div class="ai-pricing-status"
+                         data-provider="${escHtml(item.provider)}" data-model="${escHtml(item.model)}"
+                         style="font-size:0.62rem;color:var(--text-dim);flex:1;min-width:80px"></div>
+                </div>
+            </div>
+        </div>`;
+}
+
+function _wirePricingHandlers() {
+    const findForm = (provider, model) => document.querySelector(
+        `.ai-pricing-form[data-provider="${provider}"][data-model="${model}"]`
+    );
+
+    $$(".ai-pricing-source").forEach(link => {
+        link.addEventListener("click", (ev) => {
+            // Cmd/Ctrl-click sigue abriendo en pestaña — solo abrimos el form
+            // en click izquierdo simple. Mantenemos el href real como fallback.
+            if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return;
+            const form = findForm(link.dataset.provider, link.dataset.model);
+            if (form) {
+                form.style.display = form.style.display === "none" ? "flex" : "none";
+            }
+        });
+    });
+
+    $$(".ai-pricing-cancel").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const form = findForm(btn.dataset.provider, btn.dataset.model);
+            if (form) form.style.display = "none";
+        });
+    });
+
+    $$(".ai-pricing-save").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            const provider = btn.dataset.provider;
+            const model = btn.dataset.model;
+            const status = document.querySelector(
+                `.ai-pricing-status[data-provider="${provider}"][data-model="${model}"]`
+            );
+            const inputIn = document.querySelector(
+                `.ai-pricing-input-in[data-provider="${provider}"][data-model="${model}"]`
+            );
+            const inputOut = document.querySelector(
+                `.ai-pricing-input-out[data-provider="${provider}"][data-model="${model}"]`
+            );
+            const inVal = Number((inputIn?.value ?? "").trim());
+            const outVal = Number((inputOut?.value ?? "").trim());
+            if (!Number.isFinite(inVal) || inVal < 0 || !Number.isFinite(outVal) || outVal < 0) {
+                status.textContent = "Valores inválidos";
+                status.style.color = "#ea580c";
+                return;
+            }
+            status.textContent = "Guardando...";
+            status.style.color = "var(--text-dim)";
+            try {
+                const resp = await fetch("/api/admin/ai-pricing", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        provider, model,
+                        input_usd_per_1m: inVal,
+                        output_usd_per_1m: outVal,
+                    }),
+                });
+                if (resp.ok) {
+                    status.textContent = "Guardado";
+                    status.style.color = "#0d9488";
+                    setTimeout(loadAILimits, 600);
+                } else {
+                    const err = await resp.json().catch(() => ({}));
+                    status.textContent = err.error || "Error";
+                    status.style.color = "#ea580c";
+                }
+            } catch (err) {
+                status.textContent = "Error de red";
+                status.style.color = "#ea580c";
+            }
+        });
+    });
+
+    $$(".ai-pricing-reset").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            const provider = btn.dataset.provider;
+            const model = btn.dataset.model;
+            const status = document.querySelector(
+                `.ai-pricing-status[data-provider="${provider}"][data-model="${model}"]`
+            );
+            status.textContent = "Restaurando...";
+            status.style.color = "var(--text-dim)";
+            try {
+                const resp = await fetch("/api/admin/ai-pricing", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ provider, model, reset: true }),
+                });
+                if (resp.ok) {
+                    status.textContent = "Default restaurado";
+                    status.style.color = "#0d9488";
+                    setTimeout(loadAILimits, 600);
+                } else {
+                    const err = await resp.json().catch(() => ({}));
+                    status.textContent = err.error || "Error";
+                    status.style.color = "#ea580c";
+                }
+            } catch (err) {
+                status.textContent = "Error de red";
+                status.style.color = "#ea580c";
+            }
+        });
+    });
+}
+
 function renderAILimits(items) {
     const container = $("#ai-limits-wrap");
     if (!container) return;
@@ -1410,7 +1626,7 @@ function renderAILimits(items) {
             : `<span style="background:#dbeafe;color:#1e40af;padding:0.15rem 0.45rem;border-radius:999px;font-size:0.62rem">personalizado</span>`;
 
         const ollamaNote = item.provider === "ollama"
-            ? `<div style="font-size:0.65rem;color:var(--text-dim);font-style:italic">Self-hosted: sin cupo externo. Dejá los 4 campos vacíos.</div>`
+            ? `<div style="font-size:0.65rem;color:var(--text-dim);font-style:italic">Self-hosted: sin cupo externo. Dejalos vacíos para no limitar, o configurá un tope manual para acotar el gasto de CPU (se respeta estrictamente).</div>`
             : "";
 
         return `
@@ -1427,6 +1643,7 @@ function renderAILimits(items) {
                     </div>
                 </div>
                 ${ollamaNote}
+                ${_renderPricingBlock(item)}
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.6rem">
                     ${_renderLimitField(item, "rpm")}
                     ${_renderLimitField(item, "tpm")}
@@ -1451,6 +1668,8 @@ function renderAILimits(items) {
     }).join("");
 
     container.innerHTML = `<div class="admin-engagement" style="flex-wrap:wrap">${cards}</div>`;
+
+    _wirePricingHandlers();
 
     $$(".ai-limit-save").forEach(btn => {
         btn.addEventListener("click", async () => {
@@ -1543,6 +1762,180 @@ function renderAILimits(items) {
                 status.style.color = "#ea580c";
             }
         });
+    });
+}
+
+// ── Railway infra USD limits ────────────────────────────────────────────
+
+async function loadInfraLimits() {
+    const container = $("#infra-limits-wrap");
+    if (!container) return;
+    try {
+        const resp = await fetch("/api/admin/infra-limits");
+        if (resp.status === 403) return;
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderInfraLimits(data);
+    } catch (err) {
+        console.error("Infra limits load failed:", err);
+        container.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error al cargar límites de Railway</div>`;
+    }
+}
+
+function renderInfraLimits(data) {
+    const container = $("#infra-limits-wrap");
+    if (!container) return;
+
+    const limits = data.limits || {};
+    const spend = data.spend || {};
+    const blocked = data.blocked || [];
+    const dailyMax = limits.daily_max;
+    const monthlyMax = limits.monthly_max;
+    const todayUsd = spend.today_usd;
+    const monthUsd = spend.month_usd;
+    const fetchedAt = spend.fetched_at;
+    const blockedDay = blocked.includes("daily");
+    const blockedMonth = blocked.includes("monthly");
+
+    const dailyVal = dailyMax === null || dailyMax === undefined ? "" : dailyMax;
+    const monthlyVal = monthlyMax === null || monthlyMax === undefined ? "" : monthlyMax;
+
+    const todayDisplay = todayUsd === null || todayUsd === undefined ? "—" : _fmtUsd(todayUsd);
+    const monthDisplay = monthUsd === null || monthUsd === undefined ? "—" : _fmtUsd(monthUsd);
+
+    const banner = blocked.length
+        ? `<div style="background:#fee2e2;color:#991b1b;padding:0.4rem 0.6rem;border-radius:4px;font-size:0.7rem;font-weight:600">
+              Bloqueado por gasto de Railway:
+              ${blockedMonth ? "USD/mes" : ""}${blockedMonth && blockedDay ? " + " : ""}${blockedDay ? "USD/día" : ""}.
+              Las llamadas a Ollama se redirigen al próximo proveedor de la cadena.
+           </div>`
+        : "";
+
+    const unavailableNote = data.available
+        ? ""
+        : `<div style="font-size:0.65rem;color:var(--text-dim);font-style:italic">
+              Railway no está configurado (falta token / project ID). El guard se queda permisivo.
+           </div>`;
+
+    const noBaselineNote = (data.available && (todayUsd === null || todayUsd === undefined))
+        ? `<div style="font-size:0.62rem;color:var(--text-dim);font-style:italic">
+              Aún no hay suficientes snapshots del día para calcular gasto diario.
+           </div>`
+        : "";
+
+    container.innerHTML = `
+        <div class="admin-eng-card" style="flex-direction:column;align-items:stretch;gap:0.5rem">
+            ${banner}
+            ${unavailableNote}
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.6rem">
+                <div style="display:flex;flex-direction:column;gap:0.25rem">
+                    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:0.4rem">
+                        <label style="font-size:0.7rem;font-weight:600;color:var(--text)"
+                               title="Tope diario de gasto en Railway. Si lo superás se bloquea Ollama.">USD/día (Railway)</label>
+                        <span style="font-size:0.62rem;color:var(--text-dim)">${escHtml(todayDisplay)}${dailyMax !== null && dailyMax !== undefined ? " / " + escHtml(_fmtUsd(dailyMax)) : ""}</span>
+                    </div>
+                    <input type="number" min="0" step="0.01" id="infra-daily-input"
+                        value="${dailyVal}" placeholder="sin límite"
+                        style="width:100%;padding:0.3rem 0.4rem;font-size:0.75rem">
+                    ${_renderUsdProgress(Number(todayUsd || 0), dailyMax, blockedDay)}
+                </div>
+                <div style="display:flex;flex-direction:column;gap:0.25rem">
+                    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:0.4rem">
+                        <label style="font-size:0.7rem;font-weight:600;color:var(--text)"
+                               title="Tope mensual de gasto en Railway. Si lo superás se bloquea Ollama.">USD/mes (Railway)</label>
+                        <span style="font-size:0.62rem;color:var(--text-dim)">${escHtml(monthDisplay)}${monthlyMax !== null && monthlyMax !== undefined ? " / " + escHtml(_fmtUsd(monthlyMax)) : ""}</span>
+                    </div>
+                    <input type="number" min="0" step="0.1" id="infra-monthly-input"
+                        value="${monthlyVal}" placeholder="sin límite"
+                        style="width:100%;padding:0.3rem 0.4rem;font-size:0.75rem">
+                    ${_renderUsdProgress(Number(monthUsd || 0), monthlyMax, blockedMonth)}
+                </div>
+            </div>
+            ${noBaselineNote}
+            <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+                <button id="infra-limits-save" class="ai-config-select" style="cursor:pointer;padding:0.35rem 0.8rem">Guardar</button>
+                <button id="infra-limits-reset" style="cursor:pointer;padding:0.35rem 0.8rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);font-size:0.72rem">
+                    Quitar límites
+                </button>
+                <div id="infra-limits-status" style="font-size:0.65rem;color:var(--text-dim);flex:1;min-width:100px">
+                    ${fetchedAt ? "Último snapshot: " + escHtml(formatDatetimeART(fetchedAt)) : ""}
+                </div>
+            </div>
+        </div>`;
+
+    $("#infra-limits-save")?.addEventListener("click", async () => {
+        const status = $("#infra-limits-status");
+        const dRaw = ($("#infra-daily-input")?.value ?? "").trim();
+        const mRaw = ($("#infra-monthly-input")?.value ?? "").trim();
+        const payload = {};
+        if (dRaw === "") {
+            payload.daily_max = null;
+        } else {
+            const n = Number(dRaw);
+            if (!Number.isFinite(n) || n < 0) {
+                status.textContent = "USD/día inválido";
+                status.style.color = "#ea580c";
+                return;
+            }
+            payload.daily_max = n;
+        }
+        if (mRaw === "") {
+            payload.monthly_max = null;
+        } else {
+            const n = Number(mRaw);
+            if (!Number.isFinite(n) || n < 0) {
+                status.textContent = "USD/mes inválido";
+                status.style.color = "#ea580c";
+                return;
+            }
+            payload.monthly_max = n;
+        }
+        status.textContent = "Guardando...";
+        status.style.color = "var(--text-dim)";
+        try {
+            const resp = await fetch("/api/admin/infra-limits", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (resp.ok) {
+                status.textContent = "Guardado";
+                status.style.color = "#0d9488";
+                setTimeout(loadInfraLimits, 600);
+            } else {
+                const err = await resp.json().catch(() => ({}));
+                status.textContent = err.error || "Error";
+                status.style.color = "#ea580c";
+            }
+        } catch (err) {
+            status.textContent = "Error de red";
+            status.style.color = "#ea580c";
+        }
+    });
+
+    $("#infra-limits-reset")?.addEventListener("click", async () => {
+        const status = $("#infra-limits-status");
+        status.textContent = "Quitando...";
+        status.style.color = "var(--text-dim)";
+        try {
+            const resp = await fetch("/api/admin/infra-limits", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ reset: true }),
+            });
+            if (resp.ok) {
+                status.textContent = "Sin límites";
+                status.style.color = "#0d9488";
+                setTimeout(loadInfraLimits, 600);
+            } else {
+                const err = await resp.json().catch(() => ({}));
+                status.textContent = err.error || "Error";
+                status.style.color = "#ea580c";
+            }
+        } catch (err) {
+            status.textContent = "Error de red";
+            status.style.color = "#ea580c";
+        }
     });
 }
 

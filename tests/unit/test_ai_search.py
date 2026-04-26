@@ -1280,10 +1280,24 @@ class TestQuotaBlocked:
         _stub_usage(monkeypatch, {})
         assert _quota_blocked("gemini") is None
 
-    def test_ollama_never_blocked(self, monkeypatch):
-        _stub_limits(monkeypatch, {"ollama": {"rpm": 1, "tpm": None, "rpd": None, "tpd": None}})
-        _stub_usage(monkeypatch, {"ollama": {"rpm_used": 999, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0}})
+    def test_ollama_default_no_limits_is_unblocked(self, monkeypatch):
+        """With all four caps unset (the default), Ollama is never blocked
+        on RPM/TPM/RPD/TPD — self-hosted means no external portal cap."""
+        _stub_limits(monkeypatch, {"ollama": {"rpm": None, "tpm": None, "rpd": None, "tpd": None}})
+        _stub_usage(monkeypatch, {"ollama": {"rpm_used": 999, "tpm_used": 99_999, "rpd_used": 999, "tpd_used": 999}})
         assert _quota_blocked("ollama") is None
+
+    def test_ollama_admin_set_rpd_is_enforced(self, monkeypatch):
+        """When the admin sets an explicit RPD cap on Ollama (to bound CPU
+        spend on the self-hosted infra), the precheck must honor it."""
+        _stub_limits(monkeypatch, {"ollama": {"rpm": None, "tpm": None, "rpd": 2, "tpd": None}})
+        _stub_usage(monkeypatch, {"ollama": {"rpm_used": 0, "tpm_used": 0, "rpd_used": 23, "tpd_used": 0}})
+        assert _quota_blocked("ollama") == "rpd"
+
+    def test_ollama_admin_set_rpm_is_enforced(self, monkeypatch):
+        _stub_limits(monkeypatch, {"ollama": {"rpm": 1, "tpm": None, "rpd": None, "tpd": None}})
+        _stub_usage(monkeypatch, {"ollama": {"rpm_used": 5, "tpm_used": 0, "rpd_used": 0, "tpd_used": 0}})
+        assert _quota_blocked("ollama") == "rpm"
 
     def test_rpm_exceeded(self, monkeypatch):
         _stub_limits(monkeypatch, {"gemini": {"rpm": 10, "tpm": None, "rpd": None, "tpd": None}})
@@ -1378,8 +1392,14 @@ class TestQuotaGuardChain:
         assert gemini_calls[0]["error_type"] == "QuotaExhausted:rpm"
         assert gemini_calls[0]["error_phase"] == "precheck"
 
-    async def test_last_in_chain_called_even_if_blocked(self, monkeypatch):
-        """The last provider gets a real shot even if the precheck trips."""
+    async def test_last_in_chain_blocked_when_over_quota(self, monkeypatch):
+        """Even the last provider in the chain is skipped when blocked.
+
+        The quota guard never bypasses: if both providers are over their
+        cupo, the chain raises ``QuotaExhaustedError`` so callers can fall
+        back to caches/last-good responses instead of pegándole al provider
+        con un 429 garantizado.
+        """
         _mock_ai_store(monkeypatch, provider="gemini_fallback_groq")
         monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
         monkeypatch.setenv("GEMINI_API_KEY", "fake")
@@ -1397,27 +1417,31 @@ class TestQuotaGuardChain:
         monkeypatch.setattr("app.ai_search.log_ai_usage", lambda **kw: calls.append(kw))
 
         mock_gemini = MagicMock()
+        mock_gemini.aio.models.generate_content = AsyncMock()
         monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
 
-        mock_usage = MagicMock()
-        mock_usage.prompt_tokens = 10
-        mock_usage.completion_tokens = 5
-        mock_choice = MagicMock()
-        mock_choice.message.content = '{"from":"groq-last-resort"}'
-        mock_resp = MagicMock()
-        mock_resp.choices = [mock_choice]
-        mock_resp.usage = mock_usage
         mock_groq = AsyncMock()
-        mock_groq.chat.completions.create = AsyncMock(return_value=mock_resp)
+        mock_groq.chat.completions.create = AsyncMock()
         monkeypatch.setattr("app.ai_search._groq_client", mock_groq)
 
-        text, provider = await _call_ai("test prompt", event_type="topics")
-        assert text == '{"from":"groq-last-resort"}'
-        assert provider == "Groq"
-        mock_groq.chat.completions.create.assert_called_once()
+        with pytest.raises(QuotaExhaustedError) as exc_info:
+            await _call_ai("test prompt", event_type="topics")
+        assert exc_info.value.limit_name == "rpd"
 
-    async def test_single_provider_mode_still_tries_when_blocked(self, monkeypatch):
-        """Mode=gemini (no fallback): the precheck treats it as the last link."""
+        mock_gemini.aio.models.generate_content.assert_not_called()
+        mock_groq.chat.completions.create.assert_not_called()
+
+        gemini_calls = [c for c in calls if c["provider"] == "gemini"]
+        groq_calls = [c for c in calls if c["provider"] == "groq"]
+        assert len(gemini_calls) == 1
+        assert gemini_calls[0]["error_type"] == "QuotaExhausted:rpm"
+        assert gemini_calls[0]["error_phase"] == "precheck"
+        assert len(groq_calls) == 1
+        assert groq_calls[0]["error_type"] == "QuotaExhausted:rpd"
+        assert groq_calls[0]["error_phase"] == "precheck"
+
+    async def test_single_provider_blocked_raises(self, monkeypatch):
+        """Mode=gemini (no fallback): blocked precheck raises immediately."""
         _mock_ai_store(monkeypatch, provider="gemini")
         monkeypatch.setattr("app.ai_search._rate_limit_until", 0)
         monkeypatch.setenv("GEMINI_API_KEY", "fake")
@@ -1426,20 +1450,14 @@ class TestQuotaGuardChain:
 
         monkeypatch.setattr("app.ai_search.log_ai_usage", lambda **kw: None)
 
-        mock_response = MagicMock()
-        mock_response.text = '{"ok":true}'
-        mock_response.usage_metadata = MagicMock()
-        mock_response.usage_metadata.prompt_token_count = 10
-        mock_response.usage_metadata.candidates_token_count = 5
-
         mock_gemini = MagicMock()
-        mock_gemini.aio.models.generate_content = AsyncMock(return_value=mock_response)
+        mock_gemini.aio.models.generate_content = AsyncMock()
         monkeypatch.setattr("app.ai_search._gemini_client", mock_gemini)
 
-        text, provider = await _call_ai("test prompt", event_type="topics")
-        assert text == '{"ok":true}'
-        assert provider == "Gemini"
-        mock_gemini.aio.models.generate_content.assert_called_once()
+        with pytest.raises(QuotaExhaustedError) as exc_info:
+            await _call_ai("test prompt", event_type="topics")
+        assert exc_info.value.limit_name == "rpm"
+        mock_gemini.aio.models.generate_content.assert_not_called()
 
     async def test_no_limits_configured_does_not_skip(self, monkeypatch):
         _mock_ai_store(monkeypatch, provider="gemini_fallback_groq")
@@ -1463,6 +1481,63 @@ class TestQuotaGuardChain:
         text, provider = await _call_ai("test prompt", event_type="topics")
         assert text == '{"from":"gemini"}'
         assert provider == "Gemini"
+
+    async def test_ollama_blocked_even_when_last(self, monkeypatch):
+        """Admin-set Ollama RPD blocks even when Ollama is the only/last
+        provider in the chain — same rule as cloud providers."""
+        _mock_ai_store(monkeypatch, provider="ollama")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setattr("app.ai_search._gemini_client", None)
+        monkeypatch.setattr("app.ai_search._groq_client", None)
+        _stub_limits(monkeypatch, {"ollama": {"rpm": None, "tpm": None, "rpd": 2, "tpd": None}})
+        _stub_usage(monkeypatch, {"ollama": {"rpm_used": 0, "tpm_used": 0, "rpd_used": 23, "tpd_used": 0}})
+
+        calls: list[dict] = []
+        monkeypatch.setattr("app.ai_search.log_ai_usage", lambda **kw: calls.append(kw))
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=_mock_ollama_response('{"should":"not be called"}'),
+        )
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+
+        with pytest.raises(QuotaExhaustedError) as exc_info:
+            await _call_ai("test prompt", event_type="topics")
+        assert exc_info.value.limit_name == "rpd"
+
+        mock_client.post.assert_not_called()
+        ollama_calls = [c for c in calls if c["provider"] == "ollama"]
+        assert len(ollama_calls) == 1
+        assert ollama_calls[0]["success"] is False
+        assert ollama_calls[0]["error_type"] == "QuotaExhausted:rpd"
+        assert ollama_calls[0]["error_phase"] == "precheck"
+
+    async def test_ollama_no_admin_caps_runs_normally(self, monkeypatch):
+        """With Ollama caps left at default (None), Ollama should still run
+        unimpeded — the precheck only fires when the admin set an explicit
+        limit."""
+        _mock_ai_store(monkeypatch, provider="ollama")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setattr("app.ai_search._gemini_client", None)
+        monkeypatch.setattr("app.ai_search._groq_client", None)
+        _stub_limits(monkeypatch, {"ollama": {"rpm": None, "tpm": None, "rpd": None, "tpd": None}})
+        _stub_usage(monkeypatch, {"ollama": {"rpm_used": 99, "tpm_used": 99_999, "rpd_used": 999, "tpd_used": 999_999}})
+        monkeypatch.setattr("app.ai_search.log_ai_usage", lambda **kw: None)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=_mock_ollama_response('{"result":"ok"}'),
+        )
+        monkeypatch.setattr("app.ai_search._ollama_client", mock_client)
+
+        text, provider = await _call_ai("test prompt", event_type="topics")
+        assert text == '{"result":"ok"}'
+        assert provider == "Ollama"
+        mock_client.post.assert_called_once()
 
 
 class TestQuotaExhaustedError:

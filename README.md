@@ -228,9 +228,9 @@ Soportamos **tres** proveedores (`app/ai_search.py`) y cada evento arma su propi
 
 | Proveedor | Modelo por defecto | Costo | Contexto útil | Uso recomendado |
 |-----------|-------------------|-------|---------------|-----------------|
-| **Gemini** | `gemini-3-flash-preview` | Pago (USD 0.50 / 3.00 por 1M tokens in/out) | 100k+ tokens | Primario — maneja contexto grande y JSON por prompt |
-| **Groq** | `llama-3.3-70b-versatile` | Free tier generoso | ~10k chars (`GROQ_MAX_PROMPT_CHARS`) | Fallback rápido — fuerza JSON con `response_format` |
-| **Ollama** | `qwen3:8b` (override con `OLLAMA_MODEL`) | Self-hosted (0 USD por token) | ~12k chars (`OLLAMA_MAX_PROMPT_CHARS`) | Fallback sin salida a internet; ideal para Railway interno |
+| **Gemini** | `gemini-3-flash-preview` | Pago (USD 0.50 / 3.00 por 1M tokens in/out, editable) | 100k+ tokens | Primario — maneja contexto grande y JSON por prompt |
+| **Groq** | `llama-3.3-70b-versatile` | Free tier generoso (0 USD/token, editable) | ~10k chars (`GROQ_MAX_PROMPT_CHARS`) | Fallback rápido — fuerza JSON con `response_format` |
+| **Ollama** | `qwen3:8b` (override con `OLLAMA_MODEL`) | Self-hosted (0 USD/token, editable; cap por gasto Railway) | ~12k chars (`OLLAMA_MAX_PROMPT_CHARS`) | Fallback sin salida a internet; ideal para Railway interno |
 
 **Proveedores válidos** (`VALID_PROVIDERS`): `gemini`, `groq`, `ollama`. Cada evento guarda en `ai_provider_config.provider` una **lista JSON ordenada** sin duplicados y de hasta `MAX_PROVIDER_CHAIN = 4` entradas (ej.: `["gemini"]`, `["gemini","groq"]`, `["ollama","gemini","groq"]`). Los valores legacy del formato `X_fallback_Y` se parsean en lectura para compatibilidad hacia atrás.
 
@@ -239,8 +239,10 @@ Soportamos **tres** proveedores (`app/ai_search.py`) y cada evento arma su propi
 **Mecanismos de control** (todos modificables desde `/admin` sin redeploy):
 
 - **Cadena de providers por evento** (`ai_provider_config`): panel con 4 combos ordenados por evento (1ro / 2do / 3ro / 4to); cada slot excluye los proveedores ya elegidos en slots anteriores.
-- **Cuotas por proveedor** (`ai_provider_limits`): RPM, TPM, RPD, TPD y un presupuesto opcional `monthly_usd` por par `(provider, model)`. Si alguno se excede, `_run_provider_chain` salta al siguiente de la cadena y lo loguea.
+- **Cuotas por proveedor** (`ai_provider_limits`): RPM, TPM, RPD, TPD y un presupuesto opcional `monthly_usd` por par `(provider, model)`. Si alguno se excede, `_run_provider_chain` saltea ese provider sin gastar API y loggea el evento con `error_type="QuotaExhausted:<field>"`. El corte aplica también al último de la cadena: si todos los providers están sobre cupo, el chain levanta `QuotaExhaustedError` y los callers caen al fallback que tengan (cache de tópicos, `_last_good_topics`, etc.) en vez de pegarle al provider con un 429 garantizado. Para proveedores cloud (Gemini/Groq) los caps de portal son *soft*: si el provider bloqueado es el último de la cadena se intenta igual como última bala. Los caps manuales de **Ollama** (default `None`) son **hard caps**: si los configurás en `/admin` se respetan estrictamente, sin bypass de "última bala", porque Ollama corre en infra propia paga (Railway) y un override es intencional para acotar el gasto de CPU.
 - **Presupuesto USD/mes (global)** (`ai_runtime_config["monthly_budget_usd_global"]`): techo total de la cuenta sumado sobre todos los providers. De ese mensual se deriva un cap diario auto-ajustado: `daily_cap = max(0, (presupuesto - gastado_en_el_mes) / días_restantes)`. Si gastás menos un día, el siguiente sube; si te pasás, baja. Ambos USD limits (global y per-pair) se evalúan antes que las cuotas RPM/TPM/RPD/TPD del portal del proveedor.
+- **Pricing editable** (`ai_model_pricing`): tabla con `(provider, model, input_usd_per_1m, output_usd_per_1m, source_url)`. Se siembra en `init_ai_tables()` desde los defaults hardcodeados (`MODEL_PRICING`) y los links oficiales (`PRICING_SOURCE_URLS`); `compute_cost(...)` la lee con cache de 30 s. Desde la card de cada proveedor (Administración → Límites de proveedores IA) hay un bloque "Precio por 1M tokens" con un link "Actualizar valores ↗" que abre la página oficial de pricing y un form inline para guardar nuevos valores sin redeploy. El cambio impacta inmediatamente en los caps USD/mes y en el costo loggeado por invocación.
+- **Tope de gasto Railway** (`ai_runtime_config["infra_usd_daily_max"]` / `["infra_usd_monthly_max"]`): límites globales en USD para toda la infra Railway (donde corre Ollama). El admin los configura desde la sección "Límite de gasto USD (Railway)" del panel. El gasto actual se calcula en `app.infra_cost_store.get_current_spend()`: el mensual sale del último snapshot de Railway GraphQL (`refresh_infra_costs` corre cada hora), y el diario es la diferencia entre el snapshot más reciente del día y el primero registrado al empezar el día. Si se supera cualquiera de los dos, `_infra_block_reason()` corta llamadas a Ollama con razón `infra_usd_daily` / `infra_usd_monthly` *antes* de los caps por par (Gemini/Groq no se ven afectados). Si Railway no está configurado (`RAILWAY_API_TOKEN` ausente) o no hay datos suficientes, el guard se queda permisivo.
 - **Quiet hours** (`ai_schedule_config`): ventana horaria por evento (zona horaria ART) en la que no se corre IA. Útil para apagar prefetch de madrugada.
 - **Timeout de Ollama** (`OLLAMA_TIMEOUT_MIN=30` / `MAX=900`, default 120 s): se lee en cada invocación desde `get_ollama_timeout()`. La primera llamada tras idle puede tardar 15–40 s (cold start del modelo); mantené `OLLAMA_KEEP_ALIVE=10m` en el servicio.
 - **Logging de prompts** (`AI_LOG_PREVIEWS=1`): guarda prompt/respuesta completos en `ai_usage_log`. Los fallos de Ollama persisten el preview **siempre**, para poder debuggear post-mortem.
@@ -311,12 +313,12 @@ class ArticleGroup(BaseModel):
 | `group_metrics` | `app/metrics_store.py` | Snapshots diarios de cuántas fuentes cubrieron qué. |
 | `users` | `app/user_store.py` | Usuarios (id, email, role, provider, created_at). |
 | `tracking_events` | `app/tracking_store.py` | Eventos del frontend (clicks, búsquedas, vistas, etc.). |
-| `ai_usage_log`, `ai_runtime_config`, `ai_provider_limits`, `ai_schedule_config`, `ai_topics_cache`, `ai_topstory_cache` | `app/ai_store.py` | Uso, costo y configuración de IA. |
+| `ai_usage_log`, `ai_runtime_config`, `ai_provider_limits`, `ai_model_pricing`, `ai_schedule_config`, `ai_topics_cache`, `ai_topstory_cache` | `app/ai_store.py` | Uso, costo, pricing editable y configuración de IA. |
 | `process_events` | `app/process_events_store.py` | Log estructurado de jobs del scheduler. |
 | `infra_cost_snapshots` | `app/infra_cost_store.py` | Costo por servicio traído de Railway. |
 | `x_campaigns`, `x_tier_config`, `x_oauth_state`, `x_usage_log` | `app/x_store.py` | Config de campañas de X, tier contratado, tokens OAuth2 vigentes y log de posteos. |
 
-**Pricing de IA** en `MODEL_PRICING` (`app/ai_store.py`). Groq y Ollama cuestan 0 USD/token; Gemini tiene precios por 1M tokens input/output y se persiste el cálculo en `ai_usage_log.cost_total`.
+**Pricing de IA**: la tabla `ai_model_pricing` mantiene `(input_usd_per_1m, output_usd_per_1m, source_url)` editables por par `(provider, model)`. Se siembra desde `MODEL_PRICING` (`app/ai_store.py`) y `PRICING_SOURCE_URLS` la primera vez que arranca, y `compute_cost(...)` la lee con cache de 30 s para calcular `ai_usage_log.cost_total`. Groq y Ollama vienen sembrados como 0 USD/token; los administradores pueden actualizarlos desde el panel sin redeploy.
 
 ---
 
@@ -350,7 +352,7 @@ Disponible en **`/admin`** (requiere JWT + rol `admin`). Sirve el archivo `stati
 
 - **Dashboard**: usuarios activos, eventos por hora, actividad diaria, secciones visitadas, búsquedas populares, contenido top.
 - **AI Monitor**: últimas invocaciones a IA (tokens, latencia, error, proveedor), con drill-down al prompt/respuesta si está habilitado `AI_LOG_PREVIEWS`.
-- **AI Config**: cambiar el provider por evento, ajustar cuotas RPM/TPM/RPD/TPD y el presupuesto USD/mes (global y por par `provider/model`, con cap diario auto-derivado), definir quiet hours por evento, cambiar el timeout de Ollama.
+- **AI Config**: cambiar el provider por evento, ajustar cuotas RPM/TPM/RPD/TPD y el presupuesto USD/mes (global y por par `provider/model`, con cap diario auto-derivado), editar el precio por 1M tokens (in/out) de cada modelo con link a la página oficial de pricing, definir quiet hours por evento, cambiar el timeout de Ollama, y configurar el tope de gasto USD diario/mensual de la infra Railway (Ollama).
 - **AI Cost**: costo diario total y por proveedor.
 - **Scheduler Config**: ajustar intervalos de `refresh_news` y `prefetch_topics` en vivo.
 - **Process Events**: log de jobs del scheduler (inicio, fin, error, duración).
@@ -431,6 +433,8 @@ Base URL: `http://localhost:8000` (local) o el dominio de Railway (prod).
 | `/api/admin/ai-schedule` | POST | Quiet hours por evento. |
 | `/api/admin/ai-limits` | GET / POST | Cuotas RPM/TPM/RPD/TPD y presupuesto USD/mes por proveedor; el GET incluye el bloque `global` con el presupuesto compartido y el cap diario derivado. |
 | `/api/admin/ai-budget-global` | GET / POST | Presupuesto USD/mes global compartido por todos los proveedores (`{"monthly_usd": …}` o `{"reset": true}`). |
+| `/api/admin/ai-pricing` | GET / POST | Lista (`{items, source_urls}`) y edición/reset del costo USD por 1M tokens in/out de cada par `(provider, model)`. Acepta `{reset: true}` para volver al default sembrado desde `MODEL_PRICING`. |
+| `/api/admin/infra-limits` | GET / POST | Tope de gasto USD diario/mensual para la infra Railway (impacta solo a Ollama). El GET devuelve `{limits, spend, blocked, available}` con el gasto actual derivado de los snapshots de Railway. POST acepta `{daily_max, monthly_max}` o `{reset: true}`. |
 | `/api/admin/ai-monitor` | GET | Últimas invocaciones. |
 | `/api/admin/ai-invocations` | GET | Búsqueda paginada de invocaciones. |
 | `/api/admin/ollama-config` | GET / POST | Timeout de invocación Ollama. |

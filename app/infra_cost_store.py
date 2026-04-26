@@ -4,12 +4,18 @@ Persistencia de snapshots de costo de infraestructura (Railway).
 Guardamos un snapshot por cada pull a Railway (cron horario), con el costo
 estimado por servicio. Así podemos mostrar un historial diario en el admin
 y no depender únicamente del valor "en vivo".
+
+También expone los límites de gasto USD diario/mensual (almacenados en
+``ai_runtime_config``) y el spend actual derivado de los snapshots, que el
+guardrail de ``ai_search`` usa para bloquear Ollama si el proyecto se está
+yendo de presupuesto en Railway.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from app.db import execute, get_conn, is_postgres, query
@@ -17,6 +23,16 @@ from app.db import execute, get_conn, is_postgres, query
 logger = logging.getLogger(__name__)
 
 ART = timezone(timedelta(hours=-3))
+
+# Claves en ``ai_runtime_config`` para los límites USD de Railway. Las dos
+# son opcionales: si no hay row (o el valor es None) significa "sin límite".
+_INFRA_USD_DAILY_KEY = "infra_usd_daily_max"
+_INFRA_USD_MONTHLY_KEY = "infra_usd_monthly_max"
+
+# Cache del spend actual. Lo consulta el guard del provider chain en cada
+# llamada a Ollama, así que cacheamos para no hacer 2 queries SQL por call.
+_spend_cache: tuple[float, dict[str, float | None]] | None = None
+_SPEND_CACHE_TTL = 30
 
 
 def init_infra_cost_table() -> None:
@@ -66,6 +82,7 @@ def save_snapshot(services: list[dict]) -> int:
     """
     if not services:
         return 0
+    global _spend_cache
     now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
     inserted = 0
     try:
@@ -96,6 +113,8 @@ def save_snapshot(services: list[dict]) -> int:
     except Exception as exc:
         logger.warning("Failed to save infra cost snapshot: %s", exc)
         return 0
+    if inserted:
+        _spend_cache = None
     return inserted
 
 
@@ -189,3 +208,292 @@ def purge_old_snapshots(days: int = 90) -> int:
     except Exception as exc:
         logger.warning("purge_old_snapshots failed: %s", exc)
         return 0
+
+
+# ── USD limits (daily / monthly) ─────────────────────────────────────────
+
+
+def _get_runtime_value(key: str) -> str | None:
+    """Read a single ``ai_runtime_config`` value with no caching.
+
+    We deliberately don't share ``ai_store._runtime_cache`` to keep the
+    module decoupled (avoids an import cycle with ``ai_store``). Each call
+    is a single primary-key lookup so it's cheap.
+    """
+    try:
+        with get_conn() as conn:
+            row = query(
+                conn,
+                "SELECT value FROM ai_runtime_config WHERE key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return row["value"]
+    except Exception as exc:
+        logger.warning("infra_cost_store: read %s failed: %s", key, exc)
+        return None
+
+
+def _set_runtime_value(key: str, value: str | None) -> bool:
+    """Upsert (or delete on ``None``) a single ``ai_runtime_config`` row."""
+    now_iso = datetime.now(ART).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        with get_conn() as conn:
+            if value is None:
+                execute(
+                    conn,
+                    "DELETE FROM ai_runtime_config WHERE key = ?",
+                    (key,),
+                )
+            elif is_postgres():
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_runtime_config (key, value, updated_at)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (key) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (key, value, now_iso),
+                )
+            else:
+                execute(
+                    conn,
+                    """
+                    INSERT INTO ai_runtime_config (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (key, value, now_iso),
+                )
+        return True
+    except Exception as exc:
+        logger.error("infra_cost_store: write %s failed: %s", key, exc)
+        return False
+
+
+def _parse_optional_float(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val < 0:
+        return None
+    return val
+
+
+def get_infra_limits() -> dict[str, float | None]:
+    """Return ``{"daily_max": .., "monthly_max": ..}`` (None = sin límite)."""
+    return {
+        "daily_max": _parse_optional_float(_get_runtime_value(_INFRA_USD_DAILY_KEY)),
+        "monthly_max": _parse_optional_float(_get_runtime_value(_INFRA_USD_MONTHLY_KEY)),
+    }
+
+
+def set_infra_limits(
+    *,
+    daily_max: float | int | None,
+    monthly_max: float | int | None,
+) -> bool:
+    """Persist both limits at once. Validates non-negative numbers or None.
+
+    Returns ``False`` on invalid input (negative or non-numeric); both
+    values are written atomically so a failed validation reverts both
+    fields. Either ``None`` clears that single key.
+    """
+    global _spend_cache
+
+    def _validate(value):
+        if value is None:
+            return True, None
+        if isinstance(value, bool):
+            return False, None
+        if not isinstance(value, (int, float)):
+            return False, None
+        if value < 0:
+            return False, None
+        return True, float(value)
+
+    ok_d, daily_val = _validate(daily_max)
+    ok_m, monthly_val = _validate(monthly_max)
+    if not ok_d or not ok_m:
+        return False
+
+    ok = _set_runtime_value(
+        _INFRA_USD_DAILY_KEY,
+        None if daily_val is None else str(daily_val),
+    )
+    ok = ok and _set_runtime_value(
+        _INFRA_USD_MONTHLY_KEY,
+        None if monthly_val is None else str(monthly_val),
+    )
+    if ok:
+        _spend_cache = None
+        logger.info(
+            "Railway infra limits updated: daily=%s, monthly=%s",
+            daily_val if daily_val is not None else "(sin límite)",
+            monthly_val if monthly_val is not None else "(sin límite)",
+        )
+    return ok
+
+
+# ── Spend en USD del día / mes ───────────────────────────────────────────
+
+
+def _today_start_iso(now: datetime | None = None) -> str:
+    """Return ``YYYY-MM-DDT00:00:00`` for the current ART day."""
+    n = now or datetime.now(ART)
+    return n.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _query_total_at_or_after(since_iso: str) -> tuple[str | None, float | None]:
+    """Return ``(fetched_at, total_usd_month)`` of the **earliest** snapshot
+    aggregate row at or after ``since_iso`` (or ``(None, None)`` if missing).
+
+    The aggregate row is the one with ``raw_json`` containing
+    ``"_aggregate": true`` (set by ``railway_client._normalize_services``).
+    Each snapshot has exactly one such row whose ``estimated_usd_month``
+    is the project total at fetch time.
+    """
+    try:
+        with get_conn() as conn:
+            row = query(
+                conn,
+                """
+                SELECT fetched_at, estimated_usd_month
+                  FROM infra_cost_snapshot
+                 WHERE fetched_at >= ?
+                   AND raw_json LIKE '%"_aggregate":%true%'
+                 ORDER BY fetched_at ASC
+                 LIMIT 1
+                """,
+                (since_iso,),
+            ).fetchone()
+    except Exception as exc:
+        logger.warning("infra spend lookup failed: %s", exc)
+        return None, None
+    if row is None:
+        return None, None
+    ts = row["fetched_at"]
+    val = row["estimated_usd_month"]
+    return ts, (None if val is None else float(val))
+
+
+def _query_latest_total() -> tuple[str | None, float | None]:
+    """Return ``(fetched_at, total_usd_month)`` of the latest aggregate row."""
+    try:
+        with get_conn() as conn:
+            row = query(
+                conn,
+                """
+                SELECT fetched_at, estimated_usd_month
+                  FROM infra_cost_snapshot
+                 WHERE raw_json LIKE '%"_aggregate":%true%'
+                 ORDER BY fetched_at DESC
+                 LIMIT 1
+                """,
+            ).fetchone()
+    except Exception as exc:
+        logger.warning("infra latest lookup failed: %s", exc)
+        return None, None
+    if row is None:
+        return None, None
+    ts = row["fetched_at"]
+    val = row["estimated_usd_month"]
+    return ts, (None if val is None else float(val))
+
+
+def get_current_spend() -> dict[str, float | None | str]:
+    """Return ``{today_usd, month_usd, fetched_at}``.
+
+    - ``month_usd`` = ``estimated_usd_month`` of the latest snapshot
+      (Railway already reports cumulative spend for the billing period).
+    - ``today_usd`` = ``month_usd_now − month_usd_at_start_of_day``. If
+      there's no snapshot from before today, returns ``None`` for
+      ``today_usd`` so the caller can show "—" and the guard stays
+      permissive (no enforcement when we lack baseline data).
+    - ``fetched_at`` = timestamp of the latest snapshot used for ``month_usd``.
+
+    Cached for ``_SPEND_CACHE_TTL`` seconds (the guard hits this on every
+    Ollama call and the data only refreshes hourly anyway).
+    """
+    global _spend_cache
+    now = time.time()
+    if _spend_cache is not None and (now - _spend_cache[0]) < _SPEND_CACHE_TTL:
+        return dict(_spend_cache[1])
+
+    latest_ts, latest_total = _query_latest_total()
+    today_start = _today_start_iso()
+    base_ts, base_total = _query_total_at_or_after(today_start)
+
+    today_usd: float | None
+    if latest_total is None:
+        today_usd = None
+    elif base_ts is None or base_total is None:
+        # No hay snapshot anterior al día actual -> no podemos calcular el delta.
+        today_usd = None
+    elif base_ts == latest_ts:
+        # Único snapshot del día = arrancó hoy con ese valor; aún no podemos
+        # imputar gasto al día porque no sabemos cuánto traía de antes.
+        today_usd = None
+    else:
+        today_usd = max(0.0, float(latest_total) - float(base_total))
+
+    result: dict[str, float | None | str] = {
+        "today_usd": None if today_usd is None else round(today_usd, 4),
+        "month_usd": None if latest_total is None else round(float(latest_total), 4),
+        "fetched_at": latest_ts,
+    }
+    _spend_cache = (now, dict(result))  # type: ignore[assignment]
+    return result
+
+
+def get_blocked_keys() -> list[str]:
+    """Return which limit keys are currently exceeded (subset of ``daily``/``monthly``).
+
+    Returns an empty list when no limit is configured, when there's no
+    spend data yet, or when the spend is below both caps.
+    """
+    limits = get_infra_limits()
+    spend = get_current_spend()
+    blocked: list[str] = []
+
+    daily_max = limits.get("daily_max")
+    monthly_max = limits.get("monthly_max")
+    today_usd = spend.get("today_usd")
+    month_usd = spend.get("month_usd")
+
+    if (
+        isinstance(daily_max, (int, float))
+        and daily_max is not None
+        and isinstance(today_usd, (int, float))
+        and today_usd is not None
+        and float(today_usd) >= float(daily_max)
+    ):
+        blocked.append("daily")
+    if (
+        isinstance(monthly_max, (int, float))
+        and monthly_max is not None
+        and isinstance(month_usd, (int, float))
+        and month_usd is not None
+        and float(month_usd) >= float(monthly_max)
+    ):
+        blocked.append("monthly")
+    return blocked
+
+
+def reset_spend_cache() -> None:
+    """Force a re-read on the next ``get_current_spend`` call.
+
+    Called from ``save_snapshot`` so the admin's "Actualizar ahora" button
+    reflects new data immediately, and from ``set_infra_limits`` after
+    config changes.
+    """
+    global _spend_cache
+    _spend_cache = None

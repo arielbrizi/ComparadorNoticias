@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
@@ -721,6 +722,219 @@ class TestAIBudgetGlobalEndpoint:
 
         resp = await client.post(
             "/api/admin/ai-budget-global", json={"monthly_usd": "fifty"},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+
+class TestAIPricingEndpoint:
+    """GET/POST /api/admin/ai-pricing — editable per-model rates."""
+
+    async def test_get_requires_admin(self, client):
+        resp = await client.get("/api/admin/ai-pricing")
+        assert resp.status_code == 403
+
+    async def test_post_requires_admin(self, client):
+        resp = await client.post("/api/admin/ai-pricing", json={})
+        assert resp.status_code == 403
+
+    async def test_get_returns_seed_rows(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.get("/api/admin/ai-pricing", cookies={"vs_token": token})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "items" in data
+        assert "source_urls" in data
+        models = {(p["provider"], p["model"]) for p in data["items"]}
+        assert ("gemini", "gemini-3-flash-preview") in models
+        assert ("groq", "llama-3.3-70b-versatile") in models
+        assert "gemini" in data["source_urls"]
+
+    async def test_post_updates_pricing(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-pricing",
+            json={
+                "provider": "gemini", "model": "gemini-3-flash-preview",
+                "input_usd_per_1m": 2.0, "output_usd_per_1m": 5.5,
+            },
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["is_default"] is False
+
+        get_resp = await client.get("/api/admin/ai-pricing", cookies={"vs_token": token})
+        items = {(p["provider"], p["model"]): p for p in get_resp.json()["items"]}
+        row = items[("gemini", "gemini-3-flash-preview")]
+        assert row["input_usd_per_1m"] == pytest.approx(2.0)
+        assert row["output_usd_per_1m"] == pytest.approx(5.5)
+        assert row["is_default"] is False
+
+    async def test_post_reset_restores_default(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        await client.post(
+            "/api/admin/ai-pricing",
+            json={"provider": "gemini", "model": "gemini-3-flash-preview",
+                  "input_usd_per_1m": 99.0, "output_usd_per_1m": 99.0},
+            cookies={"vs_token": token},
+        )
+        resp = await client.post(
+            "/api/admin/ai-pricing",
+            json={"provider": "gemini", "model": "gemini-3-flash-preview", "reset": True},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["is_default"] is True
+
+    async def test_post_rejects_invalid_provider(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-pricing",
+            json={"provider": "openai", "model": "gpt-4",
+                  "input_usd_per_1m": 1.0, "output_usd_per_1m": 1.0},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+    async def test_post_rejects_negative(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-pricing",
+            json={"provider": "gemini", "model": "gemini-3-flash-preview",
+                  "input_usd_per_1m": -1.0, "output_usd_per_1m": 1.0},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+    async def test_post_missing_fields(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        resp = await client.post(
+            "/api/admin/ai-pricing",
+            json={"provider": "gemini", "model": "gemini-3-flash-preview"},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+
+class TestInfraLimitsEndpoint:
+    """GET/POST /api/admin/infra-limits — Railway USD spend caps."""
+
+    async def test_get_requires_admin(self, client):
+        resp = await client.get("/api/admin/infra-limits")
+        assert resp.status_code == 403
+
+    async def test_post_requires_admin(self, client):
+        resp = await client.post("/api/admin/infra-limits", json={})
+        assert resp.status_code == 403
+
+    async def test_get_returns_default_state(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        # Initialize the infra cost table — endpoint reads from it.
+        from app.infra_cost_store import init_infra_cost_table
+        init_infra_cost_table()
+
+        resp = await client.get("/api/admin/infra-limits", cookies={"vs_token": token})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["limits"] == {"daily_max": None, "monthly_max": None}
+        assert data["spend"]["today_usd"] is None
+        assert data["spend"]["month_usd"] is None
+        assert data["blocked"] == []
+        # ``available`` reflects railway_client config; without the env var
+        # it should be False — if some other test toggled it, just ensure
+        # the field is a bool.
+        assert isinstance(data["available"], bool)
+
+    async def test_post_sets_limits(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        from app.infra_cost_store import init_infra_cost_table
+        init_infra_cost_table()
+
+        resp = await client.post(
+            "/api/admin/infra-limits",
+            json={"daily_max": 1.5, "monthly_max": 30.0},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["limits"]["daily_max"] == pytest.approx(1.5)
+        assert body["limits"]["monthly_max"] == pytest.approx(30.0)
+
+    async def test_post_reset_clears_limits(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        from app.infra_cost_store import init_infra_cost_table
+        init_infra_cost_table()
+
+        await client.post(
+            "/api/admin/infra-limits",
+            json={"daily_max": 1.0, "monthly_max": 10.0},
+            cookies={"vs_token": token},
+        )
+        resp = await client.post(
+            "/api/admin/infra-limits", json={"reset": True},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["limits"]["daily_max"] is None
+        assert body["limits"]["monthly_max"] is None
+
+    async def test_post_rejects_negative(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        from app.infra_cost_store import init_infra_cost_table
+        init_infra_cost_table()
+
+        resp = await client.post(
+            "/api/admin/infra-limits",
+            json={"daily_max": -1.0, "monthly_max": 10.0},
+            cookies={"vs_token": token},
+        )
+        assert resp.status_code == 400
+
+    async def test_post_rejects_non_numeric(self, client, monkeypatch):
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        admin = upsert_user("admin@test.com", "Admin", "")
+        token = _make_admin_token(user_id=admin["id"], email=admin["email"])
+
+        from app.infra_cost_store import init_infra_cost_table
+        init_infra_cost_table()
+
+        resp = await client.post(
+            "/api/admin/infra-limits",
+            json={"daily_max": "ten", "monthly_max": 10.0},
             cookies={"vs_token": token},
         )
         assert resp.status_code == 400

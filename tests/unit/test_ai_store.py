@@ -52,6 +52,8 @@ def _reset_cache(monkeypatch):
     monkeypatch.setattr("app.ai_store._limits_cache_ts", 0)
     monkeypatch.setattr("app.ai_store._usage_cache", {})
     monkeypatch.setattr("app.ai_store._cost_cache", {})
+    monkeypatch.setattr("app.ai_store._pricing_cache", {})
+    monkeypatch.setattr("app.ai_store._pricing_cache_ts", 0)
 
 
 class TestComputeCost:
@@ -1028,3 +1030,91 @@ class TestProviderLimitsBudget:
         assert lim["rpd"] == 50
         assert lim["tpd"] is None
         assert lim["monthly_usd"] == pytest.approx(20.0)
+
+
+class TestModelPricing:
+    """compute_cost honors DB overrides; set_model_pricing validates input."""
+
+    @pytest.fixture(autouse=True)
+    def _init(self, temp_db):
+        init_ai_tables()
+
+    def test_seed_inserts_known_pairs(self):
+        from app.ai_store import get_model_pricing
+
+        rows = get_model_pricing()
+        models = {(r["provider"], r["model"]) for r in rows}
+        assert ("gemini", "gemini-3-flash-preview") in models
+        assert ("groq", "llama-3.3-70b-versatile") in models
+        assert ("ollama", "qwen3:8b") in models
+
+    def test_compute_cost_uses_db_override(self):
+        from app.ai_store import set_model_pricing
+
+        set_model_pricing("gemini", "gemini-3-flash-preview", 1.0, 5.0)
+        cost_in, cost_out = compute_cost("gemini-3-flash-preview", 1_000_000, 1_000_000)
+        assert cost_in == pytest.approx(1.0)
+        assert cost_out == pytest.approx(5.0)
+
+    def test_reset_restores_default(self):
+        from app.ai_store import (
+            is_default_model_pricing,
+            reset_model_pricing,
+            set_model_pricing,
+        )
+
+        set_model_pricing("gemini", "gemini-3-flash-preview", 99.0, 99.0)
+        assert is_default_model_pricing("gemini", "gemini-3-flash-preview") is False
+        ok = reset_model_pricing("gemini", "gemini-3-flash-preview")
+        assert ok
+        assert is_default_model_pricing("gemini", "gemini-3-flash-preview") is True
+        cost_in, cost_out = compute_cost("gemini-3-flash-preview", 1_000_000, 1_000_000)
+        assert cost_in == pytest.approx(0.50)
+        assert cost_out == pytest.approx(3.00)
+
+    def test_set_rejects_negative_values(self):
+        from app.ai_store import set_model_pricing
+
+        assert set_model_pricing("gemini", "gemini-3-flash-preview", -1.0, 1.0) is False
+        assert set_model_pricing("gemini", "gemini-3-flash-preview", 1.0, -1.0) is False
+
+    def test_set_rejects_invalid_provider(self):
+        from app.ai_store import set_model_pricing
+
+        assert set_model_pricing("openai", "gpt-4", 1.0, 1.0) is False
+
+    def test_set_rejects_blank_model(self):
+        from app.ai_store import set_model_pricing
+
+        assert set_model_pricing("gemini", "", 1.0, 1.0) is False
+        assert set_model_pricing("gemini", "   ", 1.0, 1.0) is False
+
+    def test_set_rejects_bool_values(self):
+        from app.ai_store import set_model_pricing
+
+        assert set_model_pricing("gemini", "x", True, 1.0) is False
+        assert set_model_pricing("gemini", "x", 1.0, False) is False
+
+    def test_reset_unknown_model_returns_false(self):
+        from app.ai_store import reset_model_pricing
+
+        assert reset_model_pricing("gemini", "totally-new-unknown") is False
+
+    def test_unknown_model_zero_cost_after_init(self):
+        cost_in, cost_out = compute_cost("not-a-real-model", 100_000, 50_000)
+        assert cost_in == 0.0
+        assert cost_out == 0.0
+
+    def test_log_uses_overridden_pricing(self):
+        """log_ai_usage → compute_cost path picks up the DB override."""
+        from app.ai_store import set_model_pricing
+
+        set_model_pricing("gemini", "gemini-3-flash-preview", 2.0, 4.0)
+        log_ai_usage(
+            event_type="topics", provider="gemini",
+            model="gemini-3-flash-preview",
+            input_tokens=1_000_000, output_tokens=1_000_000, latency_ms=10,
+        )
+        invalidate_provider_usage_cache()
+        summary = query_global_cost_summary()
+        assert summary["month_used"] == pytest.approx(2.0 + 4.0, rel=1e-3)

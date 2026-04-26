@@ -761,9 +761,21 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 5-5"/></svg>
                 Límites de proveedores IA
             </h3>
-            <p class="admin-card-desc">Cupos publicados por cada proveedor (RPM/TPM/RPD/TPD) y presupuesto en USD/mes (con cap diario auto-ajustado en base a lo que ya gastaste). Si un proveedor supera su cupo, el sistema salta al siguiente de la cadena en lugar de devolver error. Vacío = sin límite.</p>
+            <p class="admin-card-desc">Cupos publicados por cada proveedor (RPM/TPM/RPD/TPD) y presupuesto en USD/mes (con cap diario auto-ajustado en base a lo que ya gastaste). Si un proveedor supera su cupo, el sistema salta al siguiente de la cadena en lugar de devolver error. Vacío = sin límite. El botón <b>Actualizar valores</b> abre la página oficial de pricing del proveedor para chequear si cambiaron los precios — el costo se calcula como <code>(input_tokens × in_$/1M + output_tokens × out_$/1M) / 1.000.000</code>.</p>
             <div id="ai-budget-global-wrap" style="margin-bottom:1rem"><div class="admin-loading"><div class="spinner"></div></div></div>
             <div id="ai-limits-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
+    <!-- Railway infra spend cap -->
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+                Límite de gasto USD (Railway)
+            </h3>
+            <p class="admin-card-desc">Tope diario y mensual del costo total estimado de Railway (todos los servicios juntos). Si se supera, las llamadas a <b>Ollama</b> se bloquean y la cadena cae al próximo proveedor (Gemini/Groq), porque Ollama es lo único que corre sobre Railway. Los proveedores cloud no se ven afectados. Vacío = sin límite. El cálculo "hoy" usa el delta entre el último snapshot y el primero del día (necesita al menos 2 snapshots por día).</p>
+            <div id="infra-limits-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
         </div>
     </div>
 
@@ -914,6 +926,6 @@
     <div id="admin-modal-host"></div>
 </div>
 
-<script src="/static/js/admin.js?v=14"></script>
+<script src="/static/js/admin.js?v=15"></script>
 </body>
 </html>

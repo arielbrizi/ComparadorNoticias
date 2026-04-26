@@ -41,7 +41,9 @@ compatibility.
   is NOT rebuilt when the admin changes it.
 - Uses Ollama's native `/api/chat` with `format: "json"` to constrain output
 - Default model is `qwen3:8b` (override via `OLLAMA_MODEL` env var)
-- Self-hosted → cost per token is 0; tracked in `MODEL_PRICING` as free
+- Self-hosted → cost per token is 0 by default (seeded from `MODEL_PRICING`).
+  The pricing live in the `ai_model_pricing` table and are editable from
+  the admin panel; `compute_cost` reads them with a 30 s cache.
 - Requires `OLLAMA_BASE_URL` env var (e.g. `http://ollama.railway.internal:11434`)
 
 ## Provider routing
@@ -65,7 +67,9 @@ precheck** before every invocation:
 - `app.ai_store.PROVIDER_LIMIT_DEFAULTS` holds hardcoded monthly-researched
   defaults per `(provider, model)` for RPM/TPM/RPD/TPD plus a `monthly_usd`
   USD budget (default `None` → unlimited). Ollama defaults are all `None`
-  (self-hosted → no external cap).
+  (self-hosted → no external cap), but the admin can set explicit values to
+  cap CPU spend on the self-hosted infra; those overrides ARE enforced (see
+  hard-cap rules below).
 - Admin overrides live in the `ai_provider_limits` table (5 nullable columns:
   `rpm`, `tpm`, `rpd`, `tpd`, `monthly_usd`) and are edited from the "Límites
   de proveedores IA" card (Administración tab). Setting a field to empty
@@ -95,15 +99,24 @@ precheck** before every invocation:
   nombre que dispare:
   1. `monthly_usd_global` — `month_cost_global >= global_budget`
   2. `daily_usd_global` — `today_cost_global >= compute_daily_cap(global)`
-  3. `monthly_usd` — `month_cost_provider >= pair_budget`
-  4. `daily_usd` — `today_cost_provider >= compute_daily_cap(pair)`
-  5. `rpm` / `tpm` / `rpd` / `tpd` — los cupos del portal del proveedor.
+  3. `infra_usd_daily` / `infra_usd_monthly` — tope de Railway (solo Ollama).
+  4. `monthly_usd` — `month_cost_provider >= pair_budget`
+  5. `daily_usd` — `today_cost_provider >= compute_daily_cap(pair)`
+  6. `rpm` / `tpm` / `rpd` / `tpd` — cupos del portal o caps manuales.
 
+  Para Ollama, los pasos 6 sólo disparan si el admin configuró el campo a
+  mano (default es `None`); el resto aplica igual que a cualquier proveedor.
   Devuelve `None` cuando todo está OK y swallow-ea DB errors fail-open.
-- En `_run_provider_chain`, si `_quota_blocked` devuelve non-`None` **y el
-  provider no es el último de la cadena**, el step se saltea y se loggea como
+- En `_run_provider_chain`, si `_quota_blocked` devuelve non-`None` el step
+  se saltea sin gastar API y se loggea como
   `error_type="QuotaExhausted:<field>"`, `error_phase="precheck"`, cero
-  tokens. El último provider siempre se intenta como last-resort fallback.
+  tokens. El corte aplica **siempre**, incluso para el último proveedor de
+  la cadena: si todos están sobre cupo, `_run_provider_chain` levanta
+  `QuotaExhaustedError` y los callers usan su fallback (cache,
+  `_last_good_topics`, etc.). No hay "última bala": insistir contra un
+  provider con TPD/RPD agotado sólo dispara 429s y suma latencia, y los
+  caps en USD o de infra son topes intencionales del admin que tampoco
+  conviene bypassear.
 - `GET /api/admin/ai-limits` devuelve `{items, defaults, global}`. Cada item
   incluye `monthly_usd`, `monthly_usd_used`, `daily_usd_cap`, `daily_usd_used`
   además de los conteos RPM/TPM/RPD/TPD; `blocked_by` puede ahora contener
@@ -117,16 +130,67 @@ precheck** before every invocation:
   `invalidate_provider_usage_cache()` — ambos se llaman automáticamente desde
   los endpoints admin.
 
-> **Nota sobre Ollama y Groq free tier**: como `MODEL_PRICING` los marca como
-> $0/token, los presupuestos USD nunca los bloquean. Si en el futuro alguno
-> deja de ser free, basta actualizar `MODEL_PRICING` y el cap se aplica solo.
+> **Nota sobre Ollama y Groq free tier**: el seed de `ai_model_pricing` los
+> marca como $0/token, así que los presupuestos USD nunca los bloquean por
+> default. Si un proveedor deja de ser free, el admin puede actualizar el
+> precio desde la card "Precio por 1M tokens" → "Actualizar valores" sin
+> deploy y los caps quedan activos al instante.
+
+## Editable pricing (`ai_model_pricing` table)
+
+- Cada row tiene `(provider, model, input_usd_per_1m, output_usd_per_1m,
+  source_url, updated_at)`. PK por `(provider, model)`.
+- Seed inicial desde `MODEL_PRICING` y `PRICING_SOURCE_URLS` durante
+  `init_ai_tables()`. El seed solo inserta rows que no existen, así no
+  pisa overrides al deployar.
+- `compute_cost(model, in_tokens, out_tokens)` lee la tabla via
+  `_load_pricing_from_db` con cache de 30 s (`_pricing_cache`); si el row
+  no existe cae al `MODEL_PRICING` hardcodeado y, en última instancia, a
+  `(0.0, 0.0)`. **Nunca crashea** una llamada de logging.
+- Helpers públicos: `get_model_pricing()`, `get_model_pricing_for(p, m)`,
+  `set_model_pricing(p, m, in_$/1M, out_$/1M)`,
+  `reset_model_pricing(p, m)` (restaura defaults), `is_default_model_pricing`.
+- Endpoints admin: `GET /api/admin/ai-pricing` devuelve `{items, source_urls}`,
+  `POST /api/admin/ai-pricing` upsertea o resetea (`{reset: true}`).
+- UI: en la card de cada proveedor (Administración → Límites de proveedores
+  IA), el bloque "Precio por 1M tokens" muestra in/out actuales + último
+  update; el link "Actualizar valores ↗" abre la página oficial de pricing
+  Y desplega un form inline para guardar valores nuevos sin reload.
+
+## Railway infra spend caps
+
+- Solo aplica a Ollama (lo único que corre sobre Railway). Los proveedores
+  cloud no se ven afectados por estos caps.
+- Almacenamiento: `ai_runtime_config` con las claves `infra_usd_daily_max`
+  y `infra_usd_monthly_max` (None = sin límite). Helpers en
+  `app.infra_cost_store`: `get_infra_limits()`, `set_infra_limits()`.
+- `get_current_spend()` devuelve `{today_usd, month_usd, fetched_at}`:
+  - `month_usd` = `estimated_usd_month` del último snapshot agregado
+    (Railway ya reporta acumulado del período de billing).
+  - `today_usd` = `month_usd_now − month_usd_at_start_of_day`. Si no hay
+    snapshot anterior al día actual, devuelve `None` y el guard se queda
+    permisivo (necesita ≥2 snapshots por día para enforcement).
+- `get_blocked_keys()` devuelve un subset de `["daily", "monthly"]`. Cache
+  de 30 s (`_spend_cache`) que se resetea cuando se guarda un snapshot
+  nuevo o se cambian los límites.
+- Endpoints admin: `GET /api/admin/infra-limits` → `{limits, spend, blocked,
+  available}` (donde `available=False` si Railway no está configurado);
+  `POST /api/admin/infra-limits` con `{daily_max, monthly_max}` o
+  `{reset: true}`.
+- Guardrail: `_infra_block_reason(provider)` en `ai_search.py` se llama
+  desde `_quota_blocked` antes de los caps por par. Si Railway no está
+  configurado o no hay datos, devuelve `None` (permisivo). Caso contrario
+  emite `"infra_usd_monthly"` o `"infra_usd_daily"`. Ambos son **hard
+  caps** (no se bypasean ni en último step de la cadena).
 
 ### Monthly research TODO
 
 The numeric defaults in `PROVIDER_LIMIT_DEFAULTS` are marked with a
 `# Lookup YYYY-MM-DD` comment. Once a month, re-check Google AI Studio and
-Groq Console, update the numbers, and bump the date. Admins can also patch
-the live values immediately from the UI without a deploy.
+Groq Console, update the numbers, and bump the date. Para pricing,
+hacer lo propio con `MODEL_PRICING` (defaults hardcodeados que se usan en
+el seed de `ai_model_pricing` y como fallback). El admin puede patchear
+los valores desde la UI sin deploy en cualquiera de los dos casos.
 
 ## When changing search or topic prompts
 

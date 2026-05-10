@@ -17,7 +17,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Playfair+Display:wght@700;800;900&family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/styles.css?v=22">
+    <link rel="stylesheet" href="/static/css/styles.css?v=23">
 </head>
 <body>
 
@@ -68,14 +68,16 @@
 
     <!-- Hero search -->
     <section class="hero-search">
-        <h2 class="hero-title">¿Qué querés comparar hoy? <svg class="hero-ai-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2 5.5L20 9l-5.5 2L12 17l-2.5-6L4 9l6-1.5z"/><path d="M20 1l.75 2.25L23 4l-2.25.75L20 7l-.75-2.25L17 4l2.25-.75z" opacity=".5"/><path d="M4 18l.5 1.5L6 20l-1.5.5L4 22l-.5-1.5L2 20l1.5-.5z" opacity=".4"/></svg></h2>
-        <div class="hero-input-wrap">
-            <svg class="hero-input-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="text" id="hero-search-input" class="hero-input" placeholder="Buscar temas, palabras clave, medios…" autocomplete="off">
-            <button id="hero-search-clear" class="hero-input-clear" hidden>&times;</button>
-            <span id="ai-status-indicator" class="ai-status" hidden></span>
-            <span class="hero-ai-badge" title="Búsqueda potenciada por IA"><svg class="hero-ai-badge-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l2 5.5L20 9l-5.5 2L12 17l-2.5-6L4 9l6-1.5z"/></svg><span class="hero-ai-badge-label">IA</span></span>
-            <div id="search-suggestions" class="search-suggestions" hidden></div>
+        <div id="hero-search-bar">
+            <h2 class="hero-title">¿Qué querés comparar hoy? <svg class="hero-ai-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2 5.5L20 9l-5.5 2L12 17l-2.5-6L4 9l6-1.5z"/><path d="M20 1l.75 2.25L23 4l-2.25.75L20 7l-.75-2.25L17 4l2.25-.75z" opacity=".5"/><path d="M4 18l.5 1.5L6 20l-1.5.5L4 22l-.5-1.5L2 20l1.5-.5z" opacity=".4"/></svg></h2>
+            <div class="hero-input-wrap">
+                <svg class="hero-input-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input type="text" id="hero-search-input" class="hero-input" placeholder="Buscar temas, palabras clave, medios…" autocomplete="off">
+                <button id="hero-search-clear" class="hero-input-clear" hidden>&times;</button>
+                <span id="ai-status-indicator" class="ai-status" hidden></span>
+                <span class="hero-ai-badge" title="Búsqueda potenciada por IA"><svg class="hero-ai-badge-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l2 5.5L20 9l-5.5 2L12 17l-2.5-6L4 9l6-1.5z"/></svg><span class="hero-ai-badge-label">IA</span></span>
+                <div id="search-suggestions" class="search-suggestions" hidden></div>
+            </div>
         </div>
         <div id="topics-chips" class="topics-chips" hidden></div>
         <div class="hero-actions-wrap">
@@ -392,6 +394,6 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/wordcloud2.js/1.2.2/wordcloud2.min.js"></script>
-<script src="/static/js/app.js?v=22"></script>
+<script src="/static/js/app.js?v=23"></script>
 </body>
 </html>

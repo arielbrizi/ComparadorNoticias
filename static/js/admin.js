@@ -178,6 +178,8 @@ function loadAll() {
         loadXStatus();
         loadXCampaigns();
         loadXUsage();
+    } else if (_activeTab === "feature-flags") {
+        loadFeatureFlags();
     }
     updateAIMonitorTimer();
 }
@@ -3328,3 +3330,76 @@ document.addEventListener("DOMContentLoaded", () => {
     const fs = document.getElementById("x-usage-filter-status");
     if (fs) fs.addEventListener("change", () => { _xUsagePage = 1; loadXUsage(); });
 });
+
+// ── Feature Flags ─────────────────────────────────────────────────────────
+
+async function loadFeatureFlags() {
+    const container = $("#feature-flags-wrap");
+    if (!container) return;
+    try {
+        const resp = await fetch("/api/admin/feature-flags");
+        if (resp.status === 403) { window.location.href = "/"; return; }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderFeatureFlags(data.flags || []);
+    } catch (err) {
+        console.error("Feature flags load failed:", err);
+        container.innerHTML = `<div class="admin-empty" style="color:#ea580c">Error de red</div>`;
+    }
+}
+
+function renderFeatureFlags(flags) {
+    const container = $("#feature-flags-wrap");
+    if (!container) return;
+    if (!flags.length) {
+        container.innerHTML = `<div class="admin-empty">No hay feature flags registrados.</div>`;
+        return;
+    }
+    const rows = flags.map(f => `
+        <div class="ff-row" data-flag="${escHtml(f.name)}">
+            <div class="ff-row-info">
+                <div class="ff-row-label">${escHtml(f.label)}</div>
+                <div class="ff-row-desc">${escHtml(f.description)}</div>
+                <div class="ff-row-saving" data-status></div>
+            </div>
+            <label class="x-toggle ff-row-toggle" title="${f.enabled ? "Habilitado" : "Deshabilitado"}">
+                <input type="checkbox" data-toggle ${f.enabled ? "checked" : ""}>
+                <span class="x-toggle-track"></span>
+            </label>
+        </div>
+    `).join("");
+    container.innerHTML = `<div class="ff-list">${rows}</div>`;
+
+    container.querySelectorAll(".ff-row").forEach(row => {
+        const name = row.dataset.flag;
+        const input = row.querySelector("input[data-toggle]");
+        const status = row.querySelector("[data-status]");
+        input.addEventListener("change", async () => {
+            const enabled = input.checked;
+            input.disabled = true;
+            status.textContent = "Guardando...";
+            status.style.color = "var(--text-dim)";
+            try {
+                const resp = await fetch("/api/admin/feature-flags", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, enabled }),
+                });
+                if (!resp.ok) {
+                    const body = await resp.json().catch(() => ({}));
+                    throw new Error(body.error || `HTTP ${resp.status}`);
+                }
+                status.textContent = enabled ? "Habilitado" : "Deshabilitado";
+                status.style.color = "var(--text-dim)";
+                setTimeout(() => { status.textContent = ""; }, 2500);
+            } catch (err) {
+                console.error("Feature flag save failed:", err);
+                input.checked = !enabled;
+                status.textContent = `Error: ${err.message || "no se pudo guardar"}`;
+                status.style.color = "#ea580c";
+            } finally {
+                input.disabled = false;
+            }
+        });
+    });
+}

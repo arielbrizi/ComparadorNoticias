@@ -27,6 +27,12 @@ from app.article_grouper import group_articles, is_event_expired
 from app.auth import get_current_user, require_admin, require_login, router as auth_router
 from app.comparator import compare_group_articles
 from app.config import CATEGORIES, SOURCES
+from app.feature_flags import (
+    describe_flags as describe_feature_flags,
+    get_all_flags as get_all_feature_flags,
+    is_known_flag as is_known_feature_flag,
+    set_flag as set_feature_flag,
+)
 from app.feed_reader import fetch_all_feeds
 from app.ai_search import (
     ai_news_search,
@@ -1573,6 +1579,56 @@ async def ai_config_public():
     return {
         "search_timeout_seconds": get_ollama_timeout(),
     }
+
+
+# ── Feature flags ────────────────────────────────────────────────────────
+
+@app.get("/api/feature-flags")
+async def feature_flags_public():
+    """Public feature flag values consumed by the frontend.
+
+    Solo expone qué widgets/secciones se renderizan; no devuelve metadata
+    sensible (label/description) que solo necesita el panel admin.
+    """
+    return {"flags": get_all_feature_flags()}
+
+
+@app.get("/api/admin/feature-flags")
+async def admin_feature_flags_get(_admin: dict = Depends(require_admin)):
+    """Return the full registry of flags with current values for the admin UI."""
+    return {"flags": describe_feature_flags()}
+
+
+@app.post("/api/admin/feature-flags")
+async def admin_feature_flags_set(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+):
+    """Toggle a single feature flag. Body: ``{"name": str, "enabled": bool}``."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    name = body.get("name")
+    enabled = body.get("enabled")
+    if not isinstance(name, str) or not name:
+        return JSONResponse(
+            {"error": "name must be a non-empty string"}, status_code=400,
+        )
+    if not is_known_feature_flag(name):
+        return JSONResponse(
+            {"error": f"Unknown feature flag: {name}"}, status_code=400,
+        )
+    if not isinstance(enabled, bool):
+        return JSONResponse(
+            {"error": "enabled must be a boolean"}, status_code=400,
+        )
+
+    ok = set_feature_flag(name, enabled)
+    if not ok:
+        return JSONResponse({"error": "Failed to update"}, status_code=500)
+    return {"ok": True, "name": name, "enabled": enabled}
 
 
 @app.get("/api/admin/ollama-config")

@@ -31,6 +31,35 @@ function getSearchTimeoutMs() {
     return _aiConfigTimeoutMs;
 }
 
+// ── Feature flags ────────────────────────────────────────────────────────
+// Aplican una clase al body por flag deshabilitado. La CSS reacciona desde
+// ahí. Si el fetch falla, asumimos defaults (todo habilitado) — preferimos
+// mostrar de más antes que romper la home si el backend está caído.
+let _featureFlags = {};
+
+function isFeatureEnabled(name) {
+    return _featureFlags[name] !== false;
+}
+
+async function loadFeatureFlags() {
+    try {
+        const resp = await fetch(`${API}/api/feature-flags`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        _featureFlags = data.flags || {};
+        applyFeatureFlags();
+    } catch (err) {
+        console.warn("Failed to load feature flags, assuming defaults:", err);
+    }
+}
+
+function applyFeatureFlags() {
+    document.body.classList.toggle(
+        "ff-hero-search-off",
+        _featureFlags.hero_search === false,
+    );
+}
+
 // ── Deep-link support ────────────────────────────────────────────────────
 const VALID_VIEWS = new Set(["noticias", "metricas", "semana", "importante", "temas", "nube"]);
 
@@ -86,6 +115,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     initAuth();
     loadDolarTicker();
     loadAIConfig();
+    loadFeatureFlags();
     track("page_view", { view: initialView, initial: true });
     await loadData();
     if (initialView !== "noticias") {
@@ -901,9 +931,14 @@ function renderTopicChips() {
         container.querySelectorAll(".topic-chip").forEach(btn => {
             btn.addEventListener("click", () => {
                 const query = btn.dataset.query;
-                const input = $("#hero-search-input");
-                input.value = query;
-                $("#hero-search-clear").hidden = false;
+                if (isFeatureEnabled("hero_search")) {
+                    const input = $("#hero-search-input");
+                    if (input) {
+                        input.value = query;
+                        const clear = $("#hero-search-clear");
+                        if (clear) clear.hidden = false;
+                    }
+                }
                 performAISearch(query);
             });
         });

@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/styles.css?v=21">
+    <link rel="stylesheet" href="/static/css/styles.css?v=23">
     <style>
         .admin-wrap { max-width: 1060px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
         .admin-header { margin-bottom: 1.5rem; }
@@ -363,6 +363,19 @@
             border: 1px dashed var(--border); border-radius: 6px; padding: 0.4rem 0.6rem;
             margin-top: 0.4rem; line-height: 1.35;
         }
+
+        /* Feature flags list */
+        .ff-list { display: flex; flex-direction: column; gap: 0.6rem; }
+        .ff-row {
+            display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;
+            padding: 0.85rem 1rem; border: 1px solid var(--border); border-radius: 8px;
+            background: rgba(255,255,255,0.02);
+        }
+        .ff-row-info { flex: 1; min-width: 0; }
+        .ff-row-label { font-size: 0.88rem; font-weight: 600; color: var(--text); margin-bottom: 0.2rem; }
+        .ff-row-desc { font-size: 0.72rem; color: var(--text-dim); line-height: 1.4; }
+        .ff-row-toggle { flex-shrink: 0; padding-top: 0.1rem; }
+        .ff-row-saving { font-size: 0.68rem; color: var(--text-dim); margin-top: 0.3rem; }
     </style>
 </head>
 <body>
@@ -400,6 +413,10 @@
         <button class="admin-tab" data-tab="x">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-2px;margin-right:4px"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
             Campañas X
+        </button>
+        <button class="admin-tab" data-tab="feature-flags">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+            Feature Flags
         </button>
     </div>
 
@@ -922,10 +939,26 @@
 
     </div><!-- /panel-x -->
 
+    <!-- ═══ FEATURE FLAGS TAB ═══ -->
+    <div class="admin-tab-panel" id="panel-feature-flags">
+
+    <div class="admin-section">
+        <div class="admin-card">
+            <h3>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+                Feature Flags
+            </h3>
+            <p class="admin-card-desc">Habilitá o deshabilitá funcionalidades visibles para los usuarios. Los cambios se propagan en menos de 30 segundos a todos los workers.</p>
+            <div id="feature-flags-wrap"><div class="admin-loading"><div class="spinner"></div></div></div>
+        </div>
+    </div>
+
+    </div><!-- /panel-feature-flags -->
+
     <!-- Invocation detail modal -->
     <div id="admin-modal-host"></div>
 </div>
 
-<script src="/static/js/admin.js?v=18"></script>
+<script src="/static/js/admin.js?v=19"></script>
 </body>
 </html>

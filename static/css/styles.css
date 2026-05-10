@@ -3121,3 +3121,64 @@ a.brand { text-decoration: none; color: inherit; cursor: pointer; }
     .search-paywall-subtitle { font-size: 0.8rem; }
     .news-grid-paywall { min-height: 460px; }
 }
+
+/* ── Feature flag: hero_search OFF ──────────────────────────────────────
+ * Cuando el flag está deshabilitado el JS agrega body.ff-hero-search-off.
+ * Ocultamos el bloque título+input y forzamos los chips de Temas del día
+ * visibles en desktop (en mobile ya se muestran por @media pointer: coarse,
+ * estos selectores son no-op en ese breakpoint).
+ */
+body.ff-hero-search-off #hero-search-bar { display: none; }
+
+body.ff-hero-search-off .topics-chips:not([hidden]) {
+    display: flex;
+    gap: 0.45rem;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding: 0.15rem 0.25rem;
+    max-width: 540px;
+    margin: 0 auto 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+body.ff-hero-search-off .topics-chips::-webkit-scrollbar { display: none; }
+
+body.ff-hero-search-off .topics-chips .topic-chip {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.4rem 0.75rem;
+    background: var(--bg-glass);
+    border: 1px solid var(--border-hi);
+    border-radius: 999px;
+    font-size: 0.78rem;
+    color: var(--text);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+body.ff-hero-search-off .topics-chips .topic-chip:hover,
+body.ff-hero-search-off .topics-chips .topic-chip:active {
+    background: rgba(64,136,199,0.12);
+    border-color: rgba(64,136,199,0.3);
+}
+body.ff-hero-search-off .topics-chips .topic-chip-emoji {
+    font-size: 0.9rem;
+    line-height: 1;
+}
+body.ff-hero-search-off .topics-chips .topic-chip-loading {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+body.ff-hero-search-off .topics-chips .topic-chip-cached {
+    font-size: 0.6rem;
+    color: var(--green, #4ade80);
+    opacity: 0.4;
+    margin-left: 0.1rem;
+}

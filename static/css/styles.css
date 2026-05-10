@@ -3123,14 +3123,19 @@ a.brand { text-decoration: none; color: inherit; cursor: pointer; }
 }
 
 /* ── Feature flag: hero_search OFF ──────────────────────────────────────
- * Cuando el flag está deshabilitado el JS agrega body.ff-hero-search-off.
+ * Cuando el flag está deshabilitado el backend agrega .ff-hero-search-off
+ * directamente al <html> (server-side, antes del primer paint, sin flash).
+ * El JS también lo aplica para reflejar cambios en vivo si el admin lo
+ * togglea con la pestaña abierta. Selectores sin anclaje (.ff- en vez de
+ * body.ff-) para que matcheen tanto en <html> como en <body>.
+ *
  * Ocultamos el bloque título+input y forzamos los chips de Temas del día
  * visibles en desktop (en mobile ya se muestran por @media pointer: coarse,
  * estos selectores son no-op en ese breakpoint).
  */
-body.ff-hero-search-off #hero-search-bar { display: none; }
+.ff-hero-search-off #hero-search-bar { display: none; }
 
-body.ff-hero-search-off .topics-chips:not([hidden]) {
+.ff-hero-search-off .topics-chips:not([hidden]) {
     display: flex;
     gap: 0.45rem;
     overflow-x: auto;
@@ -3142,9 +3147,9 @@ body.ff-hero-search-off .topics-chips:not([hidden]) {
     justify-content: center;
     flex-wrap: wrap;
 }
-body.ff-hero-search-off .topics-chips::-webkit-scrollbar { display: none; }
+.ff-hero-search-off .topics-chips::-webkit-scrollbar { display: none; }
 
-body.ff-hero-search-off .topics-chips .topic-chip {
+.ff-hero-search-off .topics-chips .topic-chip {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
@@ -3158,16 +3163,16 @@ body.ff-hero-search-off .topics-chips .topic-chip {
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s;
 }
-body.ff-hero-search-off .topics-chips .topic-chip:hover,
-body.ff-hero-search-off .topics-chips .topic-chip:active {
+.ff-hero-search-off .topics-chips .topic-chip:hover,
+.ff-hero-search-off .topics-chips .topic-chip:active {
     background: rgba(64,136,199,0.12);
     border-color: rgba(64,136,199,0.3);
 }
-body.ff-hero-search-off .topics-chips .topic-chip-emoji {
+.ff-hero-search-off .topics-chips .topic-chip-emoji {
     font-size: 0.9rem;
     line-height: 1;
 }
-body.ff-hero-search-off .topics-chips .topic-chip-loading {
+.ff-hero-search-off .topics-chips .topic-chip-loading {
     display: flex;
     align-items: center;
     gap: 0.35rem;
@@ -3176,7 +3181,7 @@ body.ff-hero-search-off .topics-chips .topic-chip-loading {
     color: var(--text-dim);
     white-space: nowrap;
 }
-body.ff-hero-search-off .topics-chips .topic-chip-cached {
+.ff-hero-search-off .topics-chips .topic-chip-cached {
     font-size: 0.6rem;
     color: var(--green, #4ade80);
     opacity: 0.4;

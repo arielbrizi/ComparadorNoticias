@@ -54,7 +54,11 @@ async function loadFeatureFlags() {
 }
 
 function applyFeatureFlags() {
-    document.body.classList.toggle(
+    // El backend ya aplica esta clase a <html> antes del primer paint para
+    // evitar el flash. El JS la mantiene sincronizada para que togglearla
+    // desde el admin con la pestaña abierta tenga efecto inmediato (en la
+    // próxima recarga el server-side render se encarga solo).
+    document.documentElement.classList.toggle(
         "ff-hero-search-off",
         _featureFlags.hero_search === false,
     );

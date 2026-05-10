@@ -77,6 +77,38 @@ class TestPublicFeatureFlags:
         assert resp.status_code == 200
 
 
+class TestServerSideFlagInjection:
+    """Verifica que GET / inyecta las clases de feature flag en <html>
+    para evitar el flash de hero search al cargar la página."""
+
+    async def test_flag_enabled_no_class(self, client, monkeypatch):
+        # Default: hero_search habilitado → no debe aparecer la clase off.
+        monkeypatch.setattr("app.ai_store._runtime_cache_ts", 0)
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        html = resp.text
+        assert "ff-hero-search-off" not in html
+        assert "__INITIAL_FLAG_CLASSES__" not in html  # placeholder reemplazado
+
+    async def test_flag_disabled_injects_class(self, client, monkeypatch):
+        from app.feature_flags import set_flag
+        monkeypatch.setattr("app.user_store.ADMIN_EMAILS", ["admin@test.com"])
+        # Forzar el flag a OFF y bustear el cache de runtime.
+        assert set_flag("hero_search", False) is True
+        monkeypatch.setattr("app.ai_store._runtime_cache_ts", 0)
+
+        # También bustear el HTML cache que cachea el template raw.
+        from app import main
+        main._HTML_CACHE.clear()
+
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        html = resp.text
+        # El <html> raíz debe tener la clase aplicada antes de cualquier paint.
+        assert 'class="ff-hero-search-off"' in html
+        assert "__INITIAL_FLAG_CLASSES__" not in html
+
+
 class TestAdminFeatureFlagsGet:
     async def test_requires_admin(self, client):
         resp = await client.get("/api/admin/feature-flags")

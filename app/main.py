@@ -181,14 +181,45 @@ def _bust_cache(html: str) -> str:
     return _BUST_RE.sub(_replace, html)
 
 
+_FLAG_PLACEHOLDER = "__INITIAL_FLAG_CLASSES__"
+
+
+def _initial_flag_classes() -> str:
+    """Return the space-separated class list to inject into <html>.
+
+    Convención: por cada flag deshabilitado emitimos ``ff-<name>-off`` con
+    el nombre del flag en kebab-case. Si todo está habilitado el resultado
+    es una cadena vacía y la página queda sin clases extra.
+
+    Esto permite que el primer paint del navegador ya tenga el estado
+    correcto (sin flash de contenido que después se oculta).
+    """
+    classes = []
+    try:
+        for name, enabled in get_all_feature_flags().items():
+            if not enabled:
+                classes.append(f"ff-{name.replace('_', '-')}-off")
+    except Exception as exc:
+        logger.warning("Failed to compute initial flag classes: %s", exc)
+    return " ".join(classes)
+
+
 def _serve_html(filename: str) -> HTMLResponse:
-    """Serve an HTML file with cache-busted asset URLs."""
+    """Serve an HTML file with cache-busted asset URLs and feature flag classes.
+
+    El template raw (con placeholders) se cachea, pero la sustitución del
+    placeholder de feature flags ocurre en cada request para que cualquier
+    cambio del admin se refleje en la próxima carga sin invalidar caches.
+    """
     if filename not in _HTML_CACHE:
         filepath = os.path.join(STATIC_DIR, filename)
         raw = Path(filepath).read_text(encoding="utf-8")
         _HTML_CACHE[filename] = _bust_cache(raw) if _ASSET_HASHES else raw
+    html = _HTML_CACHE[filename]
+    if _FLAG_PLACEHOLDER in html:
+        html = html.replace(_FLAG_PLACEHOLDER, _initial_flag_classes())
     return HTMLResponse(
-        _HTML_CACHE[filename],
+        html,
         headers={"Cache-Control": "no-cache"},
     )
 

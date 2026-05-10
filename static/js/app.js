@@ -62,6 +62,20 @@ function applyFeatureFlags() {
         "ff-hero-search-off",
         _featureFlags.hero_search === false,
     );
+    // Si el flag pasó a OFF y todavía no hay chips renderizados (ej: desktop
+    // que originalmente solo los pintaba en touch), forzar un render ahora
+    // que sí queremos verlos como única vía a los temas.
+    if (_shouldRenderInlineChips() && _topicsCache?.length) {
+        renderTopicChips();
+    }
+}
+
+// Cuando el flag hero_search está OFF, los chips de Temas del día son la
+// única vía para llegar a los temas curados desde la home. Por eso forzamos
+// el render inline aún en desktop (originalmente solo se renderizaban en
+// touch porque desktop tenía el panel de search-suggestions del input).
+function _shouldRenderInlineChips() {
+    return _isTouchDevice || !isFeatureEnabled("hero_search");
 }
 
 // ── Deep-link support ────────────────────────────────────────────────────
@@ -769,7 +783,7 @@ function setupHeroSearch() {
     });
 
     prefetchTopics();
-    if (_isTouchDevice) renderTopicChips();
+    if (_shouldRenderInlineChips()) renderTopicChips();
 
     setInterval(() => {
         if (!_isTopicsCacheValid() && !_topicsLoading) {
@@ -830,9 +844,10 @@ async function prefetchTopics() {
         clearTimeout(timer);
         _topicsLoading = false;
         _topicsLoadingSince = 0;
-        if (_isTouchDevice) {
+        if (_shouldRenderInlineChips()) {
             renderTopicChips();
-        } else {
+        }
+        if (!_isTouchDevice && isFeatureEnabled("hero_search")) {
             const input = $("#hero-search-input");
             if (input && document.activeElement === input && !input.value.trim()) {
                 showSuggestions();
@@ -852,8 +867,8 @@ function _scheduleCachedRecheck() {
             const data = await resp.json();
             if (data.search_cached?.length) {
                 _topicsSearchCached = new Set(data.search_cached);
-                if (_isTouchDevice) renderTopicChips();
-                else {
+                if (_shouldRenderInlineChips()) renderTopicChips();
+                if (!_isTouchDevice && isFeatureEnabled("hero_search")) {
                     const input = $("#hero-search-input");
                     if (input && document.activeElement === input && !input.value.trim()) showSuggestions();
                     $$(".suggestion-cached").forEach(el => el.remove());
